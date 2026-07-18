@@ -13,7 +13,11 @@
 #
 set -euo pipefail
 
-REPO_DIR="$(cd "$(dirname "$0")" && pwd)"
+# pwd -P, to match px4_resolve()'s canonicalisation. With the logical pwd a
+# symlinked checkout gives REPO_DIR and PX4_RESOLVED two different strings for
+# the same directory, and the "target cannot be this repository" guards below
+# compare unlike things and pass when they should fire.
+REPO_DIR="$(cd -P "$(dirname "$0")" && pwd -P)"
 
 # ---------------------------------------------------------------- output ----
 if [ -t 1 ] && [ -z "${NO_COLOR:-}" ] && command -v tput >/dev/null 2>&1 \
@@ -82,7 +86,8 @@ Target PX4 tree resolution order (first hit wins, and the choice is reported):
   2. $PX4_DIR environment variable
   3. auto-detection:
        a. an enclosing PX4 tree above the current directory or above this repo
-       b. next to this repo: ../PX4-Autopilot, ../../PX4-Autopilot, the parent
+       b. next to this repo: ../PX4-Autopilot, ../../PX4-Autopilot,
+          ../px4/PX4-Autopilot, the parent
        c. conventional spots under $HOME (PX4-Autopilot, src/, Code/, dev/,
           workspace/, git/, projects/, ...)
        d. a bounded, pruned, time-limited search under $HOME (max depth 4)
@@ -171,8 +176,10 @@ AF_DIR="$PX4_DIR/ROMFS/px4fmu_common/init.d-posix/airframes"
 BUILD_DIR="$PX4_DIR/build/px4_sitl_nolockstep"
 BRIDGE_BIN="$BUILD_DIR/build_flightaxis_bridge/flightaxis_bridge"
 
-AIRFRAMES="1200_flightaxis_plane 1201_flightaxis_quad 1202_flightaxis_quadplane 1203_flightaxis_heli"
-MODELS="plane quad quadplane heli"
+# Both lists come from scripts/detect-px4.sh, the single source of truth for
+# what this integration owns (see the "what we own" block there).
+AIRFRAMES="$FA_AIRFRAMES"
+MODELS="$FA_MODELS"
 
 INCLUDE_LINE='include(sitl_targets_flightaxis.cmake)'
 ANCHOR_LINE='include(sitl_targets_flightgear.cmake)'
@@ -239,10 +246,16 @@ fi
 # ================================================================= 2/7 ======
 step "2/7  Checking for conflicts"
 
-# SYS_AUTOSTART id collisions: any airframe in our reserved 1200-1219 range that
-# is not one of ours.
+# SYS_AUTOSTART id collisions.
+#
+# We install ids 1200-1203, so only a *different* airframe occupying one of
+# those four ids is a real collision. The check used to span the whole reserved
+# 1200-1219 range, which put it in direct conflict with README's "Adding a new
+# aircraft": a user's own 1204_flightaxis_cessna made the installer refuse
+# outright, and that refusal honoured neither --force nor --dry-run. Ids
+# 1204-1219 stay reserved by documentation, but they are the user's to use.
 COLLISIONS=""
-for f in "$AF_DIR"/12[01][0-9]_*; do
+for f in "$AF_DIR"/120[0-3]_*; do
 	[ -e "$f" ] || continue
 	base="$(basename "$f")"
 	case " $AIRFRAMES " in
@@ -251,13 +264,20 @@ for f in "$AF_DIR"/12[01][0-9]_*; do
 	esac
 done
 if [ -n "$COLLISIONS" ]; then
-	printf '%serror:%s SYS_AUTOSTART id collision in %s\n' "$C_RED" "$C_OFF" "$AF_DIR" >&2
-	for c in $COLLISIONS; do printf '       %s occupies an id in the 1200-1219 range we reserve\n' "$c" >&2; done
-	printf '       Refusing to clobber airframes that are not ours. Move or rename them,\n' >&2
-	printf '       or renumber this integration (airframe files + README) and retry.\n' >&2
-	exit 1
+	MSG="SYS_AUTOSTART id collision in $AF_DIR
+$(for c in $COLLISIONS; do printf '       %s occupies one of the ids 1200-1203 that this integration installs\n' "$c"; done)
+       Installing would give two airframes the same SYS_AUTOSTART id. Move or
+       rename them, or renumber this integration (airframe files + README)."
+	if [ "$FORCE" -eq 1 ] || [ "$DRY_RUN" -eq 1 ]; then
+		warn "$MSG"
+		warn "continuing (--force/--dry-run)."
+	else
+		die "$MSG
+       Re-run with --force to install anyway."
+	fi
+else
+	ok "no SYS_AUTOSTART collisions on the ids 1200-1203 we install"
 fi
-ok "no SYS_AUTOSTART collisions in the 1200-1219 range"
 
 # Uncommitted local modifications to files we are about to overwrite.
 if px4_is_git "$PX4_DIR"; then
@@ -309,12 +329,12 @@ step "3/7  Backing up PX4-owned CMakeLists.txt files"
 backup() {
 	src="$1"; shift
 	bak="$src.flightaxis.bak"
-	rel="${src#$PX4_DIR/}"
+	rel="${src#"$PX4_DIR"/}"
 
 	if [ ! -f "$bak" ]; then
 		run cp -p "$src" "$bak"
-		ok "backed up $rel -> ${bak#$PX4_DIR/}"
-		[ "$DRY_RUN" -eq 1 ] || record "created  ${bak#$PX4_DIR/}"
+		ok "backed up $rel -> ${bak#"$PX4_DIR"/}"
+		[ "$DRY_RUN" -eq 1 ] || record "created  ${bak#"$PX4_DIR"/}"
 		return 0
 	fi
 
@@ -323,7 +343,7 @@ backup() {
 	"$@" "$src" > "$pristine" 2>/dev/null || { rm -f "$pristine"; }
 	if [ -f "$pristine" ] && cmp -s "$pristine" "$bak"; then
 		rm -f "$pristine"
-		info "backup already exists and still matches: ${bak#$PX4_DIR/}"
+		info "backup already exists and still matches: ${bak#"$PX4_DIR"/}"
 		return 0
 	fi
 
@@ -332,7 +352,7 @@ backup() {
          old one would make uninstall.sh revert that change."
 	if [ "$DRY_RUN" -eq 1 ]; then
 		rm -f "$pristine"
-		printf '    %s[dry-run]%s refresh %s\n' "$C_YEL" "$C_OFF" "${bak#$PX4_DIR/}"
+		printf '    %s[dry-run]%s refresh %s\n' "$C_YEL" "$C_OFF" "${bak#"$PX4_DIR"/}"
 		return 0
 	fi
 	if [ -f "$pristine" ]; then
@@ -341,8 +361,8 @@ backup() {
 	else
 		cp -p "$src" "$bak"
 	fi
-	ok "refreshed backup ${bak#$PX4_DIR/}"
-	record "refreshed ${bak#$PX4_DIR/}"
+	ok "refreshed backup ${bak#"$PX4_DIR"/}"
+	record "refreshed ${bak#"$PX4_DIR"/}"
 }
 # fa_strip_include takes the line to remove as its second argument; the backup
 # helper passes only the file, so bind INCLUDE_LINE here.
@@ -354,6 +374,14 @@ backup "$AF_CMAKE"  fa_strip_airframes
 # ================================================================= 4/7 ======
 step "4/7  Copying the FlightAxis payload"
 
+# Deliberately NO --delete here, and none in sync-to-px4.sh either.
+#
+# The payload directory is where README's "Adding a new aircraft" tells users to
+# put models/<name>.json, so rsync'ing --delete into it would destroy their work
+# on every upgrade. The cost of that choice is that a file we drop in a later
+# version lingers in the tree; uninstall.sh removes exactly our manifest, so the
+# clean way to shed a stale file is uninstall + install. Writing INTO the PX4
+# tree never deletes; only sync-from-px4.sh (repo is the mirror) uses --delete.
 copy_tree() {
 	# copy_tree <src-dir>/ <dst-dir>/ ; preserves modes, excludes __pycache__
 	if command -v rsync >/dev/null 2>&1; then
@@ -370,36 +398,39 @@ copy_tree() {
 	fi
 }
 
-copy_tree "$REPO_DIR/Tools/simulation/flightaxis/" "$PX4_DIR/Tools/simulation/flightaxis/"
-ok "Tools/simulation/flightaxis/"
-record "copied   Tools/simulation/flightaxis/  (whole directory)"
+# A copy that fails midway used to abort on the raw rsync/cp error under
+# `set -e`, saying nothing about the partial payload now sitting in the tree and
+# nothing about uninstall.sh. Route every copy through die() instead, which
+# prints the change list and the undo command.
+copy_tree "$REPO_DIR/Tools/simulation/flightaxis/" "$PX4_DIR/Tools/simulation/flightaxis/" \
+	|| die "failed to copy Tools/simulation/flightaxis/ into the PX4 tree.
+       The tree may now hold a partially copied payload."
+if [ "$DRY_RUN" -eq 0 ]; then
+	ok "Tools/simulation/flightaxis/"
+	record "copied   Tools/simulation/flightaxis/  (payload manifest)"
+fi
 
-run cp -p "$REPO_DIR/src/modules/simulation/simulator_mavlink/sitl_targets_flightaxis.cmake" "$SIM_DIR/"
-ok "src/modules/simulation/simulator_mavlink/sitl_targets_flightaxis.cmake"
-record "copied   src/modules/simulation/simulator_mavlink/sitl_targets_flightaxis.cmake"
+run cp -p "$REPO_DIR/src/modules/simulation/simulator_mavlink/sitl_targets_flightaxis.cmake" "$SIM_DIR/" \
+	|| die "failed to copy sitl_targets_flightaxis.cmake into $SIM_CMAKE_REL's directory."
+if [ "$DRY_RUN" -eq 0 ]; then
+	ok "src/modules/simulation/simulator_mavlink/sitl_targets_flightaxis.cmake"
+	record "copied   src/modules/simulation/simulator_mavlink/sitl_targets_flightaxis.cmake"
+fi
 
 for a in $AIRFRAMES; do
-	run cp -p "$REPO_DIR/ROMFS/px4fmu_common/init.d-posix/airframes/$a" "$AF_DIR/"
-	ok "ROMFS/px4fmu_common/init.d-posix/airframes/$a"
-	record "copied   ROMFS/px4fmu_common/init.d-posix/airframes/$a"
+	run cp -p "$REPO_DIR/ROMFS/px4fmu_common/init.d-posix/airframes/$a" "$AF_DIR/" \
+		|| die "failed to copy the airframe $a into the PX4 tree."
+	if [ "$DRY_RUN" -eq 0 ]; then
+		ok "ROMFS/px4fmu_common/init.d-posix/airframes/$a"
+		record "copied   ROMFS/px4fmu_common/init.d-posix/airframes/$a"
+	fi
 done
 
 if [ "$DRY_RUN" -eq 0 ]; then
-	EXPECTED="Tools/simulation/flightaxis/sitl_run.sh
-Tools/simulation/flightaxis/flightaxis_bridge/CMakeLists.txt
-Tools/simulation/flightaxis/flightaxis_bridge/get_FAbridge_params.py
-Tools/simulation/flightaxis/flightaxis_bridge/FA_check.py
-Tools/simulation/flightaxis/flightaxis_bridge/cmake/FindMAVLink.cmake
-Tools/simulation/flightaxis/flightaxis_bridge/src/flightaxis_bridge.cpp
-src/modules/simulation/simulator_mavlink/sitl_targets_flightaxis.cmake"
-	for m in $MODELS; do
-		EXPECTED="$EXPECTED
-Tools/simulation/flightaxis/flightaxis_bridge/models/$m.json"
-	done
-	for a in $AIRFRAMES; do
-		EXPECTED="$EXPECTED
-ROMFS/px4fmu_common/init.d-posix/airframes/$a"
-	done
+	# The manifest is shared with uninstall.sh (fa_payload_files, in
+	# scripts/detect-px4.sh) so what install verifies is exactly what uninstall
+	# removes - they cannot drift.
+	EXPECTED="$(fa_payload_files)"
 	# Collected in a variable rather than through a predictable path in the
 	# world-writable /tmp (/tmp/.flightaxis_missing.$$ was a symlink-attack
 	# target and needed no file at all).
@@ -423,10 +454,15 @@ fi
 step "5/7  Registering with the PX4 build system"
 
 # --- 5a: include(sitl_targets_flightaxis.cmake) -----------------------------
-if grep -qF "$INCLUDE_LINE" "$SIM_CMAKE"; then
+# fa_has_include is the exact counterpart of the fa_strip_include that
+# uninstall.sh uses: same trimmed whole-line comparison, so an indented include
+# (legal CMake, and what README Method 2 invites) is detected here AND removed
+# there. An unanchored grep -qF here also matched a commented-out include and
+# reported "already includes", producing a build with no flightaxis targets.
+if fa_has_include "$SIM_CMAKE" "$INCLUDE_LINE"; then
 	ok "$SIM_CMAKE_REL already includes sitl_targets_flightaxis.cmake (no change)"
 else
-	grep -qF "$ANCHOR_LINE" "$SIM_CMAKE" || die \
+	fa_has_include "$SIM_CMAKE" "$ANCHOR_LINE" || die \
 "could not find the anchor line
          $ANCHOR_LINE
        in $SIM_CMAKE_REL
@@ -435,13 +471,30 @@ else
          $INCLUDE_LINE"
 
 	# Insert immediately before the flightgear include (keeps the list
-	# alphabetically sorted, which is how PX4 maintains it).
+	# alphabetically sorted, which is how PX4 maintains it). The anchor is
+	# matched trimmed - the same test fa_has_include just passed, so we can
+	# never "find" an anchor here that the awk then fails to match - and our
+	# line copies the anchor's own indentation and line ending.
 	TMP="$SIM_CMAKE.flightaxis.tmp.$$"
 	awk -v ins="$INCLUDE_LINE" -v anchor="$ANCHOR_LINE" '
-		!done && index($0, anchor) == 1 { print ins; done = 1 }
-		{ print }
+		{
+			line = $0; cr = ""
+			if (line ~ /\r$/) { cr = "\r"; sub(/\r$/, "", line) }
+			if (!done) {
+				t = line
+				sub(/^[[:space:]]+/, "", t); sub(/[[:space:]]+$/, "", t)
+				if (t == anchor) {
+					indent = line
+					sub(/[^ \t].*$/, "", indent)
+					print indent ins cr
+					done = 1
+				}
+			}
+			print line cr
+		}
 	' "$SIM_CMAKE" > "$TMP"
-	grep -qF "$INCLUDE_LINE" "$TMP" || { rm -f "$TMP"; die "splice into $SIM_CMAKE_REL produced no change"; }
+	fa_has_include "$TMP" "$INCLUDE_LINE" \
+		|| { rm -f "$TMP"; die "splice into $SIM_CMAKE_REL produced no change"; }
 
 	if [ "$DRY_RUN" -eq 1 ]; then
 		printf '    %s[dry-run]%s would insert "%s" before "%s" in %s:\n' \
@@ -496,15 +549,21 @@ $(for a in $AIRFRAMES; do printf '         %s\n' "$a"; done)"
 	# "is each name present?" is not enough on its own: the CRLF duplication bug
 	# re-emitted every entry and still passed that check. Count them, and require
 	# every one to sit inside the px4_add_romfs_files() list.
-	N_ENTRIES="$(grep -cE "^[[:space:]]*12[01][0-9]_flightaxis_" "$TMP" || true)"
+	# Counted with FA_ENTRY_RE (the exact four names), not an id range: a
+	# user-authored 1204_flightaxis_cessna is not ours and must not be counted,
+	# or this check fails on a tree that is perfectly correct.
+	N_ENTRIES="$(grep -cE "$FA_ENTRY_RE" "$TMP" || true)"
 	N_EXPECT="$(printf '%s\n' $AIRFRAMES | grep -c . || true)"
 	[ "$N_ENTRIES" -eq "$N_EXPECT" ] || { rm -f "$TMP"; die \
 		"splice into $AF_CMAKE_REL produced $N_ENTRIES flightaxis entries, expected $N_EXPECT
        (duplicate or stray entries - refusing to write the file)"; }
-	N_INSIDE="$(awk '
+	N_INSIDE="$(awk -v entry_re="$FA_ENTRY_RE" '
 		/^px4_add_romfs_files\(/ { inlist = 1; next }
 		inlist && /^[ \t]*\)/    { inlist = 0; next }
-		inlist && /^[ \t]*12[01][0-9]_flightaxis_/ { n++ }
+		inlist {
+			line = $0; sub(/\r$/, "", line)
+			if (line ~ entry_re) { n++ }
+		}
 		END { print n + 0 }
 	' "$TMP")"
 	[ "$N_INSIDE" -eq "$N_EXPECT" ] || { rm -f "$TMP"; die \
@@ -562,12 +621,20 @@ else
 
 	[ -x "$BRIDGE_BIN" ] || die "the build reported success but the bridge binary is missing:
        $BRIDGE_BIN"
-	ok "bridge binary: ${BRIDGE_BIN#$PX4_DIR/}"
+	ok "bridge binary: ${BRIDGE_BIN#"$PX4_DIR"/}"
 fi
 
 # ================================================================= 7/7 ======
 step "7/7  Verifying the installation"
 
+# The whole failure path here used to be dead code. Under `set -euo pipefail` a
+# bare `cmd` / `[ ... ]` on the line before `vcheck $?` exits the shell the
+# moment it fails, so vcheck never ran: no FAIL line, no summary, no die()
+# message - the installer just stopped with status 1 straight after the last
+# `ok`, immediately after a 30-minute build, in the one code path whose entire
+# job is to explain that the files installed but the build output is wrong.
+# Every check below therefore runs as `if cmd; then vcheck 0 ... else vcheck 1
+# ... fi`, so the failure is reported rather than fatal.
 VERIFY_FAIL=0
 vcheck() {
 	if [ "$1" -eq 0 ]; then ok "$2"; else
@@ -583,8 +650,11 @@ if command -v python3 >/dev/null 2>&1; then
 		MODELS_DIR="$REPO_DIR/Tools/simulation/flightaxis/flightaxis_bridge/models"
 	fi
 	for m in $MODELS; do
-		python3 -c "import json,sys; json.load(open(sys.argv[1]))" "$MODELS_DIR/$m.json" >/dev/null 2>&1
-		vcheck $? "models/$m.json parses as JSON"
+		if python3 -c "import json,sys; json.load(open(sys.argv[1]))" "$MODELS_DIR/$m.json" >/dev/null 2>&1; then
+			vcheck 0 "models/$m.json parses as JSON"
+		else
+			vcheck 1 "models/$m.json parses as JSON"
+		fi
 	done
 
 	# get_FAbridge_params.py emits argv for each model (it resolves the JSON
@@ -611,18 +681,27 @@ else
 	if command -v ninja >/dev/null 2>&1 && [ -f "$BUILD_DIR/build.ninja" ]; then
 		TARGETS="$(ninja -C "$BUILD_DIR" -t targets all 2>/dev/null | cut -d: -f1 || true)"
 		for m in $MODELS; do
-			printf '%s\n' "$TARGETS" | grep -qx "flightaxis_$m"
-			vcheck $? "make target flightaxis_$m exists"
+			if printf '%s\n' "$TARGETS" | grep -qx "flightaxis_$m"; then
+				vcheck 0 "make target flightaxis_$m exists"
+			else
+				vcheck 1 "make target flightaxis_$m exists"
+			fi
 		done
 	else
 		info "ninja not available; skipping the make-target check"
 	fi
 	for a in $AIRFRAMES; do
-		[ -f "$BUILD_DIR/etc/init.d-posix/airframes/$a" ]
-		vcheck $? "airframe installed: build/px4_sitl_nolockstep/etc/init.d-posix/airframes/$a"
+		if [ -f "$BUILD_DIR/etc/init.d-posix/airframes/$a" ]; then
+			vcheck 0 "airframe installed: build/px4_sitl_nolockstep/etc/init.d-posix/airframes/$a"
+		else
+			vcheck 1 "airframe installed: build/px4_sitl_nolockstep/etc/init.d-posix/airframes/$a"
+		fi
 	done
-	[ -x "$BRIDGE_BIN" ]
-	vcheck $? "bridge binary present and executable"
+	if [ -x "$BRIDGE_BIN" ]; then
+		vcheck 0 "bridge binary present and executable"
+	else
+		vcheck 1 "bridge binary present and executable"
+	fi
 fi
 
 [ "$VERIFY_FAIL" -eq 0 ] || die "post-install verification failed (see FAIL lines above)."

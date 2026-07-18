@@ -15,8 +15,16 @@ means this work is a derivative work, and GPLv3 propagates.
 
 The rest of the integration follows PX4's BSD-3-Clause bridge pattern, but a
 combined work containing GPLv3 code is distributed under GPLv3. BSD-3-Clause is
-GPL-compatible, so the PX4-derived files may be combined; their original notices
-are retained below and in the file headers.
+GPL-compatible, so the PX4-derived files may be combined.
+
+**Where the notices live.** Files that carry a BSD-3-Clause notice upstream keep
+it verbatim in their own header. Two files are reused verbatim from upstream
+sources that ship them *without* any header notice —
+`cmake/FindMAVLink.cmake` (PX4-FlightGear-Bridge) and
+`Tools/simulation/flightaxis/sitl_run.sh` (PX4-Autopilot). We have not added a
+notice to either, because inventing a copyright line that the copyright holder
+never wrote would misstate the provenance. Their origin and licence are recorded
+in the table below instead, which is where you should look for those two.
 
 ## Provenance by file
 
@@ -31,7 +39,9 @@ are retained below and in the file headers.
 | `geo_mag_declination.{cpp,h}` | **Verbatim** from PX4-FlightGear-Bridge (which itself carries it verbatim from the MAV GEO Library) | BSD-3, © 2014 MAV GEO Library (MAVGEO) |
 
 `Tools/simulation/flightaxis/flightaxis_bridge/cmake/FindMAVLink.cmake` — verbatim
-from PX4-FlightGear-Bridge (BSD-3, © 2020 ThunderFly s.r.o.).
+from PX4-FlightGear-Bridge (BSD-3, © 2020 ThunderFly s.r.o.), byte-for-byte
+including its lack of a header notice: the upstream file carries none, so there
+is none here either and this entry is the notice of record.
 
 `Tools/simulation/flightaxis/sitl_run.sh`, `flightaxis_bridge/CMakeLists.txt`,
 `src/modules/simulation/simulator_mavlink/sitl_targets_flightaxis.cmake` and the

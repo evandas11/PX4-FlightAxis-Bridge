@@ -51,13 +51,17 @@ Everything except the top-level documents and scripts sits at exactly the path i
 
 ```
 README.md                                # this file - the user manual
+RUNNING.md                               # day-to-day operation, channel maps, troubleshooting
 FLIGHTAXIS_PX4_INTEGRATION.md            # the spec - design rationale, frame conversions, timing
-README-DONT-FORGET.md                    # maintainer note: keeping repo and PX4 tree in sync
+CONTRIBUTING.md                          # maintainer notes: keeping repo and PX4 tree in sync
+COPYRIGHT.md                             # per-file provenance and licensing
 LICENSE
 .gitignore
+.gitattributes
 
 Tools/simulation/flightaxis/
 ├── sitl_run.sh                          # runner invoked by the make target
+├── hitl_run.sh                          # hardware-in-the-loop runner
 └── flightaxis_bridge/
     ├── CMakeLists.txt
     ├── FA_check.py                      # sanity-ping RealFlight :18083 before start
@@ -98,7 +102,8 @@ installer refuses.
 ### Method 1 — Automatic install (recommended)
 
 ```bash
-git clone https://github.com/<you>/PX4-FlightAxis-Bridge.git
+# replace YOUR-USER with wherever you cloned this from
+git clone https://github.com/YOUR-USER/PX4-FlightAxis-Bridge.git
 cd PX4-FlightAxis-Bridge
 ./install.sh
 ```
@@ -129,7 +134,8 @@ PX4_DIR=/path/to/PX4-Autopilot ./install.sh
 3. auto-detection, in tiers — the first tier that finds anything decides:
    a. a PX4 checkout *containing* the current directory or containing this repo (so a
       clone placed inside `PX4-Autopilot/` is found);
-   b. next to this repo: `../PX4-Autopilot`, `../../PX4-Autopilot`, the repo's parent;
+   b. next to this repo: `../PX4-Autopilot`, `../../PX4-Autopilot`,
+      `../px4/PX4-Autopilot`, the repo's parent;
    c. conventional spots under `$HOME`: `PX4-Autopilot`, `src/`, `Code/`, `dev/`,
       `workspace/`, `git/`, `projects/`, …;
    d. a bounded, pruned, time-limited search under `$HOME` (max depth 4).
@@ -139,12 +145,18 @@ disambiguate with an argument or `$PX4_DIR`. If none turn up, it says so and ask
 path; it never guesses or creates a directory. A candidate only counts if it structurally
 looks like PX4 (`Makefile`, `Tools/simulation/`, and both `CMakeLists.txt` files).
 
-**What it refuses to do** (each overridable with `--force` where it is safe to):
-an unrecognised or non-v1.16 PX4 layout; an existing `120[0-3]_*` airframe that is not
-ours (SYS_AUTOSTART collision); uncommitted local modifications to the two PX4-owned
-`CMakeLists.txt` files; a missing splice anchor (it aborts and tells you what to add by
-hand rather than guessing). It never uses `sudo`. Both PX4-owned `CMakeLists.txt` files are
-backed up to `<file>.flightaxis.bak` first, and everything it changed is listed at the end.
+**What it refuses to do** — an unrecognised or non-v1.16 PX4 layout; an existing
+`120[0-3]_*` airframe that is not ours (a genuine SYS_AUTOSTART collision, since those are
+the four ids it installs); uncommitted local modifications to the two PX4-owned
+`CMakeLists.txt` files. Each of those is overridable with `--force`, and none of them stops
+a `--dry-run`. The one refusal `--force` does **not** override is a missing splice anchor:
+there it aborts and tells you what to add by hand rather than guessing where your build
+system wants it. It never uses `sudo`. Both PX4-owned `CMakeLists.txt` files are backed up
+to `<file>.flightaxis.bak` first, and everything it changed is listed at the end.
+
+Ids **1204–1219 are reserved by this document but not used**, and the installer ignores
+them entirely — that is the range for your own aircraft (see
+[Adding a new aircraft](#adding-a-new-aircraft)).
 
 Reverse it all at any time:
 
@@ -152,9 +164,19 @@ Reverse it all at any time:
 ./uninstall.sh                 # same target resolution and --dry-run/--yes flags
 ```
 
-It removes the payload and the four airframes, undoes both registrations (restoring the
-backups, or — if you edited those files afterwards — removing only the lines it added), and
-touches nothing else.
+It undoes both registrations (restoring the backups, or — if you edited those files
+afterwards — removing only the lines it added) and then deletes **exactly the files it
+installed**, listed from a manifest. Specifically:
+
+- Your own `models/<name>.json`, your own `12xx_flightaxis_*` airframe files and their
+  `CMakeLists.txt` entries are **not** ours and are left alone.
+- `Tools/simulation/flightaxis/` is removed only if it is empty once our files are gone.
+  If anything of yours is still in there, the directory stays and the survivors are listed
+  so you can decide.
+- If you added the `include()` line by hand (Method 2), the uninstaller finds it whatever
+  its indentation — but it must be a real, uncommented `include(sitl_targets_flightaxis.cmake)`
+  line of its own, which is also the form the installer recognises when deciding whether
+  the registration is already present.
 
 Then jump to [Run it](#run-it).
 
@@ -177,6 +199,11 @@ apply as written (see spec §3).
    include(sitl_targets_flightgear.cmake)
    include(sitl_targets_gazebo-classic.cmake)
    ```
+
+   Indent it however you like — leading and trailing whitespace are ignored — but keep it
+   as a line of its own and do not comment it out. That is how `install.sh` recognises the
+   registration as already present, and how `uninstall.sh` finds the line to remove; a
+   commented-out or merged line will be treated as "not installed".
 
 3. In `PX4-Autopilot/ROMFS/px4fmu_common/init.d-posix/airframes/CMakeLists.txt`, register
    the four airframes inside `px4_add_romfs_files(...)`, in sorted position (after the
@@ -291,7 +318,10 @@ Full derivation, per-model tables, and the heli traps: spec §5.
 
 ## Adding a new aircraft
 
-Four steps (same workflow as the FlightGear bridge):
+Four steps (same workflow as the FlightGear bridge). **Number your airframe in the
+1204–1219 range** — those ids are reserved for exactly this and the installer and
+uninstaller leave them, and your model JSONs, strictly alone:
+
 1. New `models/<name>.json` (channel map — see above, and spec §5).
 2. Add the model name to the `models` list in `sitl_targets_flightaxis.cmake`.
 3. New airframe script `12xx_flightaxis_<name>`, whose `PWM_MAIN_FUNC*` assignments must agree

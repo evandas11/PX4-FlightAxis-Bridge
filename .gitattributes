@@ -1,0 +1,26 @@
+# Normalise line endings in the repository, and check every text file out with
+# LF regardless of platform.
+#
+# This is not cosmetic. The integration ships shell scripts that must execute
+# inside PX4's ROMFS and build (sitl_run.sh, install.sh, uninstall.sh, the two
+# sync scripts, detect-px4.sh). A cloner with core.autocrlf=true — the Git for
+# Windows default, and WSL is mainstream for PX4 development — would otherwise
+# get CRLF, and a `#!/bin/sh\r` shebang fails to exec with a bewildering
+# "bad interpreter: No such file or directory".
+* text=auto eol=lf
+
+# Belt and braces for the executable payload: these must be LF even if someone
+# adds a conflicting rule above.
+*.sh            text eol=lf
+ROMFS/px4fmu_common/init.d-posix/airframes/* text eol=lf
+
+# CMake and Python are read by tools that also dislike stray CRLF.
+*.cmake         text eol=lf
+CMakeLists.txt  text eol=lf
+*.py            text eol=lf
+*.json          text eol=lf
+
+# Let git treat sources and docs as text, with LF.
+*.cpp           text eol=lf
+*.h             text eol=lf
+*.md            text eol=lf

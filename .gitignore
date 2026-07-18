@@ -1,2 +1,16 @@
 __pycache__/
 *.pyc
+
+# Artefacts the installer and uninstaller leave in a PX4 tree. These matter here
+# because detection explicitly supports cloning this repo *inside* a PX4
+# checkout, so the tooling's own scratch files can land under this repo's root.
+*.flightaxis.bak
+*.flightaxis.tmp.*
+*.flightaxis.undo.*
+*.flightaxis.pre.*
+*.flightaxis.pristine.*
+
+# Editor and OS noise
+*~
+*.swp
+.DS_Store

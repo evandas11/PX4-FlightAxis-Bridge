@@ -13,7 +13,7 @@
 #
 set -euo pipefail
 
-REPO_DIR="$(cd "$(dirname "$0")" && pwd)"
+REPO_DIR="$(cd -P "$(dirname "$0")" && pwd -P)"
 
 # ---------------------------------------------------------------- output ----
 if [ -t 1 ] && [ -z "${NO_COLOR:-}" ] && command -v tput >/dev/null 2>&1 \
@@ -104,10 +104,9 @@ SIM_CMAKE_REL="src/modules/simulation/simulator_mavlink/CMakeLists.txt"
 AF_CMAKE_REL="ROMFS/px4fmu_common/init.d-posix/airframes/CMakeLists.txt"
 SIM_CMAKE="$PX4_DIR/$SIM_CMAKE_REL"
 AF_CMAKE="$PX4_DIR/$AF_CMAKE_REL"
-AF_DIR="$PX4_DIR/ROMFS/px4fmu_common/init.d-posix/airframes"
-SIM_DIR="$PX4_DIR/src/modules/simulation/simulator_mavlink"
 
-AIRFRAMES="1200_flightaxis_plane 1201_flightaxis_quad 1202_flightaxis_quadplane 1203_flightaxis_heli"
+# From scripts/detect-px4.sh - the single source of truth for what we own.
+AIRFRAMES="$FA_AIRFRAMES"
 INCLUDE_LINE='include(sitl_targets_flightaxis.cmake)'
 
 run() {
@@ -193,31 +192,54 @@ undo_file "$AF_CMAKE"  "$AF_CMAKE_REL"  strip_airframes
 # ---------------------------------------------------------------- payload ----
 step "2/3  Removing the FlightAxis payload"
 
-if [ -d "$PX4_DIR/Tools/simulation/flightaxis" ]; then
-	run rm -rf "$PX4_DIR/Tools/simulation/flightaxis"
-	ok "Tools/simulation/flightaxis/"
-	[ "$DRY_RUN" -eq 1 ] || record "deleted  Tools/simulation/flightaxis/ (whole directory)"
-else
-	info "Tools/simulation/flightaxis/ not present"
-fi
-
-if [ -f "$SIM_DIR/sitl_targets_flightaxis.cmake" ]; then
-	run rm -f "$SIM_DIR/sitl_targets_flightaxis.cmake"
-	ok "src/modules/simulation/simulator_mavlink/sitl_targets_flightaxis.cmake"
-	[ "$DRY_RUN" -eq 1 ] || record "deleted  src/modules/simulation/simulator_mavlink/sitl_targets_flightaxis.cmake"
-else
-	info "sitl_targets_flightaxis.cmake not present"
-fi
-
-for a in $AIRFRAMES; do
-	if [ -f "$AF_DIR/$a" ]; then
-		run rm -f "$AF_DIR/$a"
-		ok "ROMFS/px4fmu_common/init.d-posix/airframes/$a"
-		[ "$DRY_RUN" -eq 1 ] || record "deleted  ROMFS/px4fmu_common/init.d-posix/airframes/$a"
-	else
-		info "airframe $a not present"
+# Delete exactly the files install.sh placed - the shared manifest in
+# scripts/detect-px4.sh - and nothing else.
+#
+# This used to be `rm -rf Tools/simulation/flightaxis`, which destroyed the
+# user's own work without a prompt, a listing or a backup. README's "Adding a
+# new aircraft" tells users to create models/<name>.json inside that very
+# directory, and that directory is untracked in PX4's git, so nothing could
+# recover it: follow our own documentation, fly your model for a month, run
+# ./uninstall.sh for a clean reinstall, and it was gone permanently. Anything we
+# did not install is now left in place and listed for the user.
+while IFS= read -r rel; do
+	[ -n "$rel" ] || continue
+	f="$PX4_DIR/$rel"
+	if [ -f "$f" ]; then
+		run rm -f "$f"
+		[ "$DRY_RUN" -eq 1 ] || record "deleted  $rel"
 	fi
-done
+done <<EOF
+$(fa_payload_files)
+EOF
+if [ "$DRY_RUN" -eq 0 ]; then
+	ok "removed the payload manifest ($(fa_payload_files | grep -c .) files)"
+else
+	printf '    %s[dry-run]%s would delete the %s files of the payload manifest\n' \
+		"$C_YEL" "$C_OFF" "$(fa_payload_files | grep -c .)"
+fi
+
+# Now prune the directories the manifest lived in, deepest first, but only when
+# they are empty. A directory that still has something in it is the user's:
+# report it, keep it.
+PAYLOAD_DIR="$PX4_DIR/Tools/simulation/flightaxis"
+if [ -d "$PAYLOAD_DIR" ] && [ "$DRY_RUN" -eq 0 ]; then
+	# -depth so children are attempted before their parents; rmdir refuses to
+	# remove a non-empty directory, which is exactly the guarantee we want.
+	find "$PAYLOAD_DIR" -depth -type d -exec rmdir {} + 2>/dev/null || true
+fi
+
+if [ -d "$PAYLOAD_DIR" ]; then
+	SURVIVORS="$(find "$PAYLOAD_DIR" -mindepth 1 \( -type f -o -type l \) 2>/dev/null | sed "s|^$PAYLOAD_DIR/||" | sort || true)"
+	if [ -n "$SURVIVORS" ]; then
+		warn "Tools/simulation/flightaxis/ still contains files this installer did not
+         create, so the directory has been left in place:"
+		printf '%s\n' "$SURVIVORS" | sed 's|^|         |' >&2
+		printf '       If you no longer want them:  rm -rf %s\n' "$PAYLOAD_DIR" >&2
+	fi
+elif [ "$DRY_RUN" -eq 0 ]; then
+	ok "Tools/simulation/flightaxis/ removed (it was empty afterwards)"
+fi
 
 # Stale copies inside an existing build directory would keep the make targets
 # alive until the next cmake re-run; remove ours, leave everything else.
@@ -241,24 +263,36 @@ step "3/3  Verifying removal"
 LEFT=0
 check_gone() {
 	if [ -e "$1" ]; then
-		printf '    %sFAIL%s still present: %s\n' "$C_RED" "$C_OFF" "${1#$PX4_DIR/}" >&2
+		printf '    %sFAIL%s still present: %s\n' "$C_RED" "$C_OFF" "${1#"$PX4_DIR"/}" >&2
 		LEFT=1
 	fi
 }
 if [ "$DRY_RUN" -eq 0 ]; then
-	check_gone "$PX4_DIR/Tools/simulation/flightaxis"
-	check_gone "$SIM_DIR/sitl_targets_flightaxis.cmake"
-	for a in $AIRFRAMES; do check_gone "$AF_DIR/$a"; done
-	if grep -q "sitl_targets_flightaxis" "$SIM_CMAKE" 2>/dev/null; then
-		printf '    %sFAIL%s %s still references sitl_targets_flightaxis\n' "$C_RED" "$C_OFF" "$SIM_CMAKE_REL" >&2
+	# Only the manifest is checked. The payload *directory* is deliberately not
+	# checked: it legitimately survives when it still holds files the user
+	# added, and those were listed in step 2.
+	while IFS= read -r rel; do
+		[ -n "$rel" ] || continue
+		check_gone "$PX4_DIR/$rel"
+	done <<EOF
+$(fa_payload_files)
+EOF
+	# The include must be gone as a whole line - the same trimmed match
+	# fa_strip_include uses. A substring grep here fired on an indented include
+	# that the stripper had (correctly) already removed in an older version, and
+	# on a mention inside a comment.
+	if fa_has_include "$SIM_CMAKE" "$INCLUDE_LINE" 2>/dev/null; then
+		printf '    %sFAIL%s %s still includes %s\n' "$C_RED" "$C_OFF" "$SIM_CMAKE_REL" "$INCLUDE_LINE" >&2
 		LEFT=1
 	fi
-	if grep -qE "^[[:space:]]*12[01][0-9]_flightaxis_" "$AF_CMAKE" 2>/dev/null; then
-		printf '    %sFAIL%s %s still lists flightaxis airframes\n' "$C_RED" "$C_OFF" "$AF_CMAKE_REL" >&2
+	# FA_ENTRY_RE, not an id range: a user's own 1204_flightaxis_cessna entry is
+	# not ours, is intentionally left registered, and must not fail this check.
+	if grep -qE "$FA_ENTRY_RE" "$AF_CMAKE" 2>/dev/null; then
+		printf '    %sFAIL%s %s still lists our flightaxis airframes\n' "$C_RED" "$C_OFF" "$AF_CMAKE_REL" >&2
 		LEFT=1
 	fi
 	[ "$LEFT" -eq 0 ] || die "uninstall did not fully complete (see FAIL lines above)."
-	ok "no flightaxis files or registrations remain"
+	ok "no flightaxis files or registrations of ours remain"
 else
 	info "dry-run: nothing was checked"
 fi
