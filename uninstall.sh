@@ -137,7 +137,7 @@ strip_airframes() {
 				emit($0); next
 			}
 			if ($0 ~ /^\)/) { inlist = 0; emit($0); next }
-			if ($0 ~ /^[ \t]*120[0-3]_flightaxis_(plane|quad|quadplane|heli)[ \t]*$/) {
+			if ($0 ~ /^[ \t]*12[0-1][0-9]_flightaxis_[a-z0-9_]+[ \t]*$/) {
 				removed = 1; next
 			}
 			if (isblank($0)) {
@@ -268,7 +268,7 @@ if [ "$DRY_RUN" -eq 0 ]; then
 		printf '    %sFAIL%s %s still references sitl_targets_flightaxis\n' "$C_RED" "$C_OFF" "$SIM_CMAKE_REL" >&2
 		LEFT=1
 	fi
-	if grep -qE "^[[:space:]]*120[0-3]_flightaxis_" "$AF_CMAKE" 2>/dev/null; then
+	if grep -qE "^[[:space:]]*12[01][0-9]_flightaxis_" "$AF_CMAKE" 2>/dev/null; then
 		printf '    %sFAIL%s %s still lists flightaxis airframes\n' "$C_RED" "$C_OFF" "$AF_CMAKE_REL" >&2
 		LEFT=1
 	fi

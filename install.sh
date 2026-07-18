@@ -205,9 +205,10 @@ fi
 # ================================================================= 2/7 ======
 step "2/7  Checking for conflicts"
 
-# SYS_AUTOSTART id collisions: any 120[0-3]_* airframe that is not one of ours.
+# SYS_AUTOSTART id collisions: any airframe in our reserved 1200-1219 range that
+# is not one of ours.
 COLLISIONS=""
-for f in "$AF_DIR"/120[0-3]_*; do
+for f in "$AF_DIR"/12[01][0-9]_*; do
 	[ -e "$f" ] || continue
 	base="$(basename "$f")"
 	case " $AIRFRAMES " in
@@ -217,12 +218,12 @@ for f in "$AF_DIR"/120[0-3]_*; do
 done
 if [ -n "$COLLISIONS" ]; then
 	printf '%serror:%s SYS_AUTOSTART id collision in %s\n' "$C_RED" "$C_OFF" "$AF_DIR" >&2
-	for c in $COLLISIONS; do printf '       %s occupies an id in the 1200-1203 range we need\n' "$c" >&2; done
+	for c in $COLLISIONS; do printf '       %s occupies an id in the 1200-1219 range we reserve\n' "$c" >&2; done
 	printf '       Refusing to clobber airframes that are not ours. Move or rename them,\n' >&2
 	printf '       or renumber this integration (airframe files + README) and retry.\n' >&2
 	exit 1
 fi
-ok "no SYS_AUTOSTART collisions in the 1200-1203 range"
+ok "no SYS_AUTOSTART collisions in the 1200-1219 range"
 
 # Uncommitted local modifications to files we are about to overwrite.
 if [ -d "$PX4_DIR/.git" ] && command -v git >/dev/null 2>&1; then
@@ -379,9 +380,10 @@ else
 fi
 
 # --- 5b: the four airframe entries -----------------------------------------
-# Rewrites the px4_add_romfs_files() list: drops any existing 120[0-3]_flightaxis_*
-# entries, then re-inserts all four as one block in sorted position (before the
-# first entry with a larger id). Deterministic => running it twice is a no-op.
+# Rewrites the px4_add_romfs_files() list: drops any existing flightaxis entry in
+# our reserved 1200-1219 range, then re-inserts $AIRFRAMES as one block in sorted
+# position (before the first entry with a larger id). Deterministic => running it
+# twice is a no-op, and a partial install converges to the correct result.
 splice_airframes() {
 	awk '
 		function isblank(l) { return l ~ /^[ \t]*$/ }
@@ -395,7 +397,7 @@ splice_airframes() {
 			if ($0 ~ /^\)/) { inlist = 0; emit($0); next }
 
 			# Drop entries we own, wherever they currently are.
-			if ($0 ~ /^[ \t]*120[0-3]_flightaxis_(plane|quad|quadplane|heli)[ \t]*$/) {
+			if ($0 ~ /^[ \t]*12[0-1][0-9]_flightaxis_[a-z0-9_]+[ \t]*$/) {
 				removed = 1; next
 			}
 			# Squeeze a blank line that removal left doubled up.
@@ -408,11 +410,9 @@ splice_airframes() {
 				n = $0
 				sub(/^[ \t]*/, "", n)
 				sub(/_.*$/, "", n)
-				if (n + 0 > 1203) {
-					emit("\t1200_flightaxis_plane")
-					emit("\t1201_flightaxis_quad")
-					emit("\t1202_flightaxis_quadplane")
-					emit("\t1203_flightaxis_heli")
+				if (n + 0 > 1219) {
+					na = split(airframes, a, " ")
+					for (i = 1; i <= na; i++) { emit("\t" a[i]) }
 					emit("")
 					done = 1
 				}
@@ -421,7 +421,7 @@ splice_airframes() {
 			emit($0)
 		}
 		END { exit (done ? 0 : 3) }
-	' "$1"
+	' airframes="$AIRFRAMES" "$1"
 }
 
 MISSING_AF=""
