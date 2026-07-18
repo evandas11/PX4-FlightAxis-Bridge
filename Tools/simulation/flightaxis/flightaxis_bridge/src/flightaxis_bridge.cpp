@@ -47,6 +47,40 @@
  *   reverse: 0/1, applied after scaling (v -> 1-v)
  *   disarm:  0..1 value sent when disarmed or control is NaN,
  *            or -1 = hold last output (neutral 0.5 before the first one)
+ *
+ * The argv protocol above is UNCHANGED and remains positional, so existing
+ * callers (get_FAbridge_params.py output spliced by sitl_run.sh) keep working
+ * verbatim. Transport selection is done with environment variables instead of
+ * new argv slots: the bridge already takes its home position that way
+ * (PX4_HOME_LAT/LON/ALT) and sitl_run.sh already passes PX4_FLIGHTAXIS_IP, so
+ * this stays consistent, and it avoids an optional leading flag that every
+ * positional index downstream would have to account for.
+ *
+ * Environment (all optional; defaults reproduce the original SITL behaviour):
+ *
+ *   PX4_HITL_TRANSPORT   tcp-server (default) | serial | udp
+ *                        tcp-server = SITL: listen on 4560+instance.
+ *                        serial/udp = HITL: talk to a real board.
+ *   PX4_HITL_SERIAL_DEV  serial device, e.g. /dev/ttyACM0 (serial only)
+ *   PX4_HITL_SERIAL_BAUD baud, default 921600 (serial only; ignored by USB
+ *                        CDC-ACM, where the rate is nominal)
+ *   PX4_HITL_UDP_HOST    board IP (udp only)
+ *   PX4_HITL_UDP_PORT    board UDP port, default 14550 (udp only)
+ *   PX4_HITL_SENSOR_HZ   HIL_SENSOR rate. Default 250 for serial/udp,
+ *                        0 (= every frame, ~1 kHz) for tcp-server. 0 forces
+ *                        every frame on any transport - only do that on USB.
+ *   PX4_HITL_STATE_QUAT_BYPASS
+ *                        if set (to anything), re-enable HIL_STATE_QUATERNION
+ *                        in HITL. DEBUG ONLY - it makes the board fly on
+ *                        injected truth instead of its own estimator.
+ *
+ * Selecting serial or udp also selects the HITL message profile, which:
+ *   - stops sending HIL_STATE_QUATERNION (it would race EKF2 on a real board)
+ *   - stops sending RAW_RPM (no receiver handler exists for it)
+ *   - drops HIL_GPS to 5 Hz and mag/baro/airspeed to 50 Hz
+ *   - adds a HEARTBEAT, without which PX4 never brings a USB link up
+ * These are correctness requirements on a real board, not bandwidth tweaks -
+ * see px4_communicator.h.
  */
 
 #include <iostream>
@@ -304,9 +338,78 @@ int main(int argc, char **argv)
 	VehicleState vehicle(home_lat, home_lon, home_alt);
 	PX4Communicator px4(&vehicle);
 
-	// mirror the FG bridge ordering: bring the PX4 side up first (blocks in
-	// accept() until the px4 binary launched by sitl_run.sh connects)
-	cerr << "[flightaxis_bridge] waiting for PX4 on TCP " << (4560 + instance) << " ..." << endl;
+	// ---- transport selection (see the header comment) -------------------
+	const char *transport_env = getenv("PX4_HITL_TRANSPORT");
+	PX4Transport transport = PX4Transport::TcpServer;
+	PX4Profile prof = PX4Profile::Sitl;
+
+	if (transport_env != nullptr && transport_env[0] != '\0'
+	    && strcmp(transport_env, "tcp-server") != 0) {
+		if (strcmp(transport_env, "serial") == 0) {
+			transport = PX4Transport::Serial;
+			prof = PX4Profile::Hitl;
+
+		} else if (strcmp(transport_env, "udp") == 0) {
+			transport = PX4Transport::Udp;
+			prof = PX4Profile::Hitl;
+
+		} else {
+			cerr << "[flightaxis_bridge] unknown PX4_HITL_TRANSPORT '" << transport_env
+			     << "' (expected tcp-server, serial or udp)" << endl;
+			delete [] maps;
+			return -1;
+		}
+	}
+
+	{
+		// 250 Hz is the serial-safe default and matches RealFlight's physics
+		// frame rate; 0 (every frame) stays the SITL default over loopback.
+		const double default_sensor_hz = (prof == PX4Profile::Hitl) ? 250.0 : 0.0;
+		const double sensor_hz = envOrDefault("PX4_HITL_SENSOR_HZ", default_sensor_hz);
+
+		px4.Configure(transport, prof,
+			      getenv("PX4_HITL_SERIAL_DEV"),
+			      (int)envOrDefault("PX4_HITL_SERIAL_BAUD", 921600),
+			      getenv("PX4_HITL_UDP_HOST"),
+			      (int)envOrDefault("PX4_HITL_UDP_PORT", 14550),
+			      sensor_hz);
+
+		if (prof == PX4Profile::Hitl) {
+			cerr << "[flightaxis_bridge] *** HITL MODE - REAL HARDWARE - REMOVE PROPELLERS ***" << endl;
+			cerr << "[flightaxis_bridge] transport=" << px4.TransportName()
+			     << " HIL_SENSOR=" << (sensor_hz > 0.0 ? sensor_hz : 0.0) << " Hz"
+			     << (sensor_hz > 0.0 ? "" : " (every frame)") << endl;
+			cerr << "[flightaxis_bridge] HIL_STATE_QUATERNION and RAW_RPM disabled"
+			     << " (not valid for a real board)" << endl;
+
+			// A hardware UART is the classic silent failure: PX4 refuses to
+			// enable the HIL streams unless its own datarate exceeds 5000 B/s
+			// (mavlink_main.cpp:671) and MAV_x_RATE defaults to 1200 B/s.
+			const char *dev = getenv("PX4_HITL_SERIAL_DEV");
+
+			if (transport == PX4Transport::Serial && dev != nullptr
+			    && strncmp(dev, "/dev/ttyACM", 11) != 0) {
+				cerr << "[flightaxis_bridge] NOTE: " << dev << " is not a USB CDC-ACM port."
+				     << " Set SER_*_BAUD=921600 and MAV_*_RATE>5000 on the board, or PX4"
+				     << " will never enable the HIL streams (and will not tell you)." << endl;
+			}
+
+			if (getenv("PX4_HITL_STATE_QUAT_BYPASS") != nullptr) {
+				px4.EnableStateQuaternionBypass();
+				cerr << "[flightaxis_bridge] WARNING: HIL_STATE_QUATERNION bypass ENABLED."
+				     << " The board will publish injected truth onto vehicle_attitude and"
+				     << " vehicle_local_position, RACING EKF2. The vehicle will fly well and"
+				     << " prove NOTHING about the estimator. Debug use only." << endl;
+			}
+		}
+	}
+
+	// mirror the FG bridge ordering: bring the PX4 side up first (for the SITL
+	// TCP server this blocks in accept() until the px4 binary launched by
+	// sitl_run.sh connects; serial/UDP just open the link)
+	if (transport == PX4Transport::TcpServer) {
+		cerr << "[flightaxis_bridge] waiting for PX4 on TCP " << (4560 + instance) << " ..." << endl;
+	}
 
 	if (px4.Init(instance) != 0) {
 		cerr << "[flightaxis_bridge] Unable to Init PX4 Communication" << endl;
@@ -314,7 +417,13 @@ int main(int argc, char **argv)
 		return -1;
 	}
 
-	cerr << "[flightaxis_bridge] waiting for PX4 on TCP " << (4560 + instance) << " ... connected" << endl;
+	if (transport == PX4Transport::TcpServer) {
+		cerr << "[flightaxis_bridge] waiting for PX4 on TCP " << (4560 + instance) << " ... connected" << endl;
+
+	} else {
+		cerr << "[flightaxis_bridge] PX4 link up on " << px4.TransportName()
+		     << " - waiting for HIL_ACTUATOR_CONTROLS from the board" << endl;
+	}
 
 	setup_unix_signals();
 	stop = 0;

@@ -75,7 +75,13 @@ public:
 
 	// Drop the captured offset so the NEXT real frame re-anchors from a
 	// post-reset position (ArduPilot SIM_FlightAxis position_offset.zero()).
-	void invalidatePositionOffset() { offset_captured = false; }
+	// Called on a RealFlight reset or restart. The velocity history has to go
+	// with the position anchor: the aircraft teleports to the runway, and the
+	// on-ground accelerometer override would otherwise difference the
+	// pre-reset flight velocity against zero across one frame - 30 m/s over
+	// 4 ms is 765 g, clipped to the 16 g limit on all three axes and fed
+	// straight into EKF2.
+	void invalidatePositionOffset() { offset_captured = false; have_last_velocity = false; }
 
 	mavlink_hil_sensor_t getSensorMsg(int offset_us);
 	mavlink_hil_state_quaternion_t getStateQuatMsg(int offset_us);

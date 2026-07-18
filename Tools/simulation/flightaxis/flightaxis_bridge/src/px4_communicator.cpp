@@ -43,6 +43,10 @@
  *    to go out at that full rate
  *  - the HIL_STATE_QUATERNION (ground truth) and DISTANCE_SENSOR sends
  *  - a non-blocking receive drain, so the bridge is never stalled by PX4
+ *  - a transport abstraction (TCP server / serial / UDP client) so the same
+ *    sensor stream can drive either PX4 SITL or a real flight controller
+ *    board running HITL firmware, plus the HITL message profile and the
+ *    configurable HIL_SENSOR rate that serial bandwidth makes necessary
  *
  * The file is distributed as part of a work licensed under GPLv3 or later, but
  * its own terms remain the BSD-3-Clause licence above, as GPLv3 section 7
@@ -68,7 +72,290 @@ PX4Communicator::PX4Communicator(VehicleState * v)
 	this->vehicle=v;
 }
 
+const char *PX4Communicator::TransportName() const
+{
+    switch (transport) {
+    case PX4Transport::Serial: return "serial";
+    case PX4Transport::Udp:    return "udp";
+    case PX4Transport::TcpServer:
+    default:                   return "tcp-server";
+    }
+}
+
+void PX4Communicator::Configure(PX4Transport t, PX4Profile p,
+                                const char *device, int baud,
+                                const char *host, int port,
+                                double sensor_rate_hz)
+{
+    transport = t;
+    profile = p;
+
+    if (device != nullptr && device[0] != '\0') {
+        serial_dev = device;
+    }
+
+    if (baud > 0) {
+        serial_baud = baud;
+    }
+
+    if (host != nullptr && host[0] != '\0') {
+        udp_host = host;
+    }
+
+    if (port > 0) {
+        udp_port = port;
+    }
+
+    // HIL_SENSOR decimation. 0 means "every Send()", which is the SITL
+    // behaviour and is what a USB link can also afford.
+    if (sensor_rate_hz > 0.0) {
+        sensor_interval_us = (uint64_t)(1.0e6 / sensor_rate_hz);
+    } else {
+        sensor_interval_us = 0;
+    }
+
+    if (profile == PX4Profile::Hitl) {
+        // See the bandwidth block in px4_communicator.h. Both of these are
+        // correctness issues on a real board, not just bandwidth savings:
+        // HIL_STATE_QUATERNION would fight EKF2 for vehicle_attitude /
+        // vehicle_local_position, and RAW_RPM has no receiver handler at all.
+        state_quat_interval_us = INTERVAL_DISABLED;
+        rpm_interval_us = INTERVAL_DISABLED;
+
+        // jMAVSim uses 5 Hz for HIL_GPS (SimpleSensors.java gpsInterval =
+        // 200 ms) and a real GPS module is 5-10 Hz, so there is nothing to
+        // gain from 10 Hz on a link where bytes are finite.
+        gps_interval_us = 200000;   // 5 Hz
+
+        // Real mag/baro/airspeed run far slower than the IMU; see the
+        // fields_updated note in px4_communicator.h.
+        mag_interval_us = 20000;        // 50 Hz
+        baro_interval_us = 20000;       // 50 Hz
+        diff_press_interval_us = 20000; // 50 Hz
+
+        heartbeat_enabled = true;
+    }
+}
+
+void PX4Communicator::EnableStateQuaternionBypass()
+{
+    state_quat_interval_us = STATE_QUAT_INTERVAL_US;
+}
+
 int PX4Communicator::Init(int portOffset)
+{
+    switch (transport) {
+    case PX4Transport::Serial:
+        return InitSerial();
+
+    case PX4Transport::Udp:
+        return InitUdp();
+
+    case PX4Transport::TcpServer:
+    default:
+        return InitTcpServer(portOffset);
+    }
+}
+
+/*
+ * Map an integer baud rate to its termios constant. Only the rates PX4's own
+ * serial layer offers are accepted (Tools/serial/serial_params.c.jinja);
+ * anything else is a typo and is better rejected loudly than silently run at
+ * the wrong speed.
+ */
+static bool baudToSpeed(int baud, speed_t &out)
+{
+    switch (baud) {
+    case 9600:    out = B9600;    return true;
+    case 19200:   out = B19200;   return true;
+    case 38400:   out = B38400;   return true;
+    case 57600:   out = B57600;   return true;
+    case 115200:  out = B115200;  return true;
+    case 230400:  out = B230400;  return true;
+    case 460800:  out = B460800;  return true;
+    case 500000:  out = B500000;  return true;
+    case 921600:  out = B921600;  return true;
+    case 1000000: out = B1000000; return true;
+#ifdef B1500000
+    case 1500000: out = B1500000; return true;
+#endif
+#ifdef B2000000
+    case 2000000: out = B2000000; return true;
+#endif
+#ifdef B3000000
+    case 3000000: out = B3000000; return true;
+#endif
+    default:      return false;
+    }
+}
+
+int PX4Communicator::InitSerial()
+{
+    if (serial_dev == nullptr) {
+        std::cerr << "PX4 Communicator: serial transport selected but no device set"
+                  << " (set PX4_HITL_SERIAL_DEV)" << std::endl;
+        return -1;
+    }
+
+    speed_t speed;
+
+    if (!baudToSpeed(serial_baud, speed)) {
+        std::cerr << "PX4 Communicator: unsupported baud rate " << serial_baud << std::endl;
+        return -1;
+    }
+
+    // O_NONBLOCK so the open() itself cannot hang on a modem-control line that
+    // never asserts; the fd stays non-blocking, which is what Recieve(false)
+    // needs anyway and what keeps a stalled board from blocking Send().
+    commFd = open(serial_dev, O_RDWR | O_NOCTTY | O_NONBLOCK);
+
+    if (commFd < 0) {
+        std::cerr << "PX4 Communicator: cannot open " << serial_dev << ": "
+                  << strerror(errno) << std::endl;
+        return -1;
+    }
+
+    struct termios tio;
+    memset(&tio, 0, sizeof(tio));
+
+    if (tcgetattr(commFd, &tio) != 0) {
+        std::cerr << "PX4 Communicator: tcgetattr failed: " << strerror(errno) << std::endl;
+        close(commFd);
+        commFd = -1;
+        return -1;
+    }
+
+    // Raw 8N1, no flow control. This mirrors what PX4's own mavlink module
+    // configures on a serial link (mavlink_main.cpp:591-628): MAVLink framing
+    // is binary, so any canonical/echo/translation processing corrupts it.
+    // Hardware flow control is deliberately OFF: PX4 only enables it when
+    // asked with -z/-Z, and a 3-wire TELEM cable has no RTS/CTS at all.
+    cfmakeraw(&tio);
+    tio.c_cflag &= ~(unsigned)CSIZE;
+    tio.c_cflag |= CS8;             // 8 data bits
+    tio.c_cflag &= ~(unsigned)PARENB; // no parity
+    tio.c_cflag &= ~(unsigned)CSTOPB; // 1 stop bit
+    tio.c_cflag &= ~(unsigned)CRTSCTS; // no hardware flow control
+    tio.c_cflag |= (unsigned)(CLOCAL | CREAD); // ignore modem lines, enable receiver
+    tio.c_iflag &= ~(unsigned)(IXON | IXOFF | IXANY); // no software flow control
+    tio.c_cc[VMIN] = 0;
+    tio.c_cc[VTIME] = 0;
+
+    if (cfsetispeed(&tio, speed) != 0 || cfsetospeed(&tio, speed) != 0) {
+        std::cerr << "PX4 Communicator: cfsetspeed failed: " << strerror(errno) << std::endl;
+        close(commFd);
+        commFd = -1;
+        return -1;
+    }
+
+    if (tcsetattr(commFd, TCSANOW, &tio) != 0) {
+        std::cerr << "PX4 Communicator: tcsetattr failed: " << strerror(errno) << std::endl;
+        close(commFd);
+        commFd = -1;
+        return -1;
+    }
+
+    tcflush(commFd, TCIOFLUSH);
+
+    std::cerr << "PX4 Communicator: serial " << serial_dev << " open at "
+              << serial_baud << " baud (8N1, no flow control)" << std::endl;
+
+    return 0;
+}
+
+int PX4Communicator::InitUdp()
+{
+    if (udp_host == nullptr) {
+        std::cerr << "PX4 Communicator: udp transport selected but no host set"
+                  << " (set PX4_HITL_UDP_HOST)" << std::endl;
+        return -1;
+    }
+
+    commFd = socket(AF_INET, SOCK_DGRAM, 0);
+
+    if (commFd < 0) {
+        std::cerr << "PX4 Communicator: creating UDP socket failed: " << strerror(errno) << std::endl;
+        return -1;
+    }
+
+    struct sockaddr_in board_addr;
+    memset((char *) &board_addr, 0, sizeof(board_addr));
+    board_addr.sin_family = AF_INET;
+    board_addr.sin_port = htons((uint16_t)udp_port);
+
+    if (inet_pton(AF_INET, udp_host, &board_addr.sin_addr) != 1) {
+        std::cerr << "PX4 Communicator: bad UDP host address '" << udp_host << "'" << std::endl;
+        close(commFd);
+        commFd = -1;
+        return -1;
+    }
+
+    // connect() a datagram socket so send()/recv() work without carrying the
+    // peer address around, and so the kernel filters out anything that is not
+    // from the board. This keeps Send()/Recieve() identical across transports.
+    if (connect(commFd, (struct sockaddr *)&board_addr, sizeof(board_addr)) < 0) {
+        std::cerr << "PX4 Communicator: UDP connect failed: " << strerror(errno) << std::endl;
+        close(commFd);
+        commFd = -1;
+        return -1;
+    }
+
+    std::cerr << "PX4 Communicator: UDP client to " << udp_host << ":" << udp_port << std::endl;
+
+    return 0;
+}
+
+/*
+ * Write one framed MAVLink packet. Serial and UDP need different calls, and a
+ * non-blocking serial fd can accept a partial write, so a short write is
+ * retried rather than treated as a failure.
+ */
+bool PX4Communicator::SendBuffer(const uint8_t *buf, int len)
+{
+    if (commFd < 0) {
+        return false;
+    }
+
+    if (transport == PX4Transport::Serial) {
+        int written = 0;
+
+        while (written < len) {
+            ssize_t n = write(commFd, buf + written, (size_t)(len - written));
+
+            if (n > 0) {
+                written += (int)n;
+                continue;
+            }
+
+            if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+                // Output buffer full: the link is saturated. Wait briefly for
+                // drain rather than dropping a half-written frame, which would
+                // desynchronise the parser on the board.
+                struct pollfd pfd = {};
+                pfd.fd = commFd;
+                pfd.events = POLLOUT;
+
+                if (poll(&pfd, 1, 100) <= 0) {
+                    return false;
+                }
+
+                continue;
+            }
+
+            if (n < 0 && errno == EINTR) {
+                continue;
+            }
+
+            return false;
+        }
+
+        return true;
+    }
+
+    return send(commFd, buf, (size_t)len, 0) == (ssize_t)len;
+}
+
+int PX4Communicator::InitTcpServer(int portOffset)
 {
 
     memset((char *) &simulator_mavlink_addr, 0, sizeof(px4_mavlink_addr));
@@ -143,6 +430,7 @@ int PX4Communicator::Init(int portOffset)
         else
         {
             std::cerr<<"PX4 Communicator: PX4 Connected."<< std::endl;
+            commFd = px4MavlinkSock;
             break;
         }
     }
@@ -176,8 +464,26 @@ int PX4Communicator::Init(int portOffset)
 
 int PX4Communicator::Clean()
 {
-    close(px4MavlinkSock);
-    close(listenMavlinkSock);
+    if (transport == PX4Transport::TcpServer)
+    {
+        if (px4MavlinkSock >= 0)
+        {
+            close(px4MavlinkSock);
+            px4MavlinkSock = -1;
+        }
+
+        if (listenMavlinkSock >= 0)
+        {
+            close(listenMavlinkSock);
+            listenMavlinkSock = -1;
+        }
+    }
+    else if (commFd >= 0)
+    {
+        close(commFd);
+    }
+
+    commFd = -1;
     return 0;
 }
 
@@ -188,28 +494,100 @@ int PX4Communicator::Send(int offset_us)
     uint8_t buffer[MAVLINK_MAX_PACKET_LEN];
     int packetlen;
 
-    mavlink_hil_sensor_t sensor_msg =vehicle->getSensorMsg(offset_us);
-
-    mavlink_msg_hil_sensor_encode_chan(1, 200, MAVLINK_COMM_0, &msg, &sensor_msg);
-    packetlen = mavlink_msg_to_send_buffer(buffer, &msg);
-    if(send(px4MavlinkSock, buffer, packetlen, 0)!=packetlen)
-    {
-        std::cerr << "PX4 Communicator: Sent to PX4 failed: "<< strerror(errno) <<std::endl;
-        return -1;
-    }
-
-    // Everything below HIL_SENSOR is decimated: see the interval constants in
-    // px4_communicator.h. now_us is the bridge's own physics clock.
+    // Every message is decimated against the bridge's own physics clock: see
+    // the interval members and the bandwidth block in px4_communicator.h.
+    // In the SITL profile sensor_interval_us and rpm_interval_us are 0, so
+    // those two go out on every call exactly as before.
     const uint64_t now_us = vehicle->timeUsec() + offset_us;
 
     if (!sent_first)
     {
         // send one of each immediately so PX4 has a full picture from frame 1
-        last_gps_us = last_state_quat_us = last_distance_us = now_us - 1000000;
+        last_sensor_us = last_gps_us = last_state_quat_us = last_distance_us
+            = last_rpm_us = last_mag_us = last_baro_us = last_diff_press_us
+            = now_us - 1000000;
         sent_first = true;
     }
 
-    if (now_us - last_gps_us >= GPS_INTERVAL_US)
+    // HEARTBEAT is paced off the WALL clock, not the physics clock: its whole
+    // job is to prove the link is alive, including while RealFlight is not
+    // producing frames.
+    if (heartbeat_enabled)
+    {
+        struct timespec ts;
+        clock_gettime(CLOCK_MONOTONIC, &ts);
+        const uint64_t wall_us = (uint64_t)ts.tv_sec * 1000000u + (uint64_t)(ts.tv_nsec / 1000);
+        const uint64_t hb_interval = seen_controls ? HEARTBEAT_SLOW_INTERVAL_US
+                                                   : HEARTBEAT_FAST_INTERVAL_US;
+
+        if (last_heartbeat_us == 0 || wall_us - last_heartbeat_us >= hb_interval)
+        {
+            last_heartbeat_us = wall_us;
+
+            mavlink_heartbeat_t hb{};
+            hb.type = MAV_TYPE_GENERIC;
+            hb.autopilot = MAV_AUTOPILOT_INVALID;   // we are not an autopilot
+            hb.base_mode = 0;
+            hb.custom_mode = 0;
+            hb.system_status = MAV_STATE_ACTIVE;
+
+            mavlink_msg_heartbeat_encode_chan(1, 200, MAVLINK_COMM_0, &msg, &hb);
+            packetlen = mavlink_msg_to_send_buffer(buffer, &msg);
+
+            if(!SendBuffer(buffer, packetlen))
+            {
+                std::cerr << "PX4 Communicator: Sent to PX4 failed: " << strerror(errno) <<std::endl;
+                return -1;
+            }
+        }
+    }
+
+    if (now_us - last_sensor_us >= sensor_interval_us)
+    {
+        last_sensor_us = now_us;
+
+        mavlink_hil_sensor_t sensor_msg =vehicle->getSensorMsg(offset_us);
+
+        // Mask the slow sensors down to their own rates. vehicle_state always
+        // reports 0x1FFF ("everything is new"); in the SITL profile these
+        // intervals are 0 so the mask stays 0x1FFF and nothing changes.
+        {
+            uint32_t fields = sensor_msg.fields_updated & FIELD_ALL;
+
+            if (now_us - last_mag_us >= mag_interval_us) {
+                last_mag_us = now_us;
+
+            } else {
+                fields &= ~FIELD_MAG;
+            }
+
+            if (now_us - last_baro_us >= baro_interval_us) {
+                last_baro_us = now_us;
+
+            } else {
+                fields &= ~FIELD_BARO;
+            }
+
+            if (now_us - last_diff_press_us >= diff_press_interval_us) {
+                last_diff_press_us = now_us;
+
+            } else {
+                fields &= ~FIELD_DIFF_PRESS;
+            }
+
+            sensor_msg.fields_updated = fields;
+        }
+
+        mavlink_msg_hil_sensor_encode_chan(1, 200, MAVLINK_COMM_0, &msg, &sensor_msg);
+        packetlen = mavlink_msg_to_send_buffer(buffer, &msg);
+        if(!SendBuffer(buffer, packetlen))
+        {
+            std::cerr << "PX4 Communicator: Sent to PX4 failed: "<< strerror(errno) <<std::endl;
+            return -1;
+        }
+    }
+
+    if (gps_interval_us != INTERVAL_DISABLED && now_us - last_gps_us >= gps_interval_us)
     {
         last_gps_us = now_us;
 
@@ -218,15 +596,17 @@ int PX4Communicator::Send(int offset_us)
 
         mavlink_msg_hil_gps_encode_chan(1, 200, MAVLINK_COMM_0, &msg, &hil_gps_msg);
         packetlen = mavlink_msg_to_send_buffer(buffer, &msg);
-        if(send(px4MavlinkSock, buffer, packetlen, 0)!=packetlen)
+        if(!SendBuffer(buffer, packetlen))
         {
             std::cerr << "PX4 Communicator: Sent to PX4 failed: " << strerror(errno) <<std::endl;
             return -1;
         }
     }
 
-    // ground truth
-    if (now_us - last_state_quat_us >= STATE_QUAT_INTERVAL_US)
+    // ground truth (SITL only - in HITL this topic is consumed by the board's
+    // mavlink receiver and would fight EKF2; see Configure())
+    if (state_quat_interval_us != INTERVAL_DISABLED
+        && now_us - last_state_quat_us >= state_quat_interval_us)
     {
         last_state_quat_us = now_us;
 
@@ -234,7 +614,7 @@ int PX4Communicator::Send(int offset_us)
 
         mavlink_msg_hil_state_quaternion_encode_chan(1, 200, MAVLINK_COMM_0, &msg, &state_quat_msg);
         packetlen = mavlink_msg_to_send_buffer(buffer, &msg);
-        if(send(px4MavlinkSock, buffer, packetlen, 0)!=packetlen)
+        if(!SendBuffer(buffer, packetlen))
         {
             std::cerr << "PX4 Communicator: Sent to PX4 failed: " << strerror(errno) <<std::endl;
             return -1;
@@ -242,7 +622,8 @@ int PX4Communicator::Send(int offset_us)
     }
 
     // rangefinder - only while the reading is valid (vehicle not inverted)
-    if (vehicle->rangefinderValid() && now_us - last_distance_us >= DISTANCE_INTERVAL_US)
+    if (distance_interval_us != INTERVAL_DISABLED && vehicle->rangefinderValid()
+        && now_us - last_distance_us >= distance_interval_us)
     {
         last_distance_us = now_us;
 
@@ -250,22 +631,29 @@ int PX4Communicator::Send(int offset_us)
 
         mavlink_msg_distance_sensor_encode_chan(1, 200, MAVLINK_COMM_0, &msg, &dist_msg);
         packetlen = mavlink_msg_to_send_buffer(buffer, &msg);
-        if(send(px4MavlinkSock, buffer, packetlen, 0)!=packetlen)
+        if(!SendBuffer(buffer, packetlen))
         {
             std::cerr << "PX4 Communicator: Sent to PX4 failed: " << strerror(errno) <<std::endl;
             return -1;
         }
     }
 
-    mavlink_raw_rpm_t rpmmessage;
-    rpmmessage.index=0;
-    rpmmessage.frequency=vehicle->rpm;
-    mavlink_msg_raw_rpm_encode_chan(1, 200, MAVLINK_COMM_0, &msg, &rpmmessage);
-    packetlen = mavlink_msg_to_send_buffer(buffer, &msg);
-    if(send(px4MavlinkSock, buffer, packetlen, 0)!=packetlen)
+    // RAW_RPM (SITL only - mavlink_receiver.cpp has no handler for it, so on a
+    // real board it is purely wasted serial bandwidth; see Configure())
+    if (rpm_interval_us != INTERVAL_DISABLED && now_us - last_rpm_us >= rpm_interval_us)
     {
-        std::cerr << "PX4 Communicator: Sent to PX4 failed: " << strerror(errno) <<std::endl;
-        return -1;
+        last_rpm_us = now_us;
+
+        mavlink_raw_rpm_t rpmmessage;
+        rpmmessage.index=0;
+        rpmmessage.frequency=vehicle->rpm;
+        mavlink_msg_raw_rpm_encode_chan(1, 200, MAVLINK_COMM_0, &msg, &rpmmessage);
+        packetlen = mavlink_msg_to_send_buffer(buffer, &msg);
+        if(!SendBuffer(buffer, packetlen))
+        {
+            std::cerr << "PX4 Communicator: Sent to PX4 failed: " << strerror(errno) <<std::endl;
+            return -1;
+        }
     }
 
     return 0;
@@ -277,8 +665,13 @@ int PX4Communicator::Recieve(bool blocking)
         mavlink_message_t msg;
         uint8_t buffer[MAVLINK_MAX_PACKET_LEN];
 
+        if (commFd < 0)
+        {
+            return 0;
+        }
+
         struct pollfd fds[1] = {};
-        fds[0].fd = px4MavlinkSock;
+        fds[0].fd = commFd;
         fds[0].events = POLLIN;
 
         // The non-blocking flavour must not stall the bridge loop: RealFlight's SOAP
@@ -302,11 +695,22 @@ int PX4Communicator::Recieve(bool blocking)
             if(!(fds[0].revents & POLLIN))
                 break;
 
-            unsigned int slen=sizeof(px4_mavlink_addr);
-            unsigned int len = recvfrom(px4MavlinkSock, buffer, sizeof(buffer), 0, (struct sockaddr *)&px4_mavlink_addr, &slen);
+            ssize_t rlen;
 
-            if (len == 0 || len == (unsigned int)-1)
+            if (transport == PX4Transport::Serial)
+            {
+                rlen = read(commFd, buffer, sizeof(buffer));
+            }
+            else
+            {
+                unsigned int slen=sizeof(px4_mavlink_addr);
+                rlen = recvfrom(commFd, buffer, sizeof(buffer), 0, (struct sockaddr *)&px4_mavlink_addr, &slen);
+            }
+
+            if (rlen <= 0)
                 break;
+
+            const unsigned int len = (unsigned int)rlen;
 
             mavlink_status_t status;
             for (unsigned i = 0; i < len; ++i)
@@ -319,6 +723,7 @@ int PX4Communicator::Recieve(bool blocking)
                             mavlink_msg_hil_actuator_controls_decode(&msg, &controls);
                             vehicle->setPXControls(controls);
                             got = 1;
+                            seen_controls = true;   // slows the HITL heartbeat to 1 Hz
                     }
               }
             }

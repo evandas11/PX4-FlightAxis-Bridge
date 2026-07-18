@@ -28,11 +28,45 @@ step() { printf '%s==>%s %s%s%s\n' "$C_BLU" "$C_OFF" "$C_BLD" "$*" "$C_OFF"; }
 info() { printf '    %s\n' "$*"; }
 ok()   { printf '    %sok%s   %s\n' "$C_GRN" "$C_OFF" "$*"; }
 warn() { printf '%swarning:%s %s\n' "$C_YEL" "$C_OFF" "$*" >&2; }
-die()  { printf '%serror:%s %s\n' "$C_RED" "$C_OFF" "$*" >&2; exit 1; }
 
 # Actions actually performed on disk, for the final summary.
 CHANGES=""
 record() { CHANGES="${CHANGES}    $1"$'\n'; }
+
+# Pre-image of the SIM CMakeLists, set only for the window between the 5a
+# splice landing and the 5b splice completing. Step 5 registers two files and
+# they are only meaningful together: an include(sitl_targets_flightaxis.cmake)
+# whose airframes were never registered gives a confusing cmake error much
+# later. If we die inside that window we put 5a back.
+ROLLBACK_SIM=""
+# The 5a summary line, held back until 5b confirms (see above).
+SIM_RECORD=""
+
+_rollback() {
+	[ -n "$ROLLBACK_SIM" ] || return 0
+	[ -f "$ROLLBACK_SIM" ] || { ROLLBACK_SIM=""; return 0; }
+	if mv -f "$ROLLBACK_SIM" "$SIM_CMAKE" 2>/dev/null; then
+		printf '       rolled back the %s edit (the two registrations only work as a pair).\n' \
+			"$SIM_CMAKE_REL" >&2
+	else
+		printf '       WARNING: could not roll back %s - remove this line by hand:\n         %s\n' \
+			"$SIM_CMAKE_REL" "$INCLUDE_LINE" >&2
+	fi
+	ROLLBACK_SIM=""
+}
+
+# Never exit on an error without telling the user what is already on disk and
+# how to undo it: a half-installed tree that reports nothing is the worst case.
+die() {
+	printf '%serror:%s %s\n' "$C_RED" "$C_OFF" "$*" >&2
+	_rollback
+	if [ -n "$CHANGES" ] && [ "${DRY_RUN:-0}" -eq 0 ]; then
+		printf '\n%sChanges already made under %s:%s\n' "$C_BLD" "${PX4_DIR:-?}" "$C_OFF" >&2
+		printf '%s' "$CHANGES" >&2
+		printf '\n    Undo them with:  %s/uninstall.sh %s\n\n' "$REPO_DIR" "${PX4_DIR:-}" >&2
+	fi
+	exit 1
+}
 
 # ------------------------------------------------------------------ args ----
 usage() {
@@ -226,7 +260,7 @@ fi
 ok "no SYS_AUTOSTART collisions in the 1200-1219 range"
 
 # Uncommitted local modifications to files we are about to overwrite.
-if [ -d "$PX4_DIR/.git" ] && command -v git >/dev/null 2>&1; then
+if px4_is_git "$PX4_DIR"; then
 	TRACKED="$SIM_CMAKE_REL $AF_CMAKE_REL Tools/simulation/flightaxis src/modules/simulation/simulator_mavlink/sitl_targets_flightaxis.cmake"
 	for a in $AIRFRAMES; do
 		TRACKED="$TRACKED ROMFS/px4fmu_common/init.d-posix/airframes/$a"
@@ -264,18 +298,58 @@ fi
 # ================================================================= 3/7 ======
 step "3/7  Backing up PX4-owned CMakeLists.txt files"
 
+# backup <file> <stripper-command...>
+#
+# The backup must always hold the PX4-owned file as it is *right now* minus our
+# own lines. Blindly keeping a pre-existing backup was a data-loss bug: install
+# -> git pull (upstream updates the CMakeLists) -> re-install kept the stale
+# pre-pull backup, and the next uninstall "restored" it, silently reverting the
+# upstream update. So we compare the backup against the current file with our
+# lines stripped out, and refresh it when they disagree.
 backup() {
-	src="$1"; bak="$1.flightaxis.bak"
-	if [ -f "$bak" ]; then
-		info "backup already exists, keeping the original: ${bak#$PX4_DIR/}"
-	else
+	src="$1"; shift
+	bak="$src.flightaxis.bak"
+	rel="${src#$PX4_DIR/}"
+
+	if [ ! -f "$bak" ]; then
 		run cp -p "$src" "$bak"
-		ok "backed up ${src#$PX4_DIR/} -> ${bak#$PX4_DIR/}"
+		ok "backed up $rel -> ${bak#$PX4_DIR/}"
 		[ "$DRY_RUN" -eq 1 ] || record "created  ${bak#$PX4_DIR/}"
+		return 0
 	fi
+
+	# What the backup *should* contain: the current file without our lines.
+	pristine="$src.flightaxis.pristine.$$"
+	"$@" "$src" > "$pristine" 2>/dev/null || { rm -f "$pristine"; }
+	if [ -f "$pristine" ] && cmp -s "$pristine" "$bak"; then
+		rm -f "$pristine"
+		info "backup already exists and still matches: ${bak#$PX4_DIR/}"
+		return 0
+	fi
+
+	warn "$rel has changed upstream since the existing backup was taken
+         (a git pull, or a manual edit). Refreshing the backup - keeping the
+         old one would make uninstall.sh revert that change."
+	if [ "$DRY_RUN" -eq 1 ]; then
+		rm -f "$pristine"
+		printf '    %s[dry-run]%s refresh %s\n' "$C_YEL" "$C_OFF" "${bak#$PX4_DIR/}"
+		return 0
+	fi
+	if [ -f "$pristine" ]; then
+		cat "$pristine" > "$bak"
+		rm -f "$pristine"
+	else
+		cp -p "$src" "$bak"
+	fi
+	ok "refreshed backup ${bak#$PX4_DIR/}"
+	record "refreshed ${bak#$PX4_DIR/}"
 }
-backup "$SIM_CMAKE"
-backup "$AF_CMAKE"
+# fa_strip_include takes the line to remove as its second argument; the backup
+# helper passes only the file, so bind INCLUDE_LINE here.
+fa_strip_include_of() { fa_strip_include "$1" "$INCLUDE_LINE"; }
+
+backup "$SIM_CMAKE" fa_strip_include_of
+backup "$AF_CMAKE"  fa_strip_airframes
 
 # ================================================================= 4/7 ======
 step "4/7  Copying the FlightAxis payload"
@@ -326,16 +400,18 @@ Tools/simulation/flightaxis/flightaxis_bridge/models/$m.json"
 		EXPECTED="$EXPECTED
 ROMFS/px4fmu_common/init.d-posix/airframes/$a"
 	done
-	NOT_LANDED=""
-	printf '%s\n' "$EXPECTED" | while IFS= read -r rel; do
-		[ -n "$rel" ] || continue
-		[ -f "$PX4_DIR/$rel" ] || printf '%s\n' "$rel"
-	done > /tmp/.flightaxis_missing.$$ || true
-	NOT_LANDED="$(cat /tmp/.flightaxis_missing.$$)"; rm -f /tmp/.flightaxis_missing.$$
+	# Collected in a variable rather than through a predictable path in the
+	# world-writable /tmp (/tmp/.flightaxis_missing.$$ was a symlink-attack
+	# target and needed no file at all).
+	NOT_LANDED="$(
+		printf '%s\n' "$EXPECTED" | while IFS= read -r rel; do
+			[ -n "$rel" ] || continue
+			[ -f "$PX4_DIR/$rel" ] || printf '%s\n' "$rel"
+		done
+	)"
 	if [ -n "$NOT_LANDED" ]; then
-		printf '%serror:%s these files did not land in the PX4 tree:\n' "$C_RED" "$C_OFF" >&2
-		printf '%s\n' "$NOT_LANDED" | sed 's/^/         /' >&2
-		exit 1
+		die "these files did not land in the PX4 tree:
+$(printf '%s\n' "$NOT_LANDED" | sed 's/^/         /')"
 	fi
 	# sitl_run.sh must stay executable or the make target dies at launch.
 	[ -x "$PX4_DIR/Tools/simulation/flightaxis/sitl_run.sh" ] \
@@ -373,57 +449,23 @@ else
 		diff -u "$SIM_CMAKE" "$TMP" | sed 's/^/      /' || true
 		rm -f "$TMP"
 	else
+		# Keep a pre-image until 5b has also succeeded (see ROLLBACK_SIM): an
+		# include() pointing at a cmake file whose airframes were never
+		# registered is worse than no include() at all.
+		ROLLBACK_SIM="$SIM_CMAKE.flightaxis.pre.$$"
+		cp -p "$SIM_CMAKE" "$ROLLBACK_SIM"
 		mv "$TMP" "$SIM_CMAKE"
 		ok "added $INCLUDE_LINE to $SIM_CMAKE_REL"
-		record "edited   $SIM_CMAKE_REL  (+1 line: $INCLUDE_LINE)"
+		SIM_RECORD="edited   $SIM_CMAKE_REL  (+1 line: $INCLUDE_LINE)"
 	fi
 fi
 
 # --- 5b: the four airframe entries -----------------------------------------
-# Rewrites the px4_add_romfs_files() list: drops any existing flightaxis entry in
-# our reserved 1200-1219 range, then re-inserts $AIRFRAMES as one block in sorted
-# position (before the first entry with a larger id). Deterministic => running it
-# twice is a no-op, and a partial install converges to the correct result.
-splice_airframes() {
-	awk '
-		function isblank(l) { return l ~ /^[ \t]*$/ }
-		function emit(l) { print l; last_blank = isblank(l) }
-		BEGIN { inlist = 0; done = 0; removed = 0 }
-		{
-			if (!inlist) {
-				if ($0 ~ /^px4_add_romfs_files\(/) { inlist = 1 }
-				emit($0); next
-			}
-			if ($0 ~ /^\)/) { inlist = 0; emit($0); next }
-
-			# Drop entries we own, wherever they currently are.
-			if ($0 ~ /^[ \t]*12[0-1][0-9]_flightaxis_[a-z0-9_]+[ \t]*$/) {
-				removed = 1; next
-			}
-			# Squeeze a blank line that removal left doubled up.
-			if (isblank($0)) {
-				if (removed && last_blank) next
-				emit($0); next
-			}
-			# Sorted insertion point: first list entry with an id above ours.
-			if (!done && $0 ~ /^[ \t]*[0-9]+_/) {
-				n = $0
-				sub(/^[ \t]*/, "", n)
-				sub(/_.*$/, "", n)
-				if (n + 0 > 1219) {
-					na = split(airframes, a, " ")
-					for (i = 1; i <= na; i++) { emit("\t" a[i]) }
-					emit("")
-					done = 1
-				}
-			}
-			removed = 0
-			emit($0)
-		}
-		END { exit (done ? 0 : 3) }
-	' airframes="$AIRFRAMES" "$1"
-}
-
+# fa_splice_airframes (scripts/detect-px4.sh) rewrites the px4_add_romfs_files()
+# list: it drops any existing flightaxis entry in our reserved 1200-1219 range,
+# then re-inserts $AIRFRAMES as one block in sorted position. It lives next to
+# the matching removal filter so install and uninstall cannot drift apart - that
+# drift is what let a CRLF tree end up with duplicated entries.
 MISSING_AF=""
 for a in $AIRFRAMES; do
 	grep -qE "^[[:space:]]*${a}[[:space:]]*$" "$AF_CMAKE" || MISSING_AF="$MISSING_AF $a"
@@ -440,9 +482,10 @@ else
 $(for a in $AIRFRAMES; do printf '         %s\n' "$a"; done)"
 
 	TMP="$AF_CMAKE.flightaxis.tmp.$$"
-	if ! splice_airframes "$AF_CMAKE" > "$TMP"; then
+	if ! fa_splice_airframes "$AF_CMAKE" "$AIRFRAMES" > "$TMP"; then
 		rm -f "$TMP"
-		die "could not find a sorted insertion point (no airframe id above 1203) in
+		die "could not find a sorted insertion point (no airframe id above 1219) inside the
+       px4_add_romfs_files() list in
        $AF_CMAKE_REL
        Refusing to blind-append. Register the four 120x_flightaxis_* entries manually."
 	fi
@@ -450,6 +493,23 @@ $(for a in $AIRFRAMES; do printf '         %s\n' "$a"; done)"
 		grep -qE "^[[:space:]]*${a}[[:space:]]*$" "$TMP" \
 			|| { rm -f "$TMP"; die "splice into $AF_CMAKE_REL did not register $a"; }
 	done
+	# "is each name present?" is not enough on its own: the CRLF duplication bug
+	# re-emitted every entry and still passed that check. Count them, and require
+	# every one to sit inside the px4_add_romfs_files() list.
+	N_ENTRIES="$(grep -cE "^[[:space:]]*12[01][0-9]_flightaxis_" "$TMP" || true)"
+	N_EXPECT="$(printf '%s\n' $AIRFRAMES | grep -c . || true)"
+	[ "$N_ENTRIES" -eq "$N_EXPECT" ] || { rm -f "$TMP"; die \
+		"splice into $AF_CMAKE_REL produced $N_ENTRIES flightaxis entries, expected $N_EXPECT
+       (duplicate or stray entries - refusing to write the file)"; }
+	N_INSIDE="$(awk '
+		/^px4_add_romfs_files\(/ { inlist = 1; next }
+		inlist && /^[ \t]*\)/    { inlist = 0; next }
+		inlist && /^[ \t]*12[01][0-9]_flightaxis_/ { n++ }
+		END { print n + 0 }
+	' "$TMP")"
+	[ "$N_INSIDE" -eq "$N_EXPECT" ] || { rm -f "$TMP"; die \
+		"splice into $AF_CMAKE_REL put $N_INSIDE of $N_EXPECT entries inside the
+       px4_add_romfs_files() list; the rest would land at top level and break cmake."; }
 
 	if [ "$DRY_RUN" -eq 1 ]; then
 		printf '    %s[dry-run]%s would register the airframes in %s:\n' \
@@ -462,6 +522,16 @@ $(for a in $AIRFRAMES; do printf '         %s\n' "$a"; done)"
 		record "edited   $AF_CMAKE_REL  (+ airframe entries:$MISSING_AF)"
 	fi
 fi
+
+# Both halves of step 5 are in place, so the 5a edit is committed: drop the
+# pre-image and start reporting it as a change. A later failure (the build,
+# verification) must NOT undo the registration - it is correct, and the error
+# message tells the user to fix the build and re-run.
+if [ -n "$ROLLBACK_SIM" ]; then
+	rm -f "$ROLLBACK_SIM"
+	ROLLBACK_SIM=""
+fi
+[ -z "${SIM_RECORD:-}" ] || { record "$SIM_RECORD"; SIM_RECORD=""; }
 
 # ================================================================= 6/7 ======
 step "6/7  Building"

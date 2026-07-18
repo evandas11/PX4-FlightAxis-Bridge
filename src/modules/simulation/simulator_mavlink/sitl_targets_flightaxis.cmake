@@ -84,5 +84,28 @@ if(ENABLE_LOCKSTEP_SCHEDULER STREQUAL "no")
 			USES_TERMINAL
 			DEPENDS px4 flightaxis_bridge
 		)
+
+		# HITL variant: same bridge, same model JSON, but the firmware is on a
+		# real board so there is no px4 binary to build or run. DEPENDS is
+		# therefore flightaxis_bridge ONLY - deliberately not px4.
+		#
+		# A note on where this lives, because it is not obvious: this file is
+		# included from simulator_mavlink/CMakeLists.txt, and HITL does not use
+		# simulator_mavlink at all (a real board receives HIL_* through the
+		# mavlink module's own receiver). The target is here purely because
+		# this is where the flightaxis_bridge ExternalProject is defined, and a
+		# target cannot DEPEND on it from elsewhere. The practical consequence
+		# is that you configure a px4_sitl_nolockstep build tree to get a HITL
+		# runner, which is odd but harmless: nothing SITL is built or started.
+		#
+		# If you would rather not carry that oddity, skip the target entirely
+		# and call Tools/simulation/flightaxis/hitl_run.sh directly - it needs
+		# nothing from CMake beyond the built bridge binary. See HITL.md.
+		add_custom_target(flightaxis_hitl_${model}
+			COMMAND ${PX4_SOURCE_DIR}/Tools/simulation/flightaxis/hitl_run.sh ${model} ${PX4_SOURCE_DIR} ${PX4_BINARY_DIR}
+			WORKING_DIRECTORY ${SITL_WORKING_DIR}
+			USES_TERMINAL
+			DEPENDS flightaxis_bridge
+		)
 	endforeach()
 endif()

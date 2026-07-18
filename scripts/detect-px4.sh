@@ -11,6 +11,12 @@
 #   px4_is_checkout DIR      -> 0 if DIR structurally looks like PX4-Autopilot
 #   px4_version DIR          -> prints a version string (or "unknown")
 #   px4_abspath DIR          -> prints the canonical absolute path
+#   px4_is_git DIR           -> 0 if DIR is inside a git checkout (worktree-safe)
+#   fa_strip_include FILE    -> FILE without our include() line
+#   fa_strip_airframes FILE  -> FILE without our airframe entries
+#   fa_splice_airframes FILE AIRFRAMES
+#                            -> FILE with AIRFRAMES registered in sorted
+#                               position; exit 3 if there is no insertion point
 #   px4_resolve [EXPLICIT]   -> resolves the target tree; on success sets
 #                               PX4_RESOLVED       (absolute path)
 #                               PX4_RESOLVED_HOW   (human-readable reason)
@@ -31,11 +37,27 @@
 
 px4_abspath() {
 	# Canonical absolute path without requiring realpath(1).
+	#
+	# -P / pwd -P resolve symlinks. This matters: ~/PX4-Autopilot is very often
+	# a symlink to a checkout living on another disk, and with the *logical*
+	# pwd the link and its target canonicalise to two different strings, so
+	# _px4_add() fails to de-duplicate them and px4_resolve() aborts with a
+	# bogus "found 2 PX4-Autopilot checkouts".
 	if [ -d "$1" ]; then
-		(cd "$1" 2>/dev/null && pwd)
+		(cd -P "$1" 2>/dev/null && pwd -P)
 	else
 		printf '%s\n' "$1"
 	fi
+}
+
+# True if DIR is inside a git checkout. Note that a plain `[ -d "$DIR/.git" ]`
+# is wrong for git worktrees and submodules, where .git is a *file* holding a
+# gitdir: pointer - the check silently fell through and skipped the
+# uncommitted-modification guard on exactly the layouts that need it most.
+px4_is_git() {
+	[ -n "${1:-}" ] || return 1
+	command -v git >/dev/null 2>&1 || return 1
+	git -C "$1" rev-parse --git-dir >/dev/null 2>&1
 }
 
 # The four structural markers this integration needs. A directory that misses
@@ -52,7 +74,7 @@ px4_is_checkout() {
 
 px4_version() {
 	_v=""
-	if [ -d "$1/.git" ] && command -v git >/dev/null 2>&1; then
+	if px4_is_git "$1"; then
 		_v="$(git -C "$1" describe --tags --always --dirty 2>/dev/null || true)"
 	fi
 	if [ -z "$_v" ] && [ -f "$1/version.txt" ]; then
@@ -60,6 +82,129 @@ px4_version() {
 	fi
 	[ -n "$_v" ] || _v="unknown"
 	printf '%s\n' "$_v"
+}
+
+# ------------------------------------------------------- CMakeLists splices --
+#
+# install.sh and uninstall.sh MUST agree on what "an entry of ours" looks like,
+# so the matchers live here once instead of being copy-pasted into both.
+#
+# Two properties the earlier copies got wrong, both of which silently corrupted
+# the file while still passing the post-splice verification grep:
+#
+#   * CRLF. The shell pre-check greps with [[:space:]], which matches \r, so a
+#     CRLF file with a partial prior install looked "already registered" to the
+#     grep while the awk (anchored with [ \t]) failed to strip the existing
+#     entries - and then re-emitted them, doubling the list. Every matcher below
+#     therefore strips a trailing \r before matching and re-attaches the line's
+#     own ending when emitting, so a CRLF file stays CRLF and an LF file stays
+#     LF. Newly inserted lines follow the ending of the file's first line.
+#
+#   * The closing paren. `/^\)/` requires column 0; a file that closes the call
+#     with "\t)" never cleared the in-list state, so the entries were injected
+#     at top level *outside* the cmake call - a syntax error that the "is each
+#     name present?" verification still passed. All of them anchor on
+#     /^[ \t]*\)/ now, and the splicer additionally refuses to insert once the
+#     list has closed (so a missing insertion point fails loudly, exit 3,
+#     instead of appending somewhere harmful).
+
+# The reserved SYS_AUTOSTART range for this integration, as an ERE fragment.
+FA_ENTRY_RE='^[ \t]*12[0-1][0-9]_flightaxis_[a-z0-9_]+[ \t]*$'
+
+fa_strip_include() {
+	# fa_strip_include FILE INCLUDE_LINE
+	awk -v want="$2" '
+		{
+			line = $0; cr = ""
+			if (line ~ /\r$/) { cr = "\r"; sub(/\r$/, "", line) }
+			if (line == want) { next }
+			print line cr
+		}
+	' "$1"
+}
+
+fa_strip_airframes() {
+	# fa_strip_airframes FILE
+	awk -v entry_re="$FA_ENTRY_RE" '
+		function isblank(l) { return l ~ /^[ \t]*$/ }
+		function emit(l, e) { print l e }
+		BEGIN { inlist = 0; removed = 0 }
+		{
+			line = $0; cr = ""
+			if (line ~ /\r$/) { cr = "\r"; sub(/\r$/, "", line) }
+
+			if (!inlist) {
+				if (line ~ /^px4_add_romfs_files\(/) { inlist = 1 }
+				emit(line, cr); next
+			}
+			if (line ~ /^[ \t]*\)/) { inlist = 0; emit(line, cr); next }
+			if (line ~ entry_re) { removed = 1; next }
+			# A blank directly after our block is the separator the splicer
+			# itself emitted, so it goes with the block. `removed` is cleared by
+			# every other emitted line, so a blank the user put elsewhere in the
+			# list is never touched. This exactness is what lets uninstall.sh
+			# reproduce the pre-install bytes and restore from the backup.
+			if (isblank(line)) {
+				if (removed) next
+				emit(line, cr); next
+			}
+			removed = 0
+			emit(line, cr)
+		}
+	' "$1"
+}
+
+fa_splice_airframes() {
+	# fa_splice_airframes FILE "AIRFRAME AIRFRAME ..."
+	#
+	# Drops any existing entry of ours wherever it currently sits, then
+	# re-inserts the whole set as one block before the first list entry with an
+	# id above our reserved range. Deterministic, so running it twice is a
+	# no-op and a partial install converges. Exit 3 = no insertion point.
+	awk -v airframes="$2" -v entry_re="$FA_ENTRY_RE" '
+		function isblank(l) { return l ~ /^[ \t]*$/ }
+		function emit(l, e) { print l e }
+		BEGIN { inlist = 0; done = 0; removed = 0; closed = 0; first = 1; eol = "" }
+		{
+			line = $0; cr = ""
+			if (line ~ /\r$/) { cr = "\r"; sub(/\r$/, "", line) }
+			if (first) { eol = cr; first = 0 }
+
+			if (!inlist) {
+				# Only the first px4_add_romfs_files() list is eligible; once it
+				# has closed we never insert again.
+				if (!closed && line ~ /^px4_add_romfs_files\(/) { inlist = 1 }
+				emit(line, cr); next
+			}
+			if (line ~ /^[ \t]*\)/) { inlist = 0; closed = 1; emit(line, cr); next }
+
+			# Drop entries we own, wherever they currently are.
+			if (line ~ entry_re) { removed = 1; next }
+
+			# The blank directly after our block is ours (see fa_strip_airframes);
+			# drop it here so re-inserting below reproduces it exactly once.
+			if (isblank(line)) {
+				if (removed) next
+				emit(line, cr); next
+			}
+
+			# Sorted insertion point: first list entry with an id above ours.
+			if (!done && line ~ /^[ \t]*[0-9]+_/) {
+				n = line
+				sub(/^[ \t]*/, "", n)
+				sub(/_.*$/, "", n)
+				if (n + 0 > 1219) {
+					na = split(airframes, a, " ")
+					for (i = 1; i <= na; i++) { emit("\t" a[i], eol) }
+					emit("", eol)
+					done = 1
+				}
+			}
+			removed = 0
+			emit(line, cr)
+		}
+		END { exit (done ? 0 : 3) }
+	' "$1"
 }
 
 # ------------------------------------------------------------ candidate set --

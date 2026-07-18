@@ -121,34 +121,12 @@ run() {
 # --------------------------------------------------------------- splices ----
 step "1/3  Undoing the CMakeLists.txt registrations"
 
-# Removal filters: the exact inverse of what install.sh inserts.
-strip_include() {
-	awk -v line="$INCLUDE_LINE" '$0 == line { next } { print }' "$1"
-}
-
-strip_airframes() {
-	awk '
-		function isblank(l) { return l ~ /^[ \t]*$/ }
-		function emit(l) { print l; last_blank = isblank(l) }
-		BEGIN { inlist = 0; removed = 0 }
-		{
-			if (!inlist) {
-				if ($0 ~ /^px4_add_romfs_files\(/) { inlist = 1 }
-				emit($0); next
-			}
-			if ($0 ~ /^\)/) { inlist = 0; emit($0); next }
-			if ($0 ~ /^[ \t]*12[0-1][0-9]_flightaxis_[a-z0-9_]+[ \t]*$/) {
-				removed = 1; next
-			}
-			if (isblank($0)) {
-				if (removed && last_blank) next
-				emit($0); next
-			}
-			removed = 0
-			emit($0)
-		}
-	' "$1"
-}
+# Removal filters: the exact inverse of what install.sh inserts. They live in
+# scripts/detect-px4.sh alongside the insertion filter, so the two can never
+# drift apart - when they did, a CRLF tree was left with entries that install
+# thought were registered and uninstall could not remove.
+strip_include()   { fa_strip_include "$1" "$INCLUDE_LINE"; }
+strip_airframes() { fa_strip_airframes "$1"; }
 
 # Restore from the backup when it is byte-identical to what a surgical removal
 # would produce (the normal case). If they differ, the file has been edited
@@ -160,7 +138,14 @@ undo_file() {
 
 	[ -f "$file" ] || { warn "$label is missing; skipping"; return 0; }
 
-	tmp="$file.flightaxis.undo.$$"
+	# --dry-run is documented as "change nothing", so it must not create the
+	# scratch file next to the target either (that also made --dry-run fail on a
+	# read-only tree, which is exactly where you would want to use it).
+	if [ "$DRY_RUN" -eq 1 ]; then
+		tmp="$(mktemp "${TMPDIR:-/tmp}/flightaxis-undo.XXXXXX")"
+	else
+		tmp="$file.flightaxis.undo.$$"
+	fi
 	"$stripper" "$file" > "$tmp"
 
 	if cmp -s "$tmp" "$file"; then
