@@ -10,6 +10,9 @@ PX4_FLIGHTAXIS_IP=192.168.10.1 make px4_sitl_nolockstep flightaxis_plane
 # QGC connects on UDP 14550 as usual
 ```
 
+Day-to-day operation — network setup, per-vehicle channel maps, home position, MAVLink
+endpoints, troubleshooting: **[RUNNING.md](RUNNING.md)**.
+
 Full design rationale, frame conversions, and timing logic:
 [`FLIGHTAXIS_PX4_INTEGRATION.md`](FLIGHTAXIS_PX4_INTEGRATION.md) (the spec — §6/§7 are
 verified against ArduPilot `SIM_FlightAxis.cpp`).
