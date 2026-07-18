@@ -12,10 +12,42 @@
 # otherwise override the default back to 10 ms.
 param set EKF2_GPS_DELAY 0
 
-# The lift motors idle during fixed-wing cruise and SITL reports 0 A for every
-# ESC, which the actuator failure detector reads as a dead motor.
-param set-default FD_ACT_EN 0
-param set-default FD_ACT_MOT_TOUT 500
+# rcS sets SDLOG_MODE 1 ("from boot until disarm"), which closes the log at the
+# FIRST disarm; the spec section 11 validation checklist spans several arm/disarm
+# cycles, so most of it -- including the groundtruth-vs-estimate check -- would
+# never reach a log. Mode 4 is "from 1st armed until shutdown". SDLOG_MODE is
+# @reboot_required, so this has to be a startup default, not a pxh> command.
+param set-default SDLOG_MODE 4
+
+# Only IMU instance 0 is ever supplied: the bridge sends HIL_SENSOR with id = 0,
+# so SimulatorMavlink only ever fills _px4_accel[0]/_px4_gyro[0]. px4-rc.mavlinksim
+# asks for 3, which leaves two EKF instances running on dead sensors.
+# Forced with "param set": px4-rc.mavlinksim runs after this file and would
+# otherwise override the default back to 3. Note 0 is not an alternative --
+# EKF2.cpp clamps EKF2_MULTI_IMU to a minimum of 1 whenever SENS_IMU_MODE is 0.
+param set EKF2_MULTI_IMU 1
+
+# Headless runs (QGC optional) have no manual control source at all. Value 4
+# ("ignore any stick input") is the only value that skips the RC-loss failsafe;
+# rcS's default of 1 does not. Without this, RC-loss failsafe is avoided only by
+# the _manual_control_lost_at_arming fallback, which stops applying if manual
+# control is ever briefly present. NAV_RCL_ACT is deliberately left at its
+# firmware default: it is unreachable once COM_RC_IN_MODE is 4, and the value 0
+# suggested for it is outside the parameter's declared range (@min 1).
+param set-default COM_RC_IN_MODE 4
+
+# NOTE: the motor failure detector cannot fire in v1.16 SITL, for any vehicle.
+# The inherited comment here (copied with the values from
+# 1040_gazebo-classic_standard_vtol) claimed SITL reports 0 A for every ESC.
+# It does not: SimulatorMavlink publishes esc_current = 1 + |control| * 15 while
+# armed, i.e. 1-16 A. The undercurrent test is
+#   esc_current < esc_throttle * FD_ACT_MOT_C2T   (FD_ACT_MOT_C2T default 2.0)
+# and 1 + 15c < 2c has no solution for any throttle c, so the detector can never
+# trip. FD_ACT_EN 0 and FD_ACT_MOT_TOUT 500 were therefore suppressing nothing
+# and have been removed: they are left at firmware defaults so that if upstream
+# ever fixes the SITL ESC current model, detection starts working here rather
+# than staying silently masked. Corollary: we currently get no motor-failure
+# detection in SITL at all.
 
 # Actuator geometry (QGC Actuators tab) MUST match the "px4" output indices
 # in Tools/simulation/flightaxis/flightaxis_bridge/models/quadplane.json.
