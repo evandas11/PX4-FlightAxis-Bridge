@@ -12,53 +12,202 @@
 # otherwise override the default back to 10 ms.
 param set EKF2_GPS_DELAY 0
 
+# rcS sets SDLOG_MODE 1 ("from boot until disarm"), so logging would stop at the
+# first disarm and never restart. 4 = "from first arm until last disarm".
+param set-default SDLOG_MODE 4
+
+# Negative disables the pre-takeoff auto-disarm. rc.heli_defaults sets 60 s,
+# which cuts a bench test of the swash/tail response short and reads like a bug.
+param set-default COM_DISARM_PRFLT -1
+
+#
+# KNOWN SCALING DEFECT IN THE BRIDGE (not fixable from this file).
+#
+# flightaxis_bridge.cpp buildChannels() converts each bipolar swash servo with
+# out = (v+1)/2 and only THEN runs HeliDemix on those already-remapped values.
+# Substituting ch_i = (s_i+1)/2 into roll=s1-s2, pitch=(s1+s2)/2-s3 halves both:
+# a full-scale command should reach RealFlight 1.0 (gain 0.5 about the 0.5
+# centre), but roll arrives at gain 0.866 and pitch at 0.750. So relative to a
+# 1:1 mapping the demix OVER-drives roll by 1.732x and pitch by 1.500x;
+# collective is exactly right at 0.5. Consequence: RealFlight cyclic saturates
+# at only +-0.577 of commanded roll torque and +-0.667 of pitch.
+# Confirmed empirically, not just by derivation - commanding 3 rad/s with
+# FF 0.1 (torque 0.3) measured rf0 = 0.7600 and rf1 = 0.7250, exactly
+# 0.866*0.3+0.5 and 0.75*0.3+0.5.
+# The fix belongs in the bridge, as roll_rate/1.732 and pitch_rate/1.500
+# (NOT /0.866 and /0.75 - that recovers raw torque and clips at half command).
+# The rate gains below are deliberately NOT detuned to hide this: compensating
+# a scaling bug with control gains would leave them wrong once it is fixed.
+# Until it is, expect roll to feel ~1.7x and pitch ~1.5x hotter than the gains
+# suggest, and roll hotter than pitch.
+#
+
 # Actuator geometry (QGC Actuators tab) MUST match the "px4" output indices
 # in Tools/simulation/flightaxis/flightaxis_bridge/models/heli.json.
 #
-# CA_AIRFRAME 10 is "Helicopter (tail ESC)": the allocator emits the two motors
-# first, then the swash plate servos. PWM_MAIN_FUNC<N> lands on
+# CA_AIRFRAME 11 is "Helicopter (tail Servo)". ControlAllocator.cpp:260 gives
+# ActuatorEffectivenessHelicopter a tail of ActuatorType::SERVOS, and
+# getEffectivenessMatrix() adds actuators in the order
+#   main rotor (MOTORS), tail (SERVOS here), then CA_SP0_COUNT swash SERVOS
+# so the output functions are Motor1=101 for the rotor and Servo1..Servo4 =
+# 201..204 for tail, swash1, swash2, swash3. PWM_MAIN_FUNC<N> lands on
 # HIL_ACTUATOR_CONTROLS.controls[N-1], so the assignments below produce:
 #
 #   controls[0] = 101 Motor 1     main rotor / RSC    [0,1]  -> heli.json rf4
-#   controls[1] = 102 Motor 2     yaw tail motor      [0,1]  -> heli.json rf3
-#   controls[2] = 201 Servo 1     swash plate servo 1 [-1,1] -> heli.json rf0
-#   controls[3] = 202 Servo 2     swash plate servo 2 [-1,1] -> heli.json rf1
-#   controls[4] = 203 Servo 3     swash plate servo 3 [-1,1] -> heli.json rf2
+#   controls[1] = 201 Servo 1     yaw tail servo      [-1,1] -> heli.json rf3
+#   controls[2] = 202 Servo 2     swash plate servo 1 [-1,1] -> heli.json rf0
+#   controls[3] = 203 Servo 3     swash plate servo 2 [-1,1] -> heli.json rf1
+#   controls[4] = 204 Servo 4     swash plate servo 3 [-1,1] -> heli.json rf2
 #
-# Note the yaw tail is a MOTOR under this airframe, so PWMSim normalises it to
-# [0,1] and heli.json must scale rf3 as "unipolar". Selecting CA_AIRFRAME 11
-# ("Helicopter (tail Servo)") instead would make it [-1,1]/bipolar; if you
-# change one, change the other.
-param set-default CA_AIRFRAME 10
+# WHY NOT CA_AIRFRAME 10 ("tail ESC"), which this airframe used to select:
+# under type 10 the tail is a MOTOR, and ControlAllocator.cpp:501-513 clamps
+# motors to [0,1] (only SERVOS get -1). The tail therefore idles at exactly 0
+# and the entire negative half of the yaw command is clipped away. Measured
+# through the bridge with type 10: yaw +3 rad/s -> rf3 = 0.900, yaw -3 rad/s ->
+# rf3 = 0.000, i.e. no left yaw authority at all. Type 10 is only right for a
+# heli with a separate unidirectional electric tail motor; nearly every stock
+# RealFlight single-rotor heli instead models a collective-pitch tail rotor on
+# a bipolar rudder channel where 0.5 is zero pitch. That is a servo, so:
+#
+#   the tail is [-1,1] and heli.json MUST scale rf3 "bipolar" with disarm 0.5.
+#
+# If you do fly a model with a real electric tail motor, set CA_AIRFRAME 10,
+# renumber PWM_MAIN_FUNC2..5 to 102/201/202/203 (the swash shifts down one
+# servo index because the tail no longer consumes Servo1), and change heli.json
+# rf3 back to "unipolar" with disarm 0.0. The controls[] indices are unchanged
+# by that swap, so only rf3's scaling differs in the JSON.
+param set-default CA_AIRFRAME 11
 
 param set-default PWM_MAIN_FUNC1 101
-param set-default PWM_MAIN_FUNC2 102
-param set-default PWM_MAIN_FUNC3 201
-param set-default PWM_MAIN_FUNC4 202
-param set-default PWM_MAIN_FUNC5 203
+param set-default PWM_MAIN_FUNC2 201
+param set-default PWM_MAIN_FUNC3 202
+param set-default PWM_MAIN_FUNC4 203
+param set-default PWM_MAIN_FUNC5 204
 
 # Swash plate geometry. CA_SP0_ANG<i> is measured clockwise seen from above,
-# 0 = forward (+X). The allocator drives each servo with
-#   servo_i = collective + pitch*cos(ang_i)*arm - roll*sin(ang_i)*arm
+# 0 = forward (+X). ActuatorEffectivenessHelicopter.cpp:179-185 drives each
+# servo with
+#   servo_i = collective + pitch*cos(ang_i)*arm_i - roll*sin(ang_i)*arm_i
 # and the bridge's HeliDemix inverts that as roll=s1-s2,
 # pitch=(s1+s2)/2-s3, col=(s1+s2+s3)/3. That inverse is only exact when
 # servos 1 and 2 are mirrored about the X axis and servo 3 sits on it.
-# The PX4 defaults (0/140/220) put the mirrored pair on servos 2 and 3, which
-# leaves the demix cross-coupling roll into pitch, so override them: with
-# 300/60/180 the demix yields exactly (1.732*roll, 1.5*pitch, collective)
-# with no cross terms and no sign inversion on any axis.
+# The PX4 defaults (0/140/220) put the mirrored pair on servos 2 and 3, so a
+# pure pitch command leaks 1.766 into the demixed roll and a pure roll command
+# leaks -0.964 into pitch. With 300/60/180 (still a standard 120-degree head,
+# just with the odd servo aft) the demix is exactly diagonal:
+#   roll -> 1.732*roll,  pitch -> 1.5*pitch,  collective -> collective
+# with no cross terms and no sign inversion on any axis. Mirroring the set
+# (120/240/0) also decouples but inverts roll and pitch, so do not use it.
 param set-default CA_SP0_COUNT 3
 param set-default CA_SP0_ANG0 300
 param set-default CA_SP0_ANG1 60
 param set-default CA_SP0_ANG2 180
 
-# Start with FF-dominant rate loops (see 16001_helicopter);
-# tune P/I after the FF gain is set for the RealFlight model.
-param set-default MC_ROLLRATE_P 0
-param set-default MC_ROLLRATE_I 0
-param set-default MC_ROLLRATE_D 0
-param set-default MC_ROLLRATE_FF 0.1
-param set-default MC_PITCHRATE_P 0
-param set-default MC_PITCHRATE_I 0
-param set-default MC_PITCHRATE_D 0
-param set-default MC_PITCHRATE_FF 0.1
+# The demix inverse assumes all three arms are equal; pin them so a stray
+# QGC edit cannot silently break the decoupling above.
+param set-default CA_SP0_ARM_L0 1.0
+param set-default CA_SP0_ARM_L1 1.0
+param set-default CA_SP0_ARM_L2 1.0
+
+# Must stay 0. Any non-zero value enables getLinearServoOutput()'s asin()
+# linearisation per servo, which makes the swash mapping non-linear and breaks
+# the linear demix in the bridge.
+param set-default CA_MAX_SVO_THROW 0
+
+# Throttle curve: flat 100%. A RealFlight heli runs a constant head speed and
+# thrust is made with collective, so the main rotor channel is held wide open
+# and COM_SPOOLUP_TIME (10 s, from rc.heli_defaults) ramps it after arming.
+param set-default CA_HELI_THR_C0 1.0
+param set-default CA_HELI_THR_C1 1.0
+param set-default CA_HELI_THR_C2 1.0
+param set-default CA_HELI_THR_C3 1.0
+param set-default CA_HELI_THR_C4 1.0
+
+# Collective pitch curve. The bridge sends (collective+1)/2 to RealFlight, so
+# the PX4 default curve [-0.05 .. 0.45] only ever spans RealFlight 0.475..0.725
+# - a quarter of the model's collective travel, with hover already near the top
+# and almost no climb authority left. This linear curve spans -0.10..0.70,
+# i.e. RealFlight 0.45..0.85, putting hover near mid-stick.
+# NOTE: the blade angle a given channel value produces is a property of the
+# RealFlight model; verify in the sim and rescale if it climbs/sinks at mid-stick.
+param set-default CA_HELI_PITCH_C0 -0.10
+param set-default CA_HELI_PITCH_C1 0.10
+param set-default CA_HELI_PITCH_C2 0.30
+param set-default CA_HELI_PITCH_C3 0.50
+param set-default CA_HELI_PITCH_C4 0.70
+
+# Tail (yaw) compensation, feeding forward main-rotor torque:
+#   tail = yaw + CA_HELI_YAW_CP_S*|collective - CA_HELI_YAW_CP_O|
+#              + CA_HELI_YAW_TH_S*throttle
+# RealFlight heli models have genuine collective->yaw coupling and there is no
+# heading-hold gyro in the loop (see the RealFlight notes above), so the yaw
+# loop has to counter it. _CP_S handles the part that varies with collective,
+# which is the part the yaw integrator is too slow to catch on a fast collective
+# pull. _CP_O is the collective of least rotor drag, i.e. zero blade pitch,
+# which is 0 on the pitch curve set above.
+# _TH_S is left at 0 deliberately: the throttle curve is flat 1.0, so that term
+# would only add a CONSTANT tail offset, and a constant is exactly what the yaw
+# rate integrator removes by itself. (It would matter under CA_AIRFRAME 10,
+# where it is needed to bias a [0,1] tail motor off its lower clip - but the
+# tail is a bipolar servo here, so there is no clip to escape.)
+param set-default CA_HELI_YAW_CP_S 0.25
+param set-default CA_HELI_YAW_CP_O 0.0
+param set-default CA_HELI_YAW_TH_S 0.0
+
+# Main rotor turn direction. 0 = clockwise seen from above, which is what
+# almost every RealFlight heli model uses. Set to 1 if the model's tail pushes
+# the wrong way and yaw runs away on liftoff.
+param set-default CA_HELI_YAW_CCW 0
+
+#
+# REQUIRED CHANGES TO THE REALFLIGHT MODEL ITSELF
+#
+# RC heli models ship configured for a human pilot, with stabilisation and
+# mixing already inside the model. All of it fights PX4 and must be removed in
+# RealFlight's aircraft editor before this airframe will fly:
+#
+#  1. Heading-hold / rate gyro on the tail. This is the critical one: it is an
+#     independent yaw controller that will fight PX4's yaw loop and produce a
+#     slow yaw oscillation that no amount of MC_YAWRATE_* tuning fixes. Set the
+#     tail gyro to zero gain (or plain rate mode at minimum gain).
+#  2. Swashplate mixing (CCPM / eCCPM). The bridge already sends demixed
+#     roll / pitch / collective, so the model must be set to a NON-mixed head,
+#     with its three cyclic inputs taken straight from those channels. If the
+#     model re-mixes them, roll and pitch cross-couple.
+#  3. Collective and throttle curves in the model. Flatten them - PX4 owns both
+#     via CA_HELI_PITCH_C* and CA_HELI_THR_C* above, and a second curve in the
+#     model composes with PX4's and destroys the linearity the allocator assumes.
+#  4. Any exponential, dual rate or trim on the cyclic and rudder channels.
+#  5. Governor / RSC: leave the model's governor ON if it has one - PX4 holds
+#     the throttle channel at a constant 100% and expects constant head speed.
+#
+# Channel usage after HeliDemix (matches heli.json rf indices):
+#   rf0 = roll cyclic, rf1 = pitch cyclic, rf2 = collective,
+#   rf3 = tail rotor pitch, rf4 = main rotor throttle / RSC.
+# Reverse the channel in RealFlight (not here) if an axis responds backwards.
+
+# Rate controller. 16001_helicopter ships P=I=D=0 with FF only, but its own
+# comment says that is a bring-up state to be tuned afterwards - it leaves the
+# rate loops open, so any trim offset or disturbance integrates uncorrected and
+# the model diverges shortly after liftoff. These gains instead follow
+# ArduPilot's shipped helicopter tuning (AC_AttitudeControl_Heli.h:10-22),
+# which uses the same normalised convention as PX4 (torque in -1..1 per rad/s):
+# roll/pitch P 0.024 I 0.15 D 0.001 FF 0.15, yaw P 0.18 I 0.12 D 0.003 FF 0.024.
+# That also satisfies the PX4 helicopter guidance that P stays well below FF -
+# a heli's swash gives a large, fast, near-linear torque response, so the loop
+# is feed-forward dominant and a big P term just chases rotor phase lag.
+# UNTESTED against real RealFlight physics: a starting point to refine in Acro.
+param set-default MC_ROLLRATE_P 0.025
+param set-default MC_ROLLRATE_I 0.15
+param set-default MC_ROLLRATE_D 0.001
+param set-default MC_ROLLRATE_FF 0.15
+param set-default MC_PITCHRATE_P 0.025
+param set-default MC_PITCHRATE_I 0.15
+param set-default MC_PITCHRATE_D 0.001
+param set-default MC_PITCHRATE_FF 0.15
+param set-default MC_YAWRATE_P 0.18
+param set-default MC_YAWRATE_I 0.12
+param set-default MC_YAWRATE_D 0.003
+param set-default MC_YAWRATE_FF 0.02
+param set-default MC_RR_INT_LIM 0.4
+param set-default MC_YR_INT_LIM 0.4
