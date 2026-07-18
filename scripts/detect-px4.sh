@@ -168,48 +168,58 @@ px4_resolve() {
 	fi
 
 	# --- 3. auto-detection ------------------------------------------------
+	# Searched in tiers: the first tier that finds anything decides. A tier that
+	# finds exactly one checkout wins outright; a tier that finds several is
+	# ambiguous and aborts. This way an enclosing tree beats a tree that merely
+	# sits next to the repo, instead of the two colliding as a false ambiguity.
 	printf 'No PX4 path given and $PX4_DIR is unset - auto-detecting...\n' >&2
 
-	# (a) enclosing checkouts: cwd first, then this repo's own location
-	#     (covers a clone placed inside PX4-Autopilot/, e.g. under Tools/)
-	_px4_walk_up "$PWD" "enclosing PX4 tree above the current directory" >/dev/null 2>&1 || true
-	_px4_walk_up "$_repo" "enclosing PX4 tree above this repository" >/dev/null 2>&1 || true
+	for _tier in enclosing siblings home find; do
+		_px4_cands=""
+		_px4_reasons=""
 
-	# (b) siblings / parents of this repository
-	_px4_add "$(dirname "$_repo")" "this repository's parent directory"
-	for _rel in ../PX4-Autopilot ../../PX4-Autopilot ../px4/PX4-Autopilot; do
-		_px4_add "$_repo/$_rel" "relative to this repository ($_rel)"
-	done
-
-	# (c) conventional locations under the invoking user's home
-	if [ -n "${HOME:-}" ]; then
-		for _sub in "" src Code code dev develop workspace ws git repos Projects projects Documents; do
-			if [ -z "$_sub" ]; then
-				_px4_add "$HOME/PX4-Autopilot" "conventional location \$HOME/PX4-Autopilot"
-			else
-				_px4_add "$HOME/$_sub/PX4-Autopilot" "conventional location \$HOME/$_sub/PX4-Autopilot"
-			fi
-		done
-	fi
-
-	# (d) bounded filesystem search, only if nothing cheaper matched
-	if [ "$(_px4_count)" -eq 0 ]; then
-		printf '  nothing in the usual places; running a bounded search under $HOME...\n' >&2
-		_hits="$(_px4_find_home || true)"
-		if [ -n "$_hits" ]; then
-			printf '%s\n' "$_hits" | while IFS= read -r _h; do
-				[ -n "$_h" ] || continue
-				printf '%s\n' "$_h"
-			done > /dev/null
-			_old_ifs="$IFS"; IFS='
+		case "$_tier" in
+			enclosing)
+				# (a) a checkout containing the cwd, or containing this repo
+				#     (covers a clone placed inside PX4-Autopilot/, e.g. Tools/)
+				_px4_walk_up "$PWD"   "enclosing PX4 tree above the current directory"
+				_px4_walk_up "$_repo" "enclosing PX4 tree above this repository"
+				;;
+			siblings)
+				# (b) next to / above this repository
+				_px4_add "$(dirname "$_repo")" "this repository's parent directory"
+				for _rel in ../PX4-Autopilot ../../PX4-Autopilot ../px4/PX4-Autopilot; do
+					_px4_add "$_repo/$_rel" "relative to this repository ($_rel)"
+				done
+				;;
+			home)
+				# (c) conventional locations under the invoking user's home
+				[ -n "${HOME:-}" ] || continue
+				for _sub in "" src Code code dev develop workspace ws git repos Projects projects Documents; do
+					if [ -z "$_sub" ]; then
+						_px4_add "$HOME/PX4-Autopilot" "conventional location \$HOME/PX4-Autopilot"
+					else
+						_px4_add "$HOME/$_sub/PX4-Autopilot" "conventional location \$HOME/$_sub/PX4-Autopilot"
+					fi
+				done
+				;;
+			find)
+				# (d) bounded, pruned, time-limited last resort
+				printf '  nothing in the usual places; running a bounded search under $HOME...\n' >&2
+				_hits="$(_px4_find_home || true)"
+				[ -n "$_hits" ] || continue
+				_old_ifs="$IFS"; IFS='
 '
-			for _h in $_hits; do
-				[ -n "$_h" ] || continue
-				_px4_add "$_h" "bounded search under \$HOME"
-			done
-			IFS="$_old_ifs"
-		fi
-	fi
+				for _h in $_hits; do
+					[ -n "$_h" ] || continue
+					_px4_add "$_h" "bounded search under \$HOME"
+				done
+				IFS="$_old_ifs"
+				;;
+		esac
+
+		if [ "$(_px4_count)" -gt 0 ]; then break; fi
+	done
 
 	_n="$(_px4_count)"
 

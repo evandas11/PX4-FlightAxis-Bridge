@@ -3,11 +3,14 @@
 # Run this after editing anything in this repo.
 set -euo pipefail
 
-PX4_DIR="${PX4_DIR:-$HOME/PX4-Autopilot}"
 REPO_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 
-[ -d "$PX4_DIR/Tools/simulation" ] || {
-	echo "$PX4_DIR does not look like a PX4-Autopilot checkout (set PX4_DIR)"; exit 1; }
+# Shared resolution: argument, then $PX4_DIR, then auto-detection.
+# shellcheck source=detect-px4.sh
+. "$REPO_DIR/scripts/detect-px4.sh"
+px4_resolve "${1:-}" || exit 1
+PX4_DIR="$PX4_RESOLVED"
+echo "PX4 tree: $PX4_DIR  ($PX4_RESOLVED_HOW)"
 
 rsync -av --delete --exclude __pycache__ \
 	"$REPO_DIR/Tools/simulation/flightaxis/" \

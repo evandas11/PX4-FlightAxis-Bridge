@@ -43,10 +43,17 @@ Installs the FlightAxis (RealFlight) SITL integration into a PX4-Autopilot
 checkout: copies the payload, registers it in PX4's two CMakeLists.txt files,
 builds it, and verifies the result.
 
-Target PX4 tree resolution order:
+Target PX4 tree resolution order (first hit wins, and the choice is reported):
   1. PATH_TO_PX4 positional argument
   2. $PX4_DIR environment variable
-  3. ~/PX4-Autopilot
+  3. auto-detection:
+       a. an enclosing PX4 tree above the current directory or above this repo
+       b. next to this repo: ../PX4-Autopilot, ../../PX4-Autopilot, the parent
+       c. conventional spots under $HOME (PX4-Autopilot, src/, Code/, dev/,
+          workspace/, git/, projects/, ...)
+       d. a bounded, pruned, time-limited search under $HOME (max depth 4)
+  If several checkouts are found, they are all listed and nothing is installed:
+  disambiguate with an argument or $PX4_DIR.
 
 Options:
   --no-build    Install and register files only; skip the build step.
@@ -54,6 +61,7 @@ Options:
                 version, or uncommitted local modifications to the files this
                 installer writes. Use with care.
   --dry-run     Print every action that would be taken; change nothing.
+  --yes, -y     Do not ask for confirmation (for scripts and CI).
   -h, --help    Show this help.
 
 Examples:
@@ -67,12 +75,14 @@ PX4_ARG=""
 NO_BUILD=0
 FORCE=0
 DRY_RUN=0
+ASSUME_YES=0
 
 while [ $# -gt 0 ]; do
 	case "$1" in
 		--no-build) NO_BUILD=1 ;;
 		--force)    FORCE=1 ;;
 		--dry-run)  DRY_RUN=1 ;;
+		-y|--yes)   ASSUME_YES=1 ;;
 		-h|--help)  usage; exit 0 ;;
 		-*)         die "unknown option: $1 (try --help)" ;;
 		*)
@@ -83,14 +93,40 @@ while [ $# -gt 0 ]; do
 	shift
 done
 
-PX4_DIR="${PX4_ARG:-${PX4_DIR:-$HOME/PX4-Autopilot}}"
-case "$PX4_DIR" in
-	"~"|"~/"*) PX4_DIR="$HOME${PX4_DIR#\~}" ;;
-esac
-[ -d "$PX4_DIR" ] || die "target PX4 directory does not exist: $PX4_DIR"
-PX4_DIR="$(cd "$PX4_DIR" && pwd)"
+# ------------------------------------------------- target tree resolution ----
+# shellcheck source=scripts/detect-px4.sh
+. "$REPO_DIR/scripts/detect-px4.sh"
+
+printf '\n%s%sPX4-FlightAxis-Bridge installer%s\n' "$C_BLD" "$C_BLU" "$C_OFF"
+info "repo:   $REPO_DIR"
+
+px4_resolve "$PX4_ARG" || exit 1
+PX4_DIR="$PX4_RESOLVED"
 
 [ "$PX4_DIR" != "$REPO_DIR" ] || die "the target PX4 tree cannot be this repository"
+
+PX4_VERSION="$(px4_version "$PX4_DIR")"
+info "target: $PX4_DIR"
+info "        version: $PX4_VERSION"
+info "        selected via: $PX4_RESOLVED_HOW"
+
+# An unattended run must never install into a tree we merely guessed at.
+if [ "$PX4_RESOLVED_EXPLICIT" -eq 0 ] && [ ! -t 0 ] && [ "$DRY_RUN" -eq 0 ]; then
+	die "refusing to install into an auto-detected PX4 tree in a non-interactive run.
+       Pass the path explicitly or set \$PX4_DIR:
+         ./install.sh $PX4_DIR"
+fi
+
+# Confirm before writing, when there is a human to ask.
+if [ "$DRY_RUN" -eq 0 ] && [ "$ASSUME_YES" -eq 0 ] && [ -t 0 ]; then
+	printf '\n'
+	printf 'Install the FlightAxis integration into the tree above? [y/N] '
+	read -r _reply || _reply=""
+	case "$_reply" in
+		y|Y|yes|YES|Yes) : ;;
+		*) printf 'Aborted; nothing was changed.\n'; exit 1 ;;
+	esac
+fi
 
 # --------------------------------------------------------------- layout ----
 SIM_CMAKE_REL="src/modules/simulation/simulator_mavlink/CMakeLists.txt"
@@ -115,26 +151,17 @@ run() {
 	fi
 }
 
-printf '\n%s%sPX4-FlightAxis-Bridge installer%s\n' "$C_BLD" "$C_BLU" "$C_OFF"
-info "repo:   $REPO_DIR"
-info "target: $PX4_DIR"
-[ "$DRY_RUN" -eq 1 ] && printf '    %sdry-run: nothing will be modified%s\n' "$C_YEL" "$C_OFF"
+if [ "$DRY_RUN" -eq 1 ]; then
+	printf '    %sdry-run: nothing will be modified%s\n' "$C_YEL" "$C_OFF"
+fi
 printf '\n'
 
 # ================================================================= 1/7 ======
 step "1/7  Validating the target PX4 tree"
 
-MISSING=""
-for p in "Makefile" "Tools/simulation" "$SIM_CMAKE_REL" "$AF_CMAKE_REL"; do
-	[ -e "$PX4_DIR/$p" ] || MISSING="$MISSING $p"
-done
-if [ -n "$MISSING" ]; then
-	printf '%serror:%s %s does not look like a PX4-Autopilot checkout.\n' \
-		"$C_RED" "$C_OFF" "$PX4_DIR" >&2
-	for p in $MISSING; do printf '       missing: %s\n' "$p" >&2; done
-	printf '       Pass the correct path: ./install.sh /path/to/PX4-Autopilot\n' >&2
-	exit 1
-fi
+px4_is_checkout "$PX4_DIR" \
+	|| die "$PX4_DIR does not look like a PX4-Autopilot checkout (missing one of:
+       Makefile, Tools/simulation/, $SIM_CMAKE_REL, $AF_CMAKE_REL)"
 ok "PX4 layout looks right (Makefile, Tools/simulation, both CMakeLists.txt)"
 
 # The v1.16 per-simulator sitl_targets_*.cmake pattern is what we splice into.
@@ -153,14 +180,7 @@ if [ ! -f "$SIM_DIR/sitl_targets_flightgear.cmake" ]; then
 	fi
 fi
 
-PX4_VERSION=""
-if [ -d "$PX4_DIR/.git" ] && command -v git >/dev/null 2>&1; then
-	PX4_VERSION="$(git -C "$PX4_DIR" describe --tags --always --dirty 2>/dev/null || true)"
-fi
-if [ -z "$PX4_VERSION" ] && [ -f "$PX4_DIR/version.txt" ]; then
-	PX4_VERSION="$(head -n1 "$PX4_DIR/version.txt" 2>/dev/null || true)"
-fi
-if [ -z "$PX4_VERSION" ]; then
+if [ "$PX4_VERSION" = "unknown" ]; then
 	warn "could not determine the PX4 version (no git tags, no version.txt)."
 	warn "This integration is developed and tested against PX4 v1.16.x."
 else
@@ -406,7 +426,7 @@ splice_airframes() {
 
 MISSING_AF=""
 for a in $AIRFRAMES; do
-	grep -qE "^[[:space:]]*$a[[:space:]]*$" "$AF_CMAKE" || MISSING_AF="$MISSING_AF $a"
+	grep -qE "^[[:space:]]*${a}[[:space:]]*$" "$AF_CMAKE" || MISSING_AF="$MISSING_AF $a"
 done
 
 if [ -z "$MISSING_AF" ]; then
@@ -427,7 +447,7 @@ $(for a in $AIRFRAMES; do printf '         %s\n' "$a"; done)"
        Refusing to blind-append. Register the four 120x_flightaxis_* entries manually."
 	fi
 	for a in $AIRFRAMES; do
-		grep -qE "^[[:space:]]*$a[[:space:]]*$" "$TMP" \
+		grep -qE "^[[:space:]]*${a}[[:space:]]*$" "$TMP" \
 			|| { rm -f "$TMP"; die "splice into $AF_CMAKE_REL did not register $a"; }
 	done
 

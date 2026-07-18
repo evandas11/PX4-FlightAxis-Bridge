@@ -15,13 +15,15 @@ and becomes useless to everyone else.
 | files in the PX4 tree | `./scripts/sync-from-px4.sh` |
 | files in this repo | `./scripts/sync-to-px4.sh` |
 
-Both scripts use `PX4_DIR` (default `~/PX4-Autopilot`) to locate the PX4 checkout.
+Both scripts locate the PX4 checkout with the shared resolver in
+`scripts/detect-px4.sh`: an explicit path argument, else `$PX4_DIR`, else
+auto-detection (see README.md, Method 1).
 
 ## Not covered by the scripts
 
 Two one-line registrations live inside files owned by PX4 and are **not** mirrored
-as files — if you clone this repo onto a fresh PX4 tree, add them manually
-(see README install steps 2–3):
+as files. `./install.sh` applies them automatically (idempotently); only a manual
+install needs them added by hand (README Method 2, steps 2–3):
 
 1. `include(sitl_targets_flightaxis.cmake)` in
    `src/modules/simulation/simulator_mavlink/CMakeLists.txt`

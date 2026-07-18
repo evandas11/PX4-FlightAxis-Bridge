@@ -3,11 +3,17 @@
 # Run this after editing anything directly in the PX4 tree.
 set -euo pipefail
 
-PX4_DIR="${PX4_DIR:-$HOME/PX4-Autopilot}"
 REPO_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 
+# Shared resolution: argument, then $PX4_DIR, then auto-detection.
+# shellcheck source=detect-px4.sh
+. "$REPO_DIR/scripts/detect-px4.sh"
+px4_resolve "${1:-}" || exit 1
+PX4_DIR="$PX4_RESOLVED"
+echo "PX4 tree: $PX4_DIR  ($PX4_RESOLVED_HOW)"
+
 [ -d "$PX4_DIR/Tools/simulation/flightaxis" ] || {
-	echo "flightaxis not found in $PX4_DIR (set PX4_DIR to your PX4-Autopilot checkout)"; exit 1; }
+	echo "flightaxis is not installed in $PX4_DIR — run ./install.sh first"; exit 1; }
 
 mkdir -p "$REPO_DIR/Tools/simulation/flightaxis"
 rsync -av --delete --exclude __pycache__ \
