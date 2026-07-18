@@ -1,9 +1,32 @@
 /****************************************************************************
  *
- * FlightAxis (RealFlight) SOAP communicator for the PX4 flightaxis bridge.
+ * This file is part of the PX4-FlightAxis-Bridge project.
+ * Copyright (c) 2026 the PX4-FlightAxis-Bridge contributors.
  *
- * Socket / SOAP / parser / reconnect logic ported from ArduPilot
- * libraries/SITL/SIM_FlightAxis.{h,cpp} (GPLv3, (C) ArduPilot dev team).
+ * The socket/creator-thread design, the SOAP request bodies, the reply parser
+ * key table and scan, and the startup and reconnect logic in this file are
+ * ported from ArduPilot libraries/SITL/SIM_FlightAxis.{h,cpp}
+ * (Copyright (C) ArduPilot Dev Team, GPLv3). Because this file is a derivative
+ * work of that GPLv3 code, it is itself licensed under GPLv3 or later:
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see <https://www.gnu.org/licenses/>.
+ *
+ ****************************************************************************/
+
+/****************************************************************************
+ *
+ * FlightAxis (RealFlight) SOAP communicator for the PX4 flightaxis bridge.
  *
  * Pattern: one new TCP connection per SOAP request, with connect latency
  * hidden by a background socket-creator thread that always keeps one
@@ -14,6 +37,7 @@
 
 #pragma once
 #include <cstdint>
+#include <ctime>
 
 #include <condition_variable>
 #include <mutex>
@@ -73,6 +97,9 @@ private:
     bool parseReply(const char *reply, double *vals);
     // sequential-scan value table -> public FAState
     static void fillState(const double *vals, FAState &state);
+    // log (only) when a startup request got no / an unrecognisable reply; SOAP
+    // faults stay deliberately ignored
+    void reportStartupReply(const char *action, const char *reply);
 
     char _controller_ip[64];
     uint16_t _controller_port;
@@ -86,6 +113,10 @@ private:
     std::condition_variable _sockcond2;        // signalled when the parked socket is taken
     int _socknext;                             // parked connected socket, -1 if none
     bool _stop;
+
+    // connect-failure log dedup (creator thread only; retries every 5 ms)
+    uint32_t _connect_fail_count;
+    time_t _last_connect_fail_log;
 
     char _replybuf[10000];
 };

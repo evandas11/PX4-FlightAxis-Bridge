@@ -1,33 +1,31 @@
 /****************************************************************************
  *
- *   Copyright (c) 2026 PX4 Development Team. All rights reserved.
+ * This file is part of the PX4-FlightAxis-Bridge project.
+ * Copyright (c) 2026 the PX4-FlightAxis-Bridge contributors.
  *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions
- * are met:
+ * The three-branch physics-time handling (restart / duplicate-frame
+ * extrapolation / glitch compensation) and the Rev4Servos and HeliDemix
+ * transforms in this file are ported from ArduPilot
+ * libraries/SITL/SIM_FlightAxis.{h,cpp} update() and exchange_data()
+ * (Copyright (C) ArduPilot Dev Team, GPLv3). Because this file is a derivative
+ * work of that GPLv3 code, it is itself licensed under GPLv3 or later:
  *
- * 1. Redistributions of source code must retain the above copyright
- *    notice, this list of conditions and the following disclaimer.
- * 2. Redistributions in binary form must reproduce the above copyright
- *    notice, this list of conditions and the following disclaimer in
- *    the documentation and/or other materials provided with the
- *    distribution.
- * 3. Neither the name PX4 nor the names of its contributors may be
- *    used to endorse or promote products derived from this software
- *    without specific prior written permission.
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
  *
- * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
- * "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
- * LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS
- * FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE
- * COPYRIGHT OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT,
- * INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING,
- * BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS
- * OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED
- * AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
- * LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN
- * ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
- * POSSIBILITY OF SUCH DAMAGE.
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see <https://www.gnu.org/licenses/>.
+ *
+ * The surrounding structure also follows PX4-FlightGear-Bridge
+ * (Copyright (c) 2020 ThunderFly s.r.o., BSD-3-Clause); BSD-3-Clause is
+ * GPL-compatible, so both notices coexist in this combined work.
  *
  ****************************************************************************/
 
@@ -124,6 +122,15 @@ static void setup_unix_signals()
 static double constrain(double v, double lo, double hi)
 {
 	return (v < lo) ? lo : ((v > hi) ? hi : v);
+}
+
+// wall-clock microseconds, monotonic. Used to rate-limit retry/log paths and to
+// pace the keep-alive stream while RealFlight's physics clock is not advancing.
+static uint64_t micros()
+{
+	struct timespec ts;
+	clock_gettime(CLOCK_MONOTONIC, &ts);
+	return (uint64_t)ts.tv_sec * 1000000u + (uint64_t)(ts.tv_nsec / 1000);
 }
 
 static double envOrDefault(const char *name, double dflt)
@@ -343,11 +350,24 @@ int main(int argc, char **argv)
 
 	// timing state (port of ArduPilot SIM_FlightAxis)
 	double initial_time_s = 0.0;		// physics-time epoch capture
+	// Explicit "epoch captured" flag. This must NOT be inferred from
+	// initial_time_s <= 0.0: after a RealFlight restart the epoch is rebased to
+	// (physics_time - already_exported_clock), which is legitimately NEGATIVE
+	// once the bridge has been up longer than RealFlight. Using the sign as a
+	// sentinel re-ran the first-frame capture on every subsequent frame, which
+	// pinned each real frame to a fixed +1 ms and ran the clock 1.25x fast.
+	bool have_epoch = false;
 	double last_time_s = 0.0;		// last physics time seen
 	double average_frame_time_s = 0.0;	// EMA 0.98/0.02
 	double extrapolated_s = 0.0;		// how far we've extrapolated past the last real frame
 	uint64_t time_now_us = 0;		// physics us since epoch (glitch-compensated)
 	uint32_t glitch_count = 0;
+
+	// reinject throttle (wall clock): startController() is three SOAP round-trips
+	// including ResetAircraft, so it must not run once per loop iteration
+	const uint64_t REINJECT_INTERVAL_US = 300000;	// 300 ms
+	uint64_t last_reinject_us = 0;
+	uint64_t last_alive_us = 0;		// keep-alive pacing while reinjecting
 
 	// FPS reporting (ArduPilot report_FPS)
 	uint64_t frame_counter = 0;
@@ -368,7 +388,9 @@ int main(int argc, char **argv)
 			const double dtw = st.m_currentPhysicsTime_SEC - last_frame_count_s;
 
 			if (!(options & OPT_SILENCE_FPS) && dtw > 0.0 && average_frame_time_s > 0.0) {
-				fprintf(stderr, "[flightaxis_bridge] %.1f/%.1f FPS avg=%.1f glitches=%u\n",
+				// exchanges/loop are informational (loop free-runs against a fast
+				// RealFlight); avg= is the authoritative physics frame rate
+				fprintf(stderr, "[flightaxis_bridge] exchanges=%.1f/s loop=%.1f/s avg=%.1f FPS glitches=%u\n",
 					frames / dtw, 1000.0 / dtw, 1.0 / average_frame_time_s,
 					(unsigned)glitch_count);
 			}
@@ -429,32 +451,66 @@ int main(int argc, char **argv)
 
 		// spacebar reset or aircraft change inside RealFlight: re-inject and re-anchor
 		if (!state.m_flightAxisControllerIsActive || state.m_resetButtonHasBeenPressed) {
-			cerr << "[flightaxis_bridge] RealFlight controller "
-			     << (state.m_resetButtonHasBeenPressed ? "reset" : "inactive")
-			     << " - reinjecting controller" << endl;
-			fa.markNeedsRestart();
+			// The main loop free-runs at several kHz, so this branch is entered
+			// thousands of times per second while the flag is low. startController()
+			// is three SOAP round-trips INCLUDING ResetAircraft, so reinjecting on
+			// every iteration is a request storm against RealFlight that would also
+			// re-reset the aircraft thousands of times. Attempt it at most every
+			// REINJECT_INTERVAL_MS, regardless of whether it succeeds or fails.
+			const uint64_t now_us = micros();
 
-			if (fa.startController(reset_position)) {
-				cerr << "[flightaxis_bridge] controller injected, aircraft reset" << endl;
-				// `state` was parsed BEFORE ResetAircraft ran, so it describes the
-				// pre-reset location. Drop the offset (ArduPilot zeroes it) and let
-				// the next real frame re-anchor from the post-reset position.
-				vehicle.invalidatePositionOffset();
+			if (last_reinject_us == 0 || now_us - last_reinject_us >= REINJECT_INTERVAL_US) {
+				last_reinject_us = now_us;
 
-			} else {
-				usleep(200000);
+				cerr << "[flightaxis_bridge] RealFlight controller "
+				     << (state.m_resetButtonHasBeenPressed ? "reset" : "inactive")
+				     << " - reinjecting controller" << endl;
+				fa.markNeedsRestart();
+
+				if (fa.startController(reset_position)) {
+					cerr << "[flightaxis_bridge] controller injected, aircraft reset" << endl;
+					// `state` was parsed BEFORE ResetAircraft ran, so it describes the
+					// pre-reset location. Drop the offset (ArduPilot zeroes it) and let
+					// the next real frame re-anchor from the post-reset position.
+					vehicle.invalidatePositionOffset();
+				}
 			}
 
 			// Keep the sensor stream alive across the reinject: PX4 trips its
 			// sensor-timeout failsafe after ~0.5 s of silence, and spec 11.6 wants
-			// this to self-heal. Hold the last state, advance the clock one step,
-			// and keep draining actuator controls so the 4560 buffer cannot back up.
-			vehicle.extrapolate(0.001);
-			time_now_us += 1000;
-			px4.Send(0);
+			// this to self-heal. This keep-alive is NOT gated on the throttle above
+			// - only the SOAP reinject is. Hold the last state, advance the clock,
+			// and keep draining actuator controls so 4560 cannot back up.
+			//
+			// RealFlight's physics clock is unusable here (the controller is not
+			// injected, so we are not getting fresh frames), so the keep-alive runs
+			// off wall time at ~1 kHz. Pacing it off the loop iteration instead
+			// would run the clock at the several-kHz loop rate.
+			if (last_alive_us == 0) {
+				last_alive_us = now_us;
+			}
+
+			uint64_t alive_dt_us = now_us - last_alive_us;
+
+			if (alive_dt_us >= 1000) {
+				// a long stall must not teleport the clock forward
+				if (alive_dt_us > 100000) {
+					alive_dt_us = 100000;
+				}
+
+				last_alive_us = now_us;
+				time_now_us += alive_dt_us;
+				vehicle.setTimeUsec(time_now_us);
+				vehicle.extrapolate(alive_dt_us * 1.0e-6);
+				px4.Send(0);
+			}
+
 			px4.Recieve(false);
 			continue;
 		}
+
+		last_reinject_us = 0;
+		last_alive_us = 0;
 
 		// EMA of the physics frame time (ArduPilot exchange_data())
 		double dt = state.m_currentPhysicsTime_SEC - last_time_s;
@@ -470,7 +526,14 @@ int main(int argc, char **argv)
 		// ---- branch 1: RealFlight restarted while connected (time went backwards)
 		if (have_fa_data && dt < 0.0) {
 			cerr << "[flightaxis_bridge] physics time went backwards - RealFlight restart, re-basing" << endl;
-			initial_time_s = time_now_us * 1.0e-6;
+			// Rebase the epoch onto the clock we have ALREADY exported, so the next
+			// frame resumes at exactly time_now_us and PX4 never sees the timestamp
+			// go backwards. (Anchoring at time_now_us*1e-6 instead - i.e. treating
+			// the epoch as if physics time restarted from our own clock - makes
+			// (phys - initial_time_s) negative when RealFlight restarts near zero,
+			// which underflows the uint64 cast below into a huge forward jump.)
+			initial_time_s = state.m_currentPhysicsTime_SEC - time_now_us * 1.0e-6;
+			have_epoch = true;
 			last_time_s = state.m_currentPhysicsTime_SEC;
 			// genuine restart: drop the anchor, the next real frame recaptures it
 			vehicle.invalidatePositionOffset();
@@ -489,10 +552,10 @@ int main(int argc, char **argv)
 
 			if (delta_time > 0.0) {
 				time_now_us += (uint64_t)(delta_time * 1.0e6);
+				// push the clock in FIRST: time_now_us is the single source of
+				// truth for every timestamp PX4 sees
+				vehicle.setTimeUsec(time_now_us);
 				vehicle.extrapolate(delta_time);
-				// VehicleState advances its internal physics clock in
-				// extrapolate()/setFAData(), so no extra offset here
-				// (FG passes elapsed-us since the last sim frame instead)
 				px4.Send(0);
 				extrapolated_s += delta_time;
 			}
@@ -509,22 +572,32 @@ int main(int argc, char **argv)
 		// condition stays true for every frame while RealFlight's physics clock
 		// is still near zero, so it must NOT re-capture the position offset -
 		// that is driven by VehicleState's offset_captured flag instead.
-		if (initial_time_s <= 0.0 || !have_fa_data) {
+		if (!have_epoch || !have_fa_data) {
 			dt = 0.001;
-			initial_time_s = state.m_currentPhysicsTime_SEC - dt;
+			have_epoch = true;
+			// Rebase so this frame lands exactly dt PAST the clock we have already
+			// handed to PX4 (time_now_us may be non-zero: the reinject keep-alive
+			// runs before the first real frame). Anchoring at dt instead would make
+			// the clock stall until physics caught back up.
+			initial_time_s = state.m_currentPhysicsTime_SEC - dt - time_now_us * 1.0e-6;
 		}
 
 		// glitch compensation: swallow 50 ms - 2 s network hiccups by
 		// advancing the epoch; backwards > 500 ms is a true reset
-		double dt_effective = dt;
 		const uint64_t new_time_us = (uint64_t)((state.m_currentPhysicsTime_SEC - initial_time_s) * 1.0e6);
 
 		if (new_time_us < time_now_us) {
 			const uint64_t back_us = time_now_us - new_time_us;
 
 			if (back_us > 500000) {
-				// time going backwards
-				time_now_us = new_time_us;
+				// Physics time jumped backwards far enough to be a genuine reset.
+				// ArduPilot pulls its clock back to match; we must NOT, because a
+				// backwards HIL timestamp faults EKF2. Rebase the epoch instead so
+				// the clock we export continues forward from where it is - same
+				// treatment the "RealFlight restart" branch above applies.
+				initial_time_s = state.m_currentPhysicsTime_SEC - time_now_us * 1.0e-6;
+				have_epoch = true;
+				vehicle.invalidatePositionOffset();
 			}
 
 		} else {
@@ -538,7 +611,6 @@ int main(int argc, char **argv)
 				fprintf(stderr, "[flightaxis_bridge] glitch %.2fs\n", adjustment_s);
 				dt_us = glitch_threshold_us;
 				glitch_count++;
-				dt_effective = glitch_threshold_us * 1.0e-6;
 			}
 
 			time_now_us += dt_us;
@@ -547,9 +619,11 @@ int main(int argc, char **argv)
 		last_time_s = state.m_currentPhysicsTime_SEC;
 		have_fa_data = true;
 
-		// dt is the true elapsed physics time; dt_effective may have been capped
-		// by the glitch compensation above
-		vehicle.setFAData(state, dt_effective, dt);
+		// The clock comes from time_now_us (already glitch-capped above); dt is
+		// passed only as the TRUE elapsed physics time for the on-ground accel
+		// finite difference, so a swallowed glitch does not overstate it.
+		vehicle.setTimeUsec(time_now_us);
+		vehicle.setFAData(state, dt);
 		px4.Send(0);
 
 		// drain HIL_ACTUATOR_CONTROLS (non-blocking) for the next exchange

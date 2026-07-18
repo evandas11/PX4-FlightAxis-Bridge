@@ -28,7 +28,7 @@ are retained below and in the file headers.
 | `vehicle_state.{h,cpp}` | Frame conversions, ground-accelerometer override, pitot derivation and rangefinder ported from `SIM_FlightAxis.cpp`; sensor-message synthesis follows PX4-FlightGear-Bridge `vehicle_state.cpp` | GPLv3, © ArduPilot Dev Team; BSD-3, © 2020 ThunderFly s.r.o. |
 | `flightaxis_bridge.cpp` | Three-branch physics-time handling (restart / duplicate-frame extrapolation / glitch compensation), `Rev4Servos` and `HeliDemix` ported from `SIM_FlightAxis.cpp` `update()` and `exchange_data()`; overall structure follows `flightgear_bridge.cpp` | GPLv3, © ArduPilot Dev Team; BSD-3, © 2020 ThunderFly s.r.o. |
 | `px4_communicator.{h,cpp}` | **Adapted** from PX4-FlightGear-Bridge (message decimation and a non-blocking receive drain added) | BSD-3, © 2020 ThunderFly s.r.o. |
-| `geo_mag_declination.{cpp,h}` | **Verbatim** from PX4-FlightGear-Bridge | BSD-3, © 2020 ThunderFly s.r.o. |
+| `geo_mag_declination.{cpp,h}` | **Verbatim** from PX4-FlightGear-Bridge (which itself carries it verbatim from the MAV GEO Library) | BSD-3, © 2014 MAV GEO Library (MAVGEO) |
 
 `Tools/simulation/flightaxis/flightaxis_bridge/cmake/FindMAVLink.cmake` — verbatim
 from PX4-FlightGear-Bridge (BSD-3, © 2020 ThunderFly s.r.o.).

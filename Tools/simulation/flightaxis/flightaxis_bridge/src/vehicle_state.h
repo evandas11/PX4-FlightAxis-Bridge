@@ -1,33 +1,30 @@
 /****************************************************************************
  *
- *   Copyright (c) 2026 PX4 Development Team. All rights reserved.
+ * This file is part of the PX4-FlightAxis-Bridge project.
+ * Copyright (c) 2026 the PX4-FlightAxis-Bridge contributors.
  *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions
- * are met:
+ * The RealFlight->NED frame conversions, the ground-accelerometer override, the
+ * pitot-derived airspeed and the rangefinder handling declared here are ported
+ * from ArduPilot libraries/SITL/SIM_FlightAxis.{h,cpp} (Copyright (C) ArduPilot
+ * Dev Team, GPLv3). Because this file is a derivative work of that GPLv3 code,
+ * it is itself licensed under GPLv3 or later:
  *
- * 1. Redistributions of source code must retain the above copyright
- *    notice, this list of conditions and the following disclaimer.
- * 2. Redistributions in binary form must reproduce the above copyright
- *    notice, this list of conditions and the following disclaimer in
- *    the documentation and/or other materials provided with the
- *    distribution.
- * 3. Neither the name PX4 nor the names of its contributors may be
- *    used to endorse or promote products derived from this software
- *    without specific prior written permission.
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
  *
- * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
- * "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
- * LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS
- * FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE
- * COPYRIGHT OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT,
- * INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING,
- * BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS
- * OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED
- * AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
- * LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN
- * ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
- * POSSIBILITY OF SUCH DAMAGE.
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see <https://www.gnu.org/licenses/>.
+ *
+ * The surrounding structure also follows PX4-FlightGear-Bridge
+ * (Copyright (c) 2020 ThunderFly s.r.o., BSD-3-Clause); BSD-3-Clause is
+ * GPL-compatible, so both notices coexist in this combined work.
  *
  ****************************************************************************/
 
@@ -61,15 +58,15 @@ public:
 	VehicleState(double home_lat_deg, double home_lon_deg, double home_alt_m);
 
 	// Full RF->NED conversion pipeline for a NORMAL physics frame.
-	// dt      = physics-time delta in seconds (already glitch-capped by caller),
-	//           used to advance the internal clock.
-	// dt_true = the real elapsed physics time; differs from dt only when the
-	//           caller swallowed a glitch. Used for the on-ground accel finite
-	//           difference so a capped frame does not overstate acceleration.
-	void setFAData(const FAState &fa, double dt, double dt_true);
+	// dt_true = the real elapsed physics time for this frame (NOT glitch-capped).
+	//           Used only for the on-ground accel finite difference, so a
+	//           swallowed glitch does not overstate the synthesised acceleration.
+	// The message clock is NOT advanced here - the caller owns it and pushes it
+	// in with setTimeUsec() (see the comment on that function).
+	void setFAData(const FAState &fa, double dt_true);
 
 	// Extrapolation step (duplicate physics frame): advance attitude by
-	// q (x) exp(0.5*omega*dt_step), hold accel/gyro, bump internal time.
+	// q (x) exp(0.5*omega*dt_step), hold accel/gyro. Does not touch the clock.
 	void extrapolate(double dt_step);
 
 	// Capture position_offset from the current FA position fields (call on
@@ -87,8 +84,26 @@ public:
 	bool rangefinderValid() const { return std::isfinite(rangefinder_m); }
 	mavlink_distance_sensor_t getDistanceSensorMsg(int offset_us);
 
-	// internal physics clock, us (what the HIL message timestamps carry)
-	uint64_t timeUsec() const { return (uint64_t)(time_sec * 1e6); }
+	// Physics clock, us. This is a pure MIRROR of the bridge main loop's
+	// glitch-compensated `time_now_us`, which is the single source of truth:
+	// VehicleState never accumulates time of its own (an accumulator here
+	// double-counted the extrapolation steps against the following real frame
+	// and ran the whole message clock at 2x wall time).
+	//
+	// The setter clamps monotonically. The main loop is already designed to
+	// keep time_now_us monotonic across a RealFlight restart and a glitch
+	// swallow, so this is a belt-and-braces guard: a backwards HIL timestamp
+	// faults EKF2, and a stalled one merely looks like a paused simulator.
+	void setTimeUsec(uint64_t t_us)
+	{
+		if (t_us > time_usec) {
+			time_usec = t_us;
+		}
+
+		hil_gps_msg.time_usec = time_usec;
+	}
+
+	uint64_t timeUsec() const { return time_usec; }
 
 	void setPXControls(const mavlink_hil_actuator_controls_t &controls);
 	const mavlink_hil_actuator_controls_t &lastControls() const { return last_controls; }
@@ -104,8 +119,9 @@ private:
 	double home_lon;	// deg
 	double home_alt;	// m ASL
 
-	// internal physics-time since epoch capture (s); getSensorMsg adds offset_us
-	double time_sec;
+	// physics time since epoch capture (us), mirrored from the main loop;
+	// getSensorMsg() / getDistanceSensorMsg() add offset_us on top
+	uint64_t time_usec;
 
 	// vehicle state (NED / body FRD)
 	Eigen::Quaterniond q_ned;		// body -> NED rotation

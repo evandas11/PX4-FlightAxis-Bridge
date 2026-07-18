@@ -31,6 +31,25 @@
  *
  ****************************************************************************/
 
+/****************************************************************************
+ *
+ * MODIFICATION NOTICE
+ *
+ * This file is adapted from PX4-FlightGear-Bridge for the PX4-FlightAxis-Bridge
+ * project. Changes made here by the PX4-FlightAxis-Bridge contributors:
+ *  - per-message decimation of HIL_GPS (10 Hz), HIL_STATE_QUATERNION (50 Hz)
+ *    and DISTANCE_SENSOR (20 Hz), because Send() runs at RealFlight's ~250 Hz
+ *    frame rate plus every 1 ms extrapolation step and only HIL_SENSOR needs
+ *    to go out at that full rate
+ *  - the HIL_STATE_QUATERNION (ground truth) and DISTANCE_SENSOR sends
+ *  - a non-blocking receive drain, so the bridge is never stalled by PX4
+ *
+ * The file is distributed as part of a work licensed under GPLv3 or later, but
+ * its own terms remain the BSD-3-Clause licence above, as GPLv3 section 7
+ * permits. It is not relicensed.
+ *
+ ****************************************************************************/
+
 /**
  * @file px4_communicator.h
  *

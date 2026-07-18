@@ -1,9 +1,34 @@
 /****************************************************************************
  *
+ * This file is part of the PX4-FlightAxis-Bridge project.
+ * Copyright (c) 2026 the PX4-FlightAxis-Bridge contributors.
+ *
+ * The socket/creator-thread design, the SOAP request bodies, the reply parser
+ * key table and scan, and the startup and reconnect logic in this file are
+ * ported from ArduPilot libraries/SITL/SIM_FlightAxis.{h,cpp}
+ * (Copyright (C) ArduPilot Dev Team, GPLv3). Because this file is a derivative
+ * work of that GPLv3 code, it is itself licensed under GPLv3 or later:
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see <https://www.gnu.org/licenses/>.
+ *
+ ****************************************************************************/
+
+/****************************************************************************
+ *
  * FlightAxis (RealFlight) SOAP communicator for the PX4 flightaxis bridge.
  *
- * Socket / SOAP / parser / reconnect logic ported from ArduPilot
- * libraries/SITL/SIM_FlightAxis.{h,cpp} (GPLv3, (C) ArduPilot dev team):
+ * Ported from ArduPilot SIM_FlightAxis.{h,cpp}:
  *  - one new TCP connection per SOAP request, hidden behind a background
  *    socket-creator thread that always keeps one connected socket parked
  *  - HTTP POST framing and SOAP envelopes copied verbatim
@@ -280,7 +305,9 @@ FACommunicator::FACommunicator(const char *ip) :
     _controller_port(18083),
     _controller_started(false),
     _socknext(-1),
-    _stop(false)
+    _stop(false),
+    _connect_fail_count(0),
+    _last_connect_fail_log(0)
 {
     snprintf(_controller_ip, sizeof(_controller_ip), "%s", ip ? ip : "127.0.0.1");
     _replybuf[0] = 0;
@@ -324,8 +351,29 @@ void FACommunicator::socketCreator()
          */
         int fd = connect_timeout(_controller_ip, _controller_port, 100);
         if (fd < 0) {
-            printf("[flightaxis_bridge] connect to %s:%u failed\n",
-                   _controller_ip, (unsigned)_controller_port);
+            /*
+              This retries every 5 ms, so logging every failure produced ~200
+              lines/s of identical text while RealFlight was unreachable. Keep
+              the message - it is the main diagnostic when the Windows box is
+              misconfigured - but log the first one, then one summary every 5 s
+              with the suppressed count.
+             */
+            const time_t now = time(nullptr);
+            _connect_fail_count++;
+
+            if (_connect_fail_count == 1) {
+                printf("[flightaxis_bridge] connect to %s:%u failed - is RealFlight running "
+                       "with FlightAxis Link enabled?\n",
+                       _controller_ip, (unsigned)_controller_port);
+                _last_connect_fail_log = now;
+
+            } else if (now - _last_connect_fail_log >= 5) {
+                printf("[flightaxis_bridge] connect to %s:%u still failing (%u attempts)\n",
+                       _controller_ip, (unsigned)_controller_port,
+                       (unsigned)_connect_fail_count);
+                _last_connect_fail_log = now;
+            }
+
             {
                 std::lock_guard<std::mutex> lk(_sockmtx);
                 if (_stop) {
@@ -335,6 +383,12 @@ void FACommunicator::socketCreator()
             usleep(5000);
             continue;
         }
+        if (_connect_fail_count > 0) {
+            printf("[flightaxis_bridge] connect to %s:%u recovered after %u failed attempts\n",
+                   _controller_ip, (unsigned)_controller_port, (unsigned)_connect_fail_count);
+            _connect_fail_count = 0;
+        }
+
         {
             std::lock_guard<std::mutex> lk(_sockmtx);
             if (_stop) {
@@ -552,6 +606,31 @@ void FACommunicator::fillState(const double *vals, FAState &state)
   in RealFlight. As in ArduPilot, the SOAP replies are not checked:
   "already injected" style faults are treated as success.
  */
+/*
+  Diagnostic only. The startup sequence deliberately does NOT check SOAP faults
+  (an "already injected" reply IS a fault and means success), so the reply is
+  still ignored for control flow - but a MISSING reply is a different animal:
+  it means the request never reached RealFlight, or something in between (a
+  proxy/NAT/firewall with an idle timeout) dropped the pre-parked socket. That
+  used to break startup with zero output. Say something.
+ */
+void FACommunicator::reportStartupReply(const char *action, const char *reply)
+{
+    if (reply == nullptr) {
+        printf("[flightaxis_bridge] WARNING: no reply to %s from %s:%u - the request may not have "
+               "reached RealFlight (dropped/idle-timed-out connection?); startup may be incomplete\n",
+               action, _controller_ip, (unsigned)_controller_port);
+        return;
+    }
+
+    // a valid SOAP reply is always an Envelope, fault or not
+    if (strstr(reply, "Envelope") == nullptr) {
+        printf("[flightaxis_bridge] WARNING: short/unrecognised reply to %s from %s:%u "
+               "(%u bytes); startup may be incomplete\n",
+               action, _controller_ip, (unsigned)_controller_port, (unsigned)strlen(reply));
+    }
+}
+
 bool FACommunicator::startController(bool resetPosition)
 {
     printf("[flightaxis_bridge] starting controller at %s\n", _controller_ip);
@@ -560,21 +639,21 @@ bool FACommunicator::startController(bool resetPosition)
     if (fd < 0) {
         return false;
     }
-    soapRequestEnd(fd, 1000);
+    reportStartupReply("RestoreOriginalControllerDevice", soapRequestEnd(fd, 1000));
 
     if (resetPosition) {
         fd = soapRequestStart("ResetAircraft", soap_body_reset);
         if (fd < 0) {
             return false;
         }
-        soapRequestEnd(fd, 1000);
+        reportStartupReply("ResetAircraft", soapRequestEnd(fd, 1000));
     }
 
     fd = soapRequestStart("InjectUAVControllerInterface", soap_body_inject);
     if (fd < 0) {
         return false;
     }
-    soapRequestEnd(fd, 1000);
+    reportStartupReply("InjectUAVControllerInterface", soapRequestEnd(fd, 1000));
 
     _controller_started = true;
     return true;

@@ -1,33 +1,30 @@
 /****************************************************************************
  *
- *   Copyright (c) 2026 PX4 Development Team. All rights reserved.
+ * This file is part of the PX4-FlightAxis-Bridge project.
+ * Copyright (c) 2026 the PX4-FlightAxis-Bridge contributors.
  *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions
- * are met:
+ * The RealFlight->NED frame conversions, the ground-accelerometer override, the
+ * pitot-derived airspeed and the rangefinder handling in this file are ported
+ * from ArduPilot libraries/SITL/SIM_FlightAxis.{h,cpp} (Copyright (C) ArduPilot
+ * Dev Team, GPLv3). Because this file is a derivative work of that GPLv3 code,
+ * it is itself licensed under GPLv3 or later:
  *
- * 1. Redistributions of source code must retain the above copyright
- *    notice, this list of conditions and the following disclaimer.
- * 2. Redistributions in binary form must reproduce the above copyright
- *    notice, this list of conditions and the following disclaimer in
- *    the documentation and/or other materials provided with the
- *    distribution.
- * 3. Neither the name PX4 nor the names of its contributors may be
- *    used to endorse or promote products derived from this software
- *    without specific prior written permission.
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
  *
- * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
- * "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
- * LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS
- * FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE
- * COPYRIGHT OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT,
- * INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING,
- * BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS
- * OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED
- * AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
- * LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN
- * ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
- * POSSIBILITY OF SUCH DAMAGE.
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see <https://www.gnu.org/licenses/>.
+ *
+ * The surrounding structure also follows PX4-FlightGear-Bridge
+ * (Copyright (c) 2020 ThunderFly s.r.o., BSD-3-Clause); BSD-3-Clause is
+ * GPL-compatible, so both notices coexist in this combined work.
  *
  ****************************************************************************/
 
@@ -61,7 +58,7 @@ VehicleState::VehicleState(double home_lat_deg, double home_lon_deg, double home
 	home_lat(home_lat_deg),
 	home_lon(home_lon_deg),
 	home_alt(home_alt_m),
-	time_sec(0.0),
+	time_usec(0),
 	q_ned(Quaterniond::Identity()),
 	gyro(Vector3d::Zero()),
 	accel_body(0.0, 0.0, -GRAVITY_MSS),
@@ -121,17 +118,11 @@ void VehicleState::resetPositionOffset(const FAState &fa)
 	offset_captured = true;
 }
 
-void VehicleState::setFAData(const FAState &fa, double dt, double dt_true)
+void VehicleState::setFAData(const FAState &fa, double dt_true)
 {
-	if (dt <= 0.0) {
-		dt = 0.001;
-	}
-
 	if (dt_true <= 0.0) {
-		dt_true = dt;
+		dt_true = 0.001;
 	}
-
-	time_sec += dt;
 
 	// Quaternion RF -> NED: q_ned = (w=W, x=RF_Y, y=RF_X, z=-RF_Z)
 	q_ned = Quaterniond(fa.m_orientationQuaternionW,
@@ -255,8 +246,7 @@ void VehicleState::extrapolate(double dt_step)
 	// hold accel/gyro; attitude-dependent sensors follow the new attitude
 	mag_body = q_ned.inverse() * mag_ned;
 
-	time_sec += dt_step;
-	hil_gps_msg.time_usec = (uint64_t)(time_sec * 1e6);
+	// the clock is owned by the caller (setTimeUsec), not advanced here
 }
 
 void VehicleState::nedToLLA(const Vector3d &pos_ned, double &lat_deg, double &lon_deg, double &alt_m) const
@@ -272,7 +262,7 @@ void VehicleState::updateGPSMsg()
 	double lat_deg, lon_deg, alt_m;
 	nedToLLA(position_ned, lat_deg, lon_deg, alt_m);
 
-	hil_gps_msg.time_usec = (uint64_t)(time_sec * 1e6);
+	hil_gps_msg.time_usec = time_usec;
 	hil_gps_msg.fix_type = 3;
 	hil_gps_msg.lat = (int32_t)(lat_deg * 1e7);
 	hil_gps_msg.lon = (int32_t)(lon_deg * 1e7);
@@ -300,7 +290,7 @@ mavlink_hil_sensor_t VehicleState::getSensorMsg(int offset_us)
 {
 	mavlink_hil_sensor_t sensor_msg{};
 
-	sensor_msg.time_usec = (uint64_t)(time_sec * 1e6) + offset_us;
+	sensor_msg.time_usec = time_usec + offset_us;
 
 	sensor_msg.xacc = accel_body.x() + acc_nois * standard_normal_distribution_(random_generator_);
 	sensor_msg.yacc = accel_body.y() + acc_nois * standard_normal_distribution_(random_generator_);
@@ -327,7 +317,7 @@ mavlink_hil_state_quaternion_t VehicleState::getStateQuatMsg(int offset_us)
 {
 	mavlink_hil_state_quaternion_t msg{};
 
-	msg.time_usec = (uint64_t)(time_sec * 1e6) + offset_us;
+	msg.time_usec = time_usec + offset_us;
 
 	msg.attitude_quaternion[0] = (float)q_ned.w();
 	msg.attitude_quaternion[1] = (float)q_ned.x();
@@ -368,7 +358,7 @@ mavlink_distance_sensor_t VehicleState::getDistanceSensorMsg(int offset_us)
 
 	mavlink_distance_sensor_t msg{};
 
-	msg.time_boot_ms = (uint32_t)(((uint64_t)(time_sec * 1e6) + offset_us) / 1000);
+	msg.time_boot_ms = (uint32_t)((time_usec + offset_us) / 1000);
 	msg.min_distance = (uint16_t)(min_m * 100.0);
 	msg.max_distance = (uint16_t)(max_m * 100.0);
 	msg.current_distance = (uint16_t)(constrain(rangefinder_m, min_m, max_m) * 100.0);
