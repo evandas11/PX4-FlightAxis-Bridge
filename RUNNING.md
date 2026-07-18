@@ -822,14 +822,35 @@ a time), then:
 |---|---|
 | Baro and GPS altitude disagree by a constant | Should not happen — both are derived from `PX4_HOME_ALT - position_ned.z` by design. If it does, someone changed `vehicle_state.cpp`. |
 | EKF rejects GPS with a fixed delay error | The airframes force `EKF2_GPS_DELAY 0` with `param set` (not `set-default`) because `px4-rc.mavlinksim` runs *after* the airframe and would re-default it to 10 ms. Don't change it back. |
-| Quadplane reports a motor failure in cruise | `FD_ACT_EN 0` — already set. Don't re-enable. |
+| Quadplane reports a motor failure in cruise | Shouldn't happen: the detector cannot fire in v1.16 SITL at all. `SimulatorMavlink` reports 1–16 A per ESC while armed, and the undercurrent test `1 + 15c < 2c` has no solution. If you see this, something outside SITL changed. |
 | Heli rolls when you command pitch | Swashplate angles are not 300/60/180 (§2.4). |
-| Heli yaw permanently offset | `rf3` scaled bipolar instead of unipolar (§2.4). |
+| Heli has no left yaw, tail sits at zero | `1203` is on `CA_AIRFRAME 10` (tail ESC), which clamps yaw to [0,1]. It should be `11` (tail servo), with `rf3` bipolar. |
+| Heli cyclic saturates early, roll hotter than pitch | Known: the demix runs after the 0..1 remap, over-driving roll 1.732× and pitch 1.5×. |
 | Bridge on the wrong side of the network | SOAP round-trip dominates the loop; MAVLink to PX4 tolerates far more latency. Put the bridge next to RealFlight, not next to a remote PX4. |
 
 ---
 
-## 8. Validation before you trust it
+## 8. ROS 2
+
+`uxrce_dds_client` starts automatically. It is stock PX4 (`rcS`), not something this
+integration configures, and none of the FlightAxis airframes touch it. You only run the agent:
+
+```bash
+MicroXRCEAgent udp4 -p 8888
+```
+
+Check it took with `uxrce_dds_client status` in the PX4 console — you want `Running, connected`
+and `timesync converged: true`.
+
+Two gotchas account for most "the topic is empty" reports. `px4_msgs` must be built from PX4
+**v1.16**; a `main` build fails silently at the DDS layer wherever a message changed. And ROS 2
+subscribers must use **BEST_EFFORT** QoS.
+
+Measured topic rates, offboard setup and the timestamp caveats: **[ROS2.md](ROS2.md)**.
+
+---
+
+## 9. Validation before you trust it
 
 Read this before drawing conclusions from a session. The status below mirrors
 [`FLIGHTAXIS_PX4_INTEGRATION.md`](FLIGHTAXIS_PX4_INTEGRATION.md) §11 — RealFlight is Windows-only
