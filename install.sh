@@ -1,0 +1,563 @@
+#!/usr/bin/env bash
+#
+# install.sh — install the PX4-FlightAxis-Bridge integration into a PX4-Autopilot checkout.
+#
+#   ./install.sh [PATH_TO_PX4] [--no-build] [--force] [--dry-run]
+#
+# Copies the flightaxis payload into the PX4 tree, splices two one-line
+# registrations into PX4-owned CMakeLists.txt files (idempotently), builds
+# px4_sitl_nolockstep + the bridge, and verifies the result.
+#
+# Never uses sudo. Never overwrites unrelated PX4 files. Backs up the two
+# PX4-owned CMakeLists.txt files to <file>.flightaxis.bak before touching them.
+#
+set -euo pipefail
+
+REPO_DIR="$(cd "$(dirname "$0")" && pwd)"
+
+# ---------------------------------------------------------------- output ----
+if [ -t 1 ] && [ -z "${NO_COLOR:-}" ] && command -v tput >/dev/null 2>&1 \
+   && [ "$(tput colors 2>/dev/null || echo 0)" -ge 8 ]; then
+	C_RED=$(tput setaf 1); C_GRN=$(tput setaf 2); C_YEL=$(tput setaf 3)
+	C_BLU=$(tput setaf 4); C_BLD=$(tput bold);    C_OFF=$(tput sgr0)
+else
+	C_RED=''; C_GRN=''; C_YEL=''; C_BLU=''; C_BLD=''; C_OFF=''
+fi
+
+step() { printf '%s==>%s %s%s%s\n' "$C_BLU" "$C_OFF" "$C_BLD" "$*" "$C_OFF"; }
+info() { printf '    %s\n' "$*"; }
+ok()   { printf '    %sok%s   %s\n' "$C_GRN" "$C_OFF" "$*"; }
+warn() { printf '%swarning:%s %s\n' "$C_YEL" "$C_OFF" "$*" >&2; }
+die()  { printf '%serror:%s %s\n' "$C_RED" "$C_OFF" "$*" >&2; exit 1; }
+
+# Actions actually performed on disk, for the final summary.
+CHANGES=""
+record() { CHANGES="${CHANGES}    $1"$'\n'; }
+
+# ------------------------------------------------------------------ args ----
+usage() {
+	cat <<'EOF'
+Usage: ./install.sh [PATH_TO_PX4] [options]
+
+Installs the FlightAxis (RealFlight) SITL integration into a PX4-Autopilot
+checkout: copies the payload, registers it in PX4's two CMakeLists.txt files,
+builds it, and verifies the result.
+
+Target PX4 tree resolution order:
+  1. PATH_TO_PX4 positional argument
+  2. $PX4_DIR environment variable
+  3. ~/PX4-Autopilot
+
+Options:
+  --no-build    Install and register files only; skip the build step.
+  --force       Proceed despite an unrecognised PX4 layout, an unexpected PX4
+                version, or uncommitted local modifications to the files this
+                installer writes. Use with care.
+  --dry-run     Print every action that would be taken; change nothing.
+  -h, --help    Show this help.
+
+Examples:
+  ./install.sh
+  ./install.sh ~/src/PX4-Autopilot --no-build
+  PX4_DIR=~/src/PX4-Autopilot ./install.sh --dry-run
+EOF
+}
+
+PX4_ARG=""
+NO_BUILD=0
+FORCE=0
+DRY_RUN=0
+
+while [ $# -gt 0 ]; do
+	case "$1" in
+		--no-build) NO_BUILD=1 ;;
+		--force)    FORCE=1 ;;
+		--dry-run)  DRY_RUN=1 ;;
+		-h|--help)  usage; exit 0 ;;
+		-*)         die "unknown option: $1 (try --help)" ;;
+		*)
+			[ -z "$PX4_ARG" ] || die "unexpected extra argument: $1 (try --help)"
+			PX4_ARG="$1"
+			;;
+	esac
+	shift
+done
+
+PX4_DIR="${PX4_ARG:-${PX4_DIR:-$HOME/PX4-Autopilot}}"
+case "$PX4_DIR" in
+	"~"|"~/"*) PX4_DIR="$HOME${PX4_DIR#\~}" ;;
+esac
+[ -d "$PX4_DIR" ] || die "target PX4 directory does not exist: $PX4_DIR"
+PX4_DIR="$(cd "$PX4_DIR" && pwd)"
+
+[ "$PX4_DIR" != "$REPO_DIR" ] || die "the target PX4 tree cannot be this repository"
+
+# --------------------------------------------------------------- layout ----
+SIM_CMAKE_REL="src/modules/simulation/simulator_mavlink/CMakeLists.txt"
+AF_CMAKE_REL="ROMFS/px4fmu_common/init.d-posix/airframes/CMakeLists.txt"
+SIM_CMAKE="$PX4_DIR/$SIM_CMAKE_REL"
+AF_CMAKE="$PX4_DIR/$AF_CMAKE_REL"
+AF_DIR="$PX4_DIR/ROMFS/px4fmu_common/init.d-posix/airframes"
+BUILD_DIR="$PX4_DIR/build/px4_sitl_nolockstep"
+BRIDGE_BIN="$BUILD_DIR/build_flightaxis_bridge/flightaxis_bridge"
+
+AIRFRAMES="1200_flightaxis_plane 1201_flightaxis_quad 1202_flightaxis_quadplane 1203_flightaxis_heli"
+MODELS="plane quad quadplane heli"
+
+INCLUDE_LINE='include(sitl_targets_flightaxis.cmake)'
+ANCHOR_LINE='include(sitl_targets_flightgear.cmake)'
+
+run() {
+	if [ "$DRY_RUN" -eq 1 ]; then
+		printf '    %s[dry-run]%s %s\n' "$C_YEL" "$C_OFF" "$*"
+	else
+		"$@"
+	fi
+}
+
+printf '\n%s%sPX4-FlightAxis-Bridge installer%s\n' "$C_BLD" "$C_BLU" "$C_OFF"
+info "repo:   $REPO_DIR"
+info "target: $PX4_DIR"
+[ "$DRY_RUN" -eq 1 ] && printf '    %sdry-run: nothing will be modified%s\n' "$C_YEL" "$C_OFF"
+printf '\n'
+
+# ================================================================= 1/7 ======
+step "1/7  Validating the target PX4 tree"
+
+MISSING=""
+for p in "Makefile" "Tools/simulation" "$SIM_CMAKE_REL" "$AF_CMAKE_REL"; do
+	[ -e "$PX4_DIR/$p" ] || MISSING="$MISSING $p"
+done
+if [ -n "$MISSING" ]; then
+	printf '%serror:%s %s does not look like a PX4-Autopilot checkout.\n' \
+		"$C_RED" "$C_OFF" "$PX4_DIR" >&2
+	for p in $MISSING; do printf '       missing: %s\n' "$p" >&2; done
+	printf '       Pass the correct path: ./install.sh /path/to/PX4-Autopilot\n' >&2
+	exit 1
+fi
+ok "PX4 layout looks right (Makefile, Tools/simulation, both CMakeLists.txt)"
+
+# The v1.16 per-simulator sitl_targets_*.cmake pattern is what we splice into.
+SIM_DIR="$PX4_DIR/src/modules/simulation/simulator_mavlink"
+if [ ! -f "$SIM_DIR/sitl_targets_flightgear.cmake" ]; then
+	MSG="$SIM_CMAKE_REL exists but sitl_targets_flightgear.cmake does not.
+       This tree does not use the per-simulator sitl_targets_*.cmake pattern
+       that this integration relies on. PX4 v1.13-v1.15 register SITL targets in
+       platforms/posix/cmake/sitl_target.cmake instead, which needs a different
+       (manual) integration - see README.md and the spec, section 3."
+	if [ "$FORCE" -eq 1 ]; then
+		warn "$MSG"
+		warn "--force given: continuing anyway; the splice will very likely fail."
+	else
+		die "$MSG"
+	fi
+fi
+
+PX4_VERSION=""
+if [ -d "$PX4_DIR/.git" ] && command -v git >/dev/null 2>&1; then
+	PX4_VERSION="$(git -C "$PX4_DIR" describe --tags --always --dirty 2>/dev/null || true)"
+fi
+if [ -z "$PX4_VERSION" ] && [ -f "$PX4_DIR/version.txt" ]; then
+	PX4_VERSION="$(head -n1 "$PX4_DIR/version.txt" 2>/dev/null || true)"
+fi
+if [ -z "$PX4_VERSION" ]; then
+	warn "could not determine the PX4 version (no git tags, no version.txt)."
+	warn "This integration is developed and tested against PX4 v1.16.x."
+else
+	info "detected PX4 version: $PX4_VERSION"
+	case "$PX4_VERSION" in
+		v1.16*|1.16*) ok "v1.16-era tree - this is the tested configuration" ;;
+		*)
+			warn "PX4 $PX4_VERSION is not a v1.16 release."
+			warn "This integration is tested against v1.16.0 only. On v1.13-v1.15 the"
+			warn "sitl_targets_*.cmake pattern does not exist (SITL targets live in"
+			warn "platforms/posix/cmake/sitl_target.cmake) and this installer's splices"
+			warn "will not produce a working build."
+			if [ "$FORCE" -eq 1 ] || [ "$DRY_RUN" -eq 1 ]; then
+				warn "continuing (--force/--dry-run)."
+			else
+				die "refusing to install on an untested PX4 version; re-run with --force to override."
+			fi
+			;;
+	esac
+fi
+
+# ================================================================= 2/7 ======
+step "2/7  Checking for conflicts"
+
+# SYS_AUTOSTART id collisions: any 120[0-3]_* airframe that is not one of ours.
+COLLISIONS=""
+for f in "$AF_DIR"/120[0-3]_*; do
+	[ -e "$f" ] || continue
+	base="$(basename "$f")"
+	case " $AIRFRAMES " in
+		*" $base "*) : ;;
+		*) COLLISIONS="$COLLISIONS $base" ;;
+	esac
+done
+if [ -n "$COLLISIONS" ]; then
+	printf '%serror:%s SYS_AUTOSTART id collision in %s\n' "$C_RED" "$C_OFF" "$AF_DIR" >&2
+	for c in $COLLISIONS; do printf '       %s occupies an id in the 1200-1203 range we need\n' "$c" >&2; done
+	printf '       Refusing to clobber airframes that are not ours. Move or rename them,\n' >&2
+	printf '       or renumber this integration (airframe files + README) and retry.\n' >&2
+	exit 1
+fi
+ok "no SYS_AUTOSTART collisions in the 1200-1203 range"
+
+# Uncommitted local modifications to files we are about to overwrite.
+if [ -d "$PX4_DIR/.git" ] && command -v git >/dev/null 2>&1; then
+	TRACKED="$SIM_CMAKE_REL $AF_CMAKE_REL Tools/simulation/flightaxis src/modules/simulation/simulator_mavlink/sitl_targets_flightaxis.cmake"
+	for a in $AIRFRAMES; do
+		TRACKED="$TRACKED ROMFS/px4fmu_common/init.d-posix/airframes/$a"
+	done
+	# shellcheck disable=SC2086
+	STATUS="$(git -C "$PX4_DIR" status --short -- $TRACKED 2>/dev/null || true)"
+	if [ -n "$STATUS" ]; then
+		info "git status for the paths this installer touches:"
+		printf '%s\n' "$STATUS" | sed 's/^/      /'
+		# Modifications to PX4-owned files are the dangerous ones; our own payload
+		# showing up as untracked (??) is normal and expected on a re-install.
+		DIRTY="$(printf '%s\n' "$STATUS" | grep -v '^??' | grep -E "($SIM_CMAKE_REL|$AF_CMAKE_REL)" || true)"
+		if [ -n "$DIRTY" ]; then
+			if [ "$FORCE" -eq 1 ] || [ "$DRY_RUN" -eq 1 ]; then
+				warn "PX4-owned CMakeLists.txt files have uncommitted local changes; continuing (--force/--dry-run)."
+			else
+				printf '%serror:%s the PX4-owned CMakeLists.txt files this installer edits have\n' "$C_RED" "$C_OFF" >&2
+				printf '       uncommitted local modifications:\n' >&2
+				printf '%s\n' "$DIRTY" | sed 's/^/         /' >&2
+				printf '       Commit or stash them first, or re-run with --force.\n' >&2
+				printf '       (A previous run of this installer also shows up here - that is\n' >&2
+				printf '        harmless, the splices below are idempotent; use --force.)\n' >&2
+				exit 1
+			fi
+		else
+			ok "no conflicting uncommitted changes to PX4-owned files"
+		fi
+	else
+		ok "target git tree is clean for the paths we touch"
+	fi
+else
+	info "target is not a git checkout; skipping the local-modification check"
+fi
+
+# ================================================================= 3/7 ======
+step "3/7  Backing up PX4-owned CMakeLists.txt files"
+
+backup() {
+	src="$1"; bak="$1.flightaxis.bak"
+	if [ -f "$bak" ]; then
+		info "backup already exists, keeping the original: ${bak#$PX4_DIR/}"
+	else
+		run cp -p "$src" "$bak"
+		ok "backed up ${src#$PX4_DIR/} -> ${bak#$PX4_DIR/}"
+		[ "$DRY_RUN" -eq 1 ] || record "created  ${bak#$PX4_DIR/}"
+	fi
+}
+backup "$SIM_CMAKE"
+backup "$AF_CMAKE"
+
+# ================================================================= 4/7 ======
+step "4/7  Copying the FlightAxis payload"
+
+copy_tree() {
+	# copy_tree <src-dir>/ <dst-dir>/ ; preserves modes, excludes __pycache__
+	if command -v rsync >/dev/null 2>&1; then
+		run rsync -a --exclude __pycache__ --exclude '*.pyc' "$1" "$2"
+	else
+		run mkdir -p "$2"
+		if [ "$DRY_RUN" -eq 1 ]; then
+			printf '    %s[dry-run]%s cp -R %s. %s\n' "$C_YEL" "$C_OFF" "$1" "$2"
+		else
+			(cd "$1" && find . -name __pycache__ -prune -o -print0 \
+				| cpio -0pdmu --quiet "$2" 2>/dev/null) \
+			|| { cp -R "$1". "$2"; find "$2" -name __pycache__ -type d -exec rm -rf {} + 2>/dev/null || true; }
+		fi
+	fi
+}
+
+copy_tree "$REPO_DIR/Tools/simulation/flightaxis/" "$PX4_DIR/Tools/simulation/flightaxis/"
+ok "Tools/simulation/flightaxis/"
+record "copied   Tools/simulation/flightaxis/  (whole directory)"
+
+run cp -p "$REPO_DIR/src/modules/simulation/simulator_mavlink/sitl_targets_flightaxis.cmake" "$SIM_DIR/"
+ok "src/modules/simulation/simulator_mavlink/sitl_targets_flightaxis.cmake"
+record "copied   src/modules/simulation/simulator_mavlink/sitl_targets_flightaxis.cmake"
+
+for a in $AIRFRAMES; do
+	run cp -p "$REPO_DIR/ROMFS/px4fmu_common/init.d-posix/airframes/$a" "$AF_DIR/"
+	ok "ROMFS/px4fmu_common/init.d-posix/airframes/$a"
+	record "copied   ROMFS/px4fmu_common/init.d-posix/airframes/$a"
+done
+
+if [ "$DRY_RUN" -eq 0 ]; then
+	EXPECTED="Tools/simulation/flightaxis/sitl_run.sh
+Tools/simulation/flightaxis/flightaxis_bridge/CMakeLists.txt
+Tools/simulation/flightaxis/flightaxis_bridge/get_FAbridge_params.py
+Tools/simulation/flightaxis/flightaxis_bridge/FA_check.py
+Tools/simulation/flightaxis/flightaxis_bridge/cmake/FindMAVLink.cmake
+Tools/simulation/flightaxis/flightaxis_bridge/src/flightaxis_bridge.cpp
+src/modules/simulation/simulator_mavlink/sitl_targets_flightaxis.cmake"
+	for m in $MODELS; do
+		EXPECTED="$EXPECTED
+Tools/simulation/flightaxis/flightaxis_bridge/models/$m.json"
+	done
+	for a in $AIRFRAMES; do
+		EXPECTED="$EXPECTED
+ROMFS/px4fmu_common/init.d-posix/airframes/$a"
+	done
+	NOT_LANDED=""
+	printf '%s\n' "$EXPECTED" | while IFS= read -r rel; do
+		[ -n "$rel" ] || continue
+		[ -f "$PX4_DIR/$rel" ] || printf '%s\n' "$rel"
+	done > /tmp/.flightaxis_missing.$$ || true
+	NOT_LANDED="$(cat /tmp/.flightaxis_missing.$$)"; rm -f /tmp/.flightaxis_missing.$$
+	if [ -n "$NOT_LANDED" ]; then
+		printf '%serror:%s these files did not land in the PX4 tree:\n' "$C_RED" "$C_OFF" >&2
+		printf '%s\n' "$NOT_LANDED" | sed 's/^/         /' >&2
+		exit 1
+	fi
+	# sitl_run.sh must stay executable or the make target dies at launch.
+	[ -x "$PX4_DIR/Tools/simulation/flightaxis/sitl_run.sh" ] \
+		|| die "Tools/simulation/flightaxis/sitl_run.sh lost its executable bit"
+	ok "all expected payload files verified present (sitl_run.sh is executable)"
+fi
+
+# ================================================================= 5/7 ======
+step "5/7  Registering with the PX4 build system"
+
+# --- 5a: include(sitl_targets_flightaxis.cmake) -----------------------------
+if grep -qF "$INCLUDE_LINE" "$SIM_CMAKE"; then
+	ok "$SIM_CMAKE_REL already includes sitl_targets_flightaxis.cmake (no change)"
+else
+	grep -qF "$ANCHOR_LINE" "$SIM_CMAKE" || die \
+"could not find the anchor line
+         $ANCHOR_LINE
+       in $SIM_CMAKE_REL
+       Refusing to guess where to insert our include(). Add this line manually
+       next to the other include(sitl_targets_*.cmake) lines:
+         $INCLUDE_LINE"
+
+	# Insert immediately before the flightgear include (keeps the list
+	# alphabetically sorted, which is how PX4 maintains it).
+	TMP="$SIM_CMAKE.flightaxis.tmp.$$"
+	awk -v ins="$INCLUDE_LINE" -v anchor="$ANCHOR_LINE" '
+		!done && index($0, anchor) == 1 { print ins; done = 1 }
+		{ print }
+	' "$SIM_CMAKE" > "$TMP"
+	grep -qF "$INCLUDE_LINE" "$TMP" || { rm -f "$TMP"; die "splice into $SIM_CMAKE_REL produced no change"; }
+
+	if [ "$DRY_RUN" -eq 1 ]; then
+		printf '    %s[dry-run]%s would insert "%s" before "%s" in %s:\n' \
+			"$C_YEL" "$C_OFF" "$INCLUDE_LINE" "$ANCHOR_LINE" "$SIM_CMAKE_REL"
+		diff -u "$SIM_CMAKE" "$TMP" | sed 's/^/      /' || true
+		rm -f "$TMP"
+	else
+		mv "$TMP" "$SIM_CMAKE"
+		ok "added $INCLUDE_LINE to $SIM_CMAKE_REL"
+		record "edited   $SIM_CMAKE_REL  (+1 line: $INCLUDE_LINE)"
+	fi
+fi
+
+# --- 5b: the four airframe entries -----------------------------------------
+# Rewrites the px4_add_romfs_files() list: drops any existing 120[0-3]_flightaxis_*
+# entries, then re-inserts all four as one block in sorted position (before the
+# first entry with a larger id). Deterministic => running it twice is a no-op.
+splice_airframes() {
+	awk '
+		function isblank(l) { return l ~ /^[ \t]*$/ }
+		function emit(l) { print l; last_blank = isblank(l) }
+		BEGIN { inlist = 0; done = 0; removed = 0 }
+		{
+			if (!inlist) {
+				if ($0 ~ /^px4_add_romfs_files\(/) { inlist = 1 }
+				emit($0); next
+			}
+			if ($0 ~ /^\)/) { inlist = 0; emit($0); next }
+
+			# Drop entries we own, wherever they currently are.
+			if ($0 ~ /^[ \t]*120[0-3]_flightaxis_(plane|quad|quadplane|heli)[ \t]*$/) {
+				removed = 1; next
+			}
+			# Squeeze a blank line that removal left doubled up.
+			if (isblank($0)) {
+				if (removed && last_blank) next
+				emit($0); next
+			}
+			# Sorted insertion point: first list entry with an id above ours.
+			if (!done && $0 ~ /^[ \t]*[0-9]+_/) {
+				n = $0
+				sub(/^[ \t]*/, "", n)
+				sub(/_.*$/, "", n)
+				if (n + 0 > 1203) {
+					emit("\t1200_flightaxis_plane")
+					emit("\t1201_flightaxis_quad")
+					emit("\t1202_flightaxis_quadplane")
+					emit("\t1203_flightaxis_heli")
+					emit("")
+					done = 1
+				}
+			}
+			removed = 0
+			emit($0)
+		}
+		END { exit (done ? 0 : 3) }
+	' "$1"
+}
+
+MISSING_AF=""
+for a in $AIRFRAMES; do
+	grep -qE "^[[:space:]]*$a[[:space:]]*$" "$AF_CMAKE" || MISSING_AF="$MISSING_AF $a"
+done
+
+if [ -z "$MISSING_AF" ]; then
+	ok "$AF_CMAKE_REL already lists all four flightaxis airframes (no change)"
+else
+	grep -q '^px4_add_romfs_files(' "$AF_CMAKE" || die \
+"could not find the 'px4_add_romfs_files(' list in
+         $AF_CMAKE_REL
+       Refusing to guess where to register the airframes. Add these manually,
+       in sorted position inside that list:
+$(for a in $AIRFRAMES; do printf '         %s\n' "$a"; done)"
+
+	TMP="$AF_CMAKE.flightaxis.tmp.$$"
+	if ! splice_airframes "$AF_CMAKE" > "$TMP"; then
+		rm -f "$TMP"
+		die "could not find a sorted insertion point (no airframe id above 1203) in
+       $AF_CMAKE_REL
+       Refusing to blind-append. Register the four 120x_flightaxis_* entries manually."
+	fi
+	for a in $AIRFRAMES; do
+		grep -qE "^[[:space:]]*$a[[:space:]]*$" "$TMP" \
+			|| { rm -f "$TMP"; die "splice into $AF_CMAKE_REL did not register $a"; }
+	done
+
+	if [ "$DRY_RUN" -eq 1 ]; then
+		printf '    %s[dry-run]%s would register the airframes in %s:\n' \
+			"$C_YEL" "$C_OFF" "$AF_CMAKE_REL"
+		diff -u "$AF_CMAKE" "$TMP" | sed 's/^/      /' || true
+		rm -f "$TMP"
+	else
+		mv "$TMP" "$AF_CMAKE"
+		ok "registered$MISSING_AF in $AF_CMAKE_REL"
+		record "edited   $AF_CMAKE_REL  (+ airframe entries:$MISSING_AF)"
+	fi
+fi
+
+# ================================================================= 6/7 ======
+step "6/7  Building"
+
+if [ "$NO_BUILD" -eq 1 ]; then
+	info "--no-build given: skipping the build."
+elif [ "$DRY_RUN" -eq 1 ]; then
+	printf '    %s[dry-run]%s make -C %s px4_sitl_nolockstep\n' "$C_YEL" "$C_OFF" "$PX4_DIR"
+	printf '    %s[dry-run]%s build target flightaxis_bridge\n' "$C_YEL" "$C_OFF"
+else
+	warn "a fresh PX4 tree takes 10-30 minutes to build. Output follows."
+	printf '\n'
+	info "\$ make -C $PX4_DIR px4_sitl_nolockstep"
+	make -C "$PX4_DIR" px4_sitl_nolockstep \
+		|| die "'make px4_sitl_nolockstep' failed (see the output above).
+       The files are installed; fix the build error and re-run './install.sh $PX4_DIR'."
+	record "built    build/px4_sitl_nolockstep/  (px4 + ROMFS)"
+
+	info "\$ build flightaxis_bridge"
+	if command -v ninja >/dev/null 2>&1 && [ -f "$BUILD_DIR/build.ninja" ]; then
+		ninja -C "$BUILD_DIR" flightaxis_bridge \
+			|| die "building the flightaxis_bridge target failed (see the output above)."
+	else
+		cmake --build "$BUILD_DIR" --target flightaxis_bridge \
+			|| die "building the flightaxis_bridge target failed (see the output above)."
+	fi
+	record "built    build/px4_sitl_nolockstep/build_flightaxis_bridge/flightaxis_bridge"
+
+	[ -x "$BRIDGE_BIN" ] || die "the build reported success but the bridge binary is missing:
+       $BRIDGE_BIN"
+	ok "bridge binary: ${BRIDGE_BIN#$PX4_DIR/}"
+fi
+
+# ================================================================= 7/7 ======
+step "7/7  Verifying the installation"
+
+VERIFY_FAIL=0
+vcheck() {
+	if [ "$1" -eq 0 ]; then ok "$2"; else
+		printf '    %sFAIL%s %s\n' "$C_RED" "$C_OFF" "$2" >&2
+		VERIFY_FAIL=1
+	fi
+}
+
+# Model JSONs parse.
+if command -v python3 >/dev/null 2>&1; then
+	MODELS_DIR="$PX4_DIR/Tools/simulation/flightaxis/flightaxis_bridge/models"
+	if [ "$DRY_RUN" -eq 1 ]; then
+		MODELS_DIR="$REPO_DIR/Tools/simulation/flightaxis/flightaxis_bridge/models"
+	fi
+	for m in $MODELS; do
+		python3 -c "import json,sys; json.load(open(sys.argv[1]))" "$MODELS_DIR/$m.json" >/dev/null 2>&1
+		vcheck $? "models/$m.json parses as JSON"
+	done
+
+	# get_FAbridge_params.py emits argv for each model (it resolves the JSON
+	# relative to the CWD, hence the subshell cd).
+	GETP_DIR="$(dirname "$MODELS_DIR")"
+	for m in $MODELS; do
+		OUT="$( (cd "$GETP_DIR" && python3 ./get_FAbridge_params.py "models/$m.json") 2>/dev/null || true)"
+		if [ -n "$OUT" ]; then
+			ok "get_FAbridge_params.py $m -> $(printf '%s' "$OUT" | cut -c1-48)..."
+		else
+			printf '    %sFAIL%s get_FAbridge_params.py produced no argv for %s\n' "$C_RED" "$C_OFF" "$m" >&2
+			VERIFY_FAIL=1
+		fi
+	done
+else
+	warn "python3 not found; skipping the model JSON / get_FAbridge_params.py checks"
+fi
+
+if [ "$DRY_RUN" -eq 1 ]; then
+	info "dry-run: skipping build-output checks"
+elif [ "$NO_BUILD" -eq 1 ]; then
+	info "--no-build: skipping make-target and ROMFS checks"
+else
+	if command -v ninja >/dev/null 2>&1 && [ -f "$BUILD_DIR/build.ninja" ]; then
+		TARGETS="$(ninja -C "$BUILD_DIR" -t targets all 2>/dev/null | cut -d: -f1 || true)"
+		for m in $MODELS; do
+			printf '%s\n' "$TARGETS" | grep -qx "flightaxis_$m"
+			vcheck $? "make target flightaxis_$m exists"
+		done
+	else
+		info "ninja not available; skipping the make-target check"
+	fi
+	for a in $AIRFRAMES; do
+		[ -f "$BUILD_DIR/etc/init.d-posix/airframes/$a" ]
+		vcheck $? "airframe installed: build/px4_sitl_nolockstep/etc/init.d-posix/airframes/$a"
+	done
+	[ -x "$BRIDGE_BIN" ]
+	vcheck $? "bridge binary present and executable"
+fi
+
+[ "$VERIFY_FAIL" -eq 0 ] || die "post-install verification failed (see FAIL lines above)."
+
+# -------------------------------------------------------------- summary ----
+printf '\n%s%s' "$C_BLD" "$C_GRN"
+if [ "$DRY_RUN" -eq 1 ]; then
+	printf 'Dry run complete - nothing was modified.'
+else
+	printf 'FlightAxis integration installed successfully.'
+fi
+printf '%s\n\n' "$C_OFF"
+
+if [ "$DRY_RUN" -eq 0 ]; then
+	printf '%sChanges made under %s:%s\n' "$C_BLD" "$PX4_DIR" "$C_OFF"
+	printf '%s' "$CHANGES"
+	printf '\n    Revert everything with:  %s/uninstall.sh %s\n\n' "$REPO_DIR" "$PX4_DIR"
+fi
+
+printf '%sWhat to do next%s\n' "$C_BLD" "$C_OFF"
+printf '  1. On the Windows machine running RealFlight, enable %sFlightAxis Link%s\n' "$C_BLD" "$C_OFF"
+printf '     (Simulation > Settings > FlightAxis Link; it listens on TCP 18083).\n'
+printf '     Use a wired network - WiFi cannot hold the ~250 Hz SOAP rate.\n'
+printf '  2. Launch SITL from %s:\n' "$PX4_DIR"
+printf '\n       %sPX4_FLIGHTAXIS_IP=<windows-ip> make px4_sitl_nolockstep flightaxis_plane%s\n\n' "$C_BLD" "$C_OFF"
+printf '     (also: flightaxis_quad, flightaxis_quadplane, flightaxis_heli)\n'
+printf '  3. QGroundControl connects on UDP 14550 as usual.\n\n'
+printf '  Aircraft setup and channel maps: %s/README.md\n\n' "$REPO_DIR"

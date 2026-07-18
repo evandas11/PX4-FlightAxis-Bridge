@@ -7,11 +7,16 @@
 
 . ${R}etc/init.d/rc.fw_defaults
 
-# RealFlight free-runs (no lockstep), GPS samples arrive fresh
-param set-default EKF2_GPS_DELAY 0
+# RealFlight free-runs (no lockstep), GPS samples arrive fresh.
+# Forced with "param set": px4-rc.mavlinksim runs after this file and would
+# otherwise override the default back to 10 ms.
+param set EKF2_GPS_DELAY 0
 
 param set-default FW_LND_ANG 5
 param set-default FW_LND_FLALT 5
+# Flare pitch window: firmware defaults (2.5/15) are too narrow to land here
+param set-default FW_LND_FL_PMIN 9.5
+param set-default FW_LND_FL_PMAX 20
 
 param set-default NPFG_PERIOD 25
 
@@ -24,15 +29,13 @@ param set-default FW_RR_FF 0.40
 param set-default FW_RR_I 0.132
 param set-default FW_RR_P 0.085
 
-param set-default FW_W_EN 1
-
 param set-default MIS_TAKEOFF_ALT 20
 
 param set-default NAV_ACC_RAD 15
 param set-default NAV_DLL_ACT 2
 
 param set-default RWTO_TKOFF 1
-param set-default RWTO_MAX_PITCH 20
+param set-default RWTO_PSP 8
 
 # Actuator geometry (QGC Actuators tab) MUST match the "px4" output indices
 # in Tools/simulation/flightaxis/flightaxis_bridge/models/plane.json.

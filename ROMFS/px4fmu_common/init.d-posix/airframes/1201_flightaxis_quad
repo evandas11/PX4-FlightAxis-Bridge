@@ -8,7 +8,9 @@
 . ${R}etc/init.d/rc.mc_defaults
 
 # RealFlight free-runs (no lockstep), GPS samples arrive fresh
-param set-default EKF2_GPS_DELAY 0
+# Forced with "param set": px4-rc.mavlinksim runs after this file and would
+# otherwise override the default back to 10 ms.
+param set EKF2_GPS_DELAY 0
 
 # Actuator geometry (QGC Actuators tab) MUST match the "px4" output indices
 # in Tools/simulation/flightaxis/flightaxis_bridge/models/quad.json.
