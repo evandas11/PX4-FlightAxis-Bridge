@@ -1,0 +1,58 @@
+#!/bin/sh
+#
+# @name FlightAxis Plane
+#
+# @type Plane
+#
+
+. ${R}etc/init.d/rc.fw_defaults
+
+# RealFlight free-runs (no lockstep), GPS samples arrive fresh
+param set-default EKF2_GPS_DELAY 0
+
+param set-default FW_LND_ANG 5
+param set-default FW_LND_FLALT 5
+
+param set-default NPFG_PERIOD 25
+
+param set-default FW_PR_FF 0.40
+param set-default FW_PR_I 0.05
+param set-default FW_PR_P 0.05
+
+param set-default FW_R_TC 0.45
+param set-default FW_RR_FF 0.40
+param set-default FW_RR_I 0.132
+param set-default FW_RR_P 0.085
+
+param set-default FW_W_EN 1
+
+param set-default MIS_TAKEOFF_ALT 20
+
+param set-default NAV_ACC_RAD 15
+param set-default NAV_DLL_ACT 2
+
+param set-default RWTO_TKOFF 1
+param set-default RWTO_MAX_PITCH 20
+
+# Actuator geometry (QGC Actuators tab) MUST match the "px4" output indices
+# in Tools/simulation/flightaxis/models/plane.json
+param set-default CA_AIRFRAME 1
+
+param set-default CA_ROTOR_COUNT 1
+param set-default CA_ROTOR0_PX 0.3
+
+param set-default CA_SV_CS_COUNT 4
+param set-default CA_SV_CS0_TRQ_R -0.5
+param set-default CA_SV_CS0_TYPE 1
+param set-default CA_SV_CS1_TRQ_R 0.5
+param set-default CA_SV_CS1_TYPE 2
+param set-default CA_SV_CS2_TRQ_P 1
+param set-default CA_SV_CS2_TYPE 3
+param set-default CA_SV_CS3_TRQ_Y 1
+param set-default CA_SV_CS3_TYPE 4
+
+param set-default PWM_MAIN_FUNC1 101
+param set-default PWM_MAIN_FUNC2 201
+param set-default PWM_MAIN_FUNC3 202
+param set-default PWM_MAIN_FUNC4 203
+param set-default PWM_MAIN_FUNC5 204

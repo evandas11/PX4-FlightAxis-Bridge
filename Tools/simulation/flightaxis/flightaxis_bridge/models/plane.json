@@ -1,0 +1,12 @@
+{
+    "Comment":   "Standard fixed-wing on a RealFlight plane model (ArduPilot RealFlight convention: rf0=aileron, rf1=elevator, rf2=throttle, rf3=rudder)",
+    "RfModel":   "informational only - aircraft is selected inside RealFlight",
+    "Options":   ["ResetPosition"],
+    "Channels": [
+        {"rf": 0, "px4": 0, "scale": "bipolar",  "reverse": false, "comment": "aileron"},
+        {"rf": 1, "px4": 1, "scale": "bipolar",  "reverse": true,  "comment": "elevator"},
+        {"rf": 2, "px4": 3, "scale": "unipolar", "disarm": 0.0,    "comment": "throttle"},
+        {"rf": 3, "px4": 2, "scale": "bipolar",  "reverse": false, "comment": "rudder"}
+    ],
+    "UnmappedDefault": 0.5
+}

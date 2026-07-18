@@ -1,0 +1,26 @@
+#!/bin/sh
+#
+# @name FlightAxis Helicopter
+#
+# @type Helicopter
+#
+
+. ${R}etc/init.d/rc.heli_defaults
+
+# RealFlight free-runs (no lockstep), GPS samples arrive fresh
+param set-default EKF2_GPS_DELAY 0
+
+# Actuator geometry (QGC Actuators tab) MUST match the "px4" output indices
+# in Tools/simulation/flightaxis/models/heli.json
+param set-default CA_AIRFRAME 10
+
+# Start with FF-dominant rate loops (see 16001_helicopter);
+# tune P/I after the FF gain is set for the RealFlight model.
+param set-default MC_ROLLRATE_P 0
+param set-default MC_ROLLRATE_I 0
+param set-default MC_ROLLRATE_D 0
+param set-default MC_ROLLRATE_FF 0.1
+param set-default MC_PITCHRATE_P 0
+param set-default MC_PITCHRATE_I 0
+param set-default MC_PITCHRATE_D 0
+param set-default MC_PITCHRATE_FF 0.1

@@ -1,0 +1,17 @@
+{
+    "Comment":        "reference-class quadplane on a RealFlight custom model",
+    "OptionsComment": "If the RF model expects the fixed-wing surfaces on ch1-4 and quad motors on ch5-8 swapped, add \"Rev4Servos\" to Options instead of editing the rf indices below",
+    "RfModel":        "informational only - aircraft is selected inside RealFlight",
+    "Options":        ["ResetPosition"],
+    "Channels": [
+        {"rf": 0, "px4": 4, "scale": "bipolar",  "reverse": false, "comment": "aileron"},
+        {"rf": 1, "px4": 5, "scale": "bipolar",  "reverse": true,  "comment": "elevator"},
+        {"rf": 2, "px4": 6, "scale": "unipolar", "disarm": 0.0,    "comment": "fwd throttle"},
+        {"rf": 3, "px4": 7, "scale": "bipolar",  "comment": "rudder"},
+        {"rf": 4, "px4": 0, "scale": "unipolar", "disarm": 0.0},
+        {"rf": 5, "px4": 1, "scale": "unipolar", "disarm": 0.0},
+        {"rf": 6, "px4": 2, "scale": "unipolar", "disarm": 0.0},
+        {"rf": 7, "px4": 3, "scale": "unipolar", "disarm": 0.0}
+    ],
+    "UnmappedDefault": 0.5
+}

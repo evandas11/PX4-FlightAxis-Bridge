@@ -1,0 +1,13 @@
+{
+    "Comment":        "Helicopter on a RealFlight heli model. HeliDemix converts the three swash servo outputs (rf0-2) into RealFlight roll/pitch/collective: roll=s1-s2, pitch=(s1+s2)/2-s3, col=(s1+s2+s3)/3, recentered 0..1",
+    "RfModel":        "informational only - aircraft is selected inside RealFlight",
+    "Options":        ["ResetPosition", "HeliDemix"],
+    "Channels": [
+        {"rf": 0, "px4": 0, "scale": "bipolar",  "comment": "swash servo 1 (demixed to roll)"},
+        {"rf": 1, "px4": 1, "scale": "bipolar",  "comment": "swash servo 2 (demixed to pitch)"},
+        {"rf": 2, "px4": 2, "scale": "bipolar",  "comment": "swash servo 3 (demixed to collective)"},
+        {"rf": 3, "px4": 3, "scale": "bipolar",  "comment": "tail rotor / yaw"},
+        {"rf": 4, "px4": 4, "scale": "unipolar", "disarm": 0.0, "comment": "main motor / RSC throttle"}
+    ],
+    "UnmappedDefault": 0.5
+}
