@@ -16,18 +16,12 @@ verified against ArduPilot `SIM_FlightAxis.cpp`).
 
 ---
 
-## ⚠️ PENGINGAT SINKRONISASI / SYNC REMINDER
+## ⚠️ Sync reminder
 
-> **ID:** Repo ini adalah *mirror* dari file yang hidup di dalam source tree PX4
-> (`/home/evangels/PX4-Autopilot`). Kalau kamu mengedit file langsung di tree PX4,
-> **WAJIB update juga file yang sama di folder ini** (dan sebaliknya) — kalau tidak,
-> repo GitHub ini jadi basi dan tidak bisa dipakai orang lain.
-> Jalankan `./scripts/sync-from-px4.sh` setelah mengedit di tree PX4,
-> atau `./scripts/sync-to-px4.sh` setelah mengedit di repo ini.
->
-> **EN:** This repo mirrors files that live inside a PX4 source tree. If you edit a file
+> This repo **mirrors** files that live inside a PX4 source tree. If you edit a file
 > directly in the PX4 tree, **you must update the copy here too** (and vice versa).
 > Use `./scripts/sync-from-px4.sh` / `./scripts/sync-to-px4.sh`.
+> Full rules: **[README-DONT-FORGET.md](README-DONT-FORGET.md)**.
 
 ---
 
