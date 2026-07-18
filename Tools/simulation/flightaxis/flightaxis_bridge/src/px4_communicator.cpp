@@ -179,27 +179,63 @@ int PX4Communicator::Send(int offset_us)
         return -1;
     }
 
-    mavlink_hil_gps_t hil_gps_msg=vehicle->hil_gps_msg;
-    hil_gps_msg.time_usec+=offset_us;
+    // Everything below HIL_SENSOR is decimated: see the interval constants in
+    // px4_communicator.h. now_us is the bridge's own physics clock.
+    const uint64_t now_us = vehicle->timeUsec() + offset_us;
 
-    mavlink_msg_hil_gps_encode_chan(1, 200, MAVLINK_COMM_0, &msg, &hil_gps_msg);
-    packetlen = mavlink_msg_to_send_buffer(buffer, &msg);
-    if(send(px4MavlinkSock, buffer, packetlen, 0)!=packetlen)
+    if (!sent_first)
     {
-        std::cerr << "PX4 Communicator: Sent to PX4 failed: " << strerror(errno) <<std::endl;
-        return -1;
+        // send one of each immediately so PX4 has a full picture from frame 1
+        last_gps_us = last_state_quat_us = last_distance_us = now_us - 1000000;
+        sent_first = true;
     }
 
+    if (now_us - last_gps_us >= GPS_INTERVAL_US)
+    {
+        last_gps_us = now_us;
+
+        mavlink_hil_gps_t hil_gps_msg=vehicle->hil_gps_msg;
+        hil_gps_msg.time_usec+=offset_us;
+
+        mavlink_msg_hil_gps_encode_chan(1, 200, MAVLINK_COMM_0, &msg, &hil_gps_msg);
+        packetlen = mavlink_msg_to_send_buffer(buffer, &msg);
+        if(send(px4MavlinkSock, buffer, packetlen, 0)!=packetlen)
+        {
+            std::cerr << "PX4 Communicator: Sent to PX4 failed: " << strerror(errno) <<std::endl;
+            return -1;
+        }
+    }
 
     // ground truth
-    mavlink_hil_state_quaternion_t state_quat_msg = vehicle->getStateQuatMsg(offset_us);
-
-    mavlink_msg_hil_state_quaternion_encode_chan(1, 200, MAVLINK_COMM_0, &msg, &state_quat_msg);
-    packetlen = mavlink_msg_to_send_buffer(buffer, &msg);
-    if(send(px4MavlinkSock, buffer, packetlen, 0)!=packetlen)
+    if (now_us - last_state_quat_us >= STATE_QUAT_INTERVAL_US)
     {
-        std::cerr << "PX4 Communicator: Sent to PX4 failed: " << strerror(errno) <<std::endl;
-        return -1;
+        last_state_quat_us = now_us;
+
+        mavlink_hil_state_quaternion_t state_quat_msg = vehicle->getStateQuatMsg(offset_us);
+
+        mavlink_msg_hil_state_quaternion_encode_chan(1, 200, MAVLINK_COMM_0, &msg, &state_quat_msg);
+        packetlen = mavlink_msg_to_send_buffer(buffer, &msg);
+        if(send(px4MavlinkSock, buffer, packetlen, 0)!=packetlen)
+        {
+            std::cerr << "PX4 Communicator: Sent to PX4 failed: " << strerror(errno) <<std::endl;
+            return -1;
+        }
+    }
+
+    // rangefinder - only while the reading is valid (vehicle not inverted)
+    if (vehicle->rangefinderValid() && now_us - last_distance_us >= DISTANCE_INTERVAL_US)
+    {
+        last_distance_us = now_us;
+
+        mavlink_distance_sensor_t dist_msg = vehicle->getDistanceSensorMsg(offset_us);
+
+        mavlink_msg_distance_sensor_encode_chan(1, 200, MAVLINK_COMM_0, &msg, &dist_msg);
+        packetlen = mavlink_msg_to_send_buffer(buffer, &msg);
+        if(send(px4MavlinkSock, buffer, packetlen, 0)!=packetlen)
+        {
+            std::cerr << "PX4 Communicator: Sent to PX4 failed: " << strerror(errno) <<std::endl;
+            return -1;
+        }
     }
 
     mavlink_raw_rpm_t rpmmessage;
@@ -226,40 +262,49 @@ int PX4Communicator::Recieve(bool blocking)
         fds[0].fd = px4MavlinkSock;
         fds[0].events = POLLIN;
 
-        int p=poll(&fds[0], 1, (blocking?-1:2));
-        if(p<0)
-            std::cerr<<"PX4 Communicator: PX4 Pool error\n" << std::endl;
+        // The non-blocking flavour must not stall the bridge loop: RealFlight's SOAP
+        // round-trip is the only thing allowed to pace us. Drain everything that is
+        // already queued and keep the newest actuator controls (latest wins).
+        int got = 0;
 
-        if(p==0)
+        while (true)
         {
-            //std::cerr<<"PX4 Communicator:No PX data" <<std::endl;
-        }
-        else
-        {
-            if(fds[0].revents & POLLIN)
+            int p=poll(&fds[0], 1, (blocking && got==0 ? -1 : 0));
+
+            if(p<0)
             {
-                unsigned int slen=sizeof(px4_mavlink_addr);
-                unsigned int len = recvfrom(px4MavlinkSock, buffer, sizeof(buffer), 0, (struct sockaddr *)&px4_mavlink_addr, &slen);
-                if (len > 0)
-                {
-                    mavlink_status_t status;
-                    for (unsigned i = 0; i < len; ++i)
+                std::cerr<<"PX4 Communicator: PX4 Pool error\n" << std::endl;
+                break;
+            }
+
+            if(p==0)
+                break;      // nothing (more) pending
+
+            if(!(fds[0].revents & POLLIN))
+                break;
+
+            unsigned int slen=sizeof(px4_mavlink_addr);
+            unsigned int len = recvfrom(px4MavlinkSock, buffer, sizeof(buffer), 0, (struct sockaddr *)&px4_mavlink_addr, &slen);
+
+            if (len == 0 || len == (unsigned int)-1)
+                break;
+
+            mavlink_status_t status;
+            for (unsigned i = 0; i < len; ++i)
+            {
+              if (mavlink_parse_char(MAVLINK_COMM_0, buffer[i], &msg, &status))
+              {
+                    if(msg.msgid==MAVLINK_MSG_ID_HIL_ACTUATOR_CONTROLS)
                     {
-                      if (mavlink_parse_char(MAVLINK_COMM_0, buffer[i], &msg, &status))
-                      {
-                            if(msg.msgid==MAVLINK_MSG_ID_HIL_ACTUATOR_CONTROLS)
-                            {
-                                    mavlink_hil_actuator_controls_t controls;
-                                    mavlink_msg_hil_actuator_controls_decode(&msg, &controls);
-                                    vehicle->setPXControls(controls);
-                                    return 1;
-                            }
-                      }
+                            mavlink_hil_actuator_controls_t controls;
+                            mavlink_msg_hil_actuator_controls_decode(&msg, &controls);
+                            vehicle->setPXControls(controls);
+                            got = 1;
                     }
-                }
+              }
             }
         }
 
-    return 0;
+    return got;
 }
 

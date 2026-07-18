@@ -11,7 +11,15 @@
 param set-default EKF2_GPS_DELAY 0
 
 # Actuator geometry (QGC Actuators tab) MUST match the "px4" output indices
-# in Tools/simulation/flightaxis/models/quad.json
+# in Tools/simulation/flightaxis/flightaxis_bridge/models/quad.json.
+#
+# PWM_MAIN_FUNC<N> lands on HIL_ACTUATOR_CONTROLS.controls[N-1], so the
+# assignments below produce:
+#
+#   controls[0] = 101 Motor 1     [0,1] -> quad.json rf0
+#   controls[1] = 102 Motor 2     [0,1] -> quad.json rf1
+#   controls[2] = 103 Motor 3     [0,1] -> quad.json rf2
+#   controls[3] = 104 Motor 4     [0,1] -> quad.json rf3
 param set-default CA_AIRFRAME 0
 
 param set-default CA_ROTOR_COUNT 4

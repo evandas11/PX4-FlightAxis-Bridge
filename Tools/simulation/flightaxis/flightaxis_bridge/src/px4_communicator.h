@@ -78,6 +78,19 @@ private:
 
     const int portBase=4560;
 
+	// Send() runs at the RealFlight frame rate (~250 Hz) plus every 1 ms
+	// extrapolation step. HIL_SENSOR must go out at that full rate, but PX4
+	// publishes one sensor_gps per HIL_GPS with no rate limiting of its own,
+	// and HIL_STATE_QUATERNION / DISTANCE_SENSOR do not need it either.
+	static const uint64_t GPS_INTERVAL_US = 100000;      // 10 Hz  (spec 8.2)
+	static const uint64_t STATE_QUAT_INTERVAL_US = 20000; // 50 Hz (ground truth only)
+	static const uint64_t DISTANCE_INTERVAL_US = 50000;   // 20 Hz (spec 6)
+
+	uint64_t last_gps_us = 0;
+	uint64_t last_state_quat_us = 0;
+	uint64_t last_distance_us = 0;
+	bool sent_first = false;
+
 public:
 	PX4Communicator(VehicleState *v);
 	int Init(int portOffset);

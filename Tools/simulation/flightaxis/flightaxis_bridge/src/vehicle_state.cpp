@@ -47,6 +47,7 @@
 
 #include <cmath>
 #include <cstring>
+#include <limits>
 
 using namespace Eigen;
 
@@ -78,6 +79,7 @@ VehicleState::VehicleState(double home_lat_deg, double home_lon_deg, double home
 	diff_pressure(0.0),
 	airspeed_true(0.0),
 	airspeed_pitot(0.0),
+	rangefinder_m(std::numeric_limits<double>::quiet_NaN()),
 	received_first_controls(false)
 {
 	std::memset(&hil_gps_msg, 0, sizeof(hil_gps_msg));
@@ -119,10 +121,14 @@ void VehicleState::resetPositionOffset(const FAState &fa)
 	offset_captured = true;
 }
 
-void VehicleState::setFAData(const FAState &fa, double dt)
+void VehicleState::setFAData(const FAState &fa, double dt, double dt_true)
 {
 	if (dt <= 0.0) {
 		dt = 0.001;
+	}
+
+	if (dt_true <= 0.0) {
+		dt_true = dt;
 	}
 
 	time_sec += dt;
@@ -171,7 +177,9 @@ void VehicleState::setFAData(const FAState &fa, double dt)
 	// ... but on the ground RF accel is garbage - finite-difference override
 	// (yields exactly (0,0,-g) at rest)
 	if (fa.m_isTouchingGround) {
-		Vector3d accel_ef = (velocity_ef - last_velocity_ef) / dt;
+		// use the TRUE elapsed time: during a swallowed glitch dt is capped and
+		// would overstate the synthesised ground acceleration
+		Vector3d accel_ef = (velocity_ef - last_velocity_ef) / dt_true;
 		accel_ef.z() -= GRAVITY_MSS;
 		accel_body = q_ned.inverse() * accel_ef;	// R_ned_to_body * accel_ef
 	}
@@ -191,14 +199,29 @@ void VehicleState::setFAData(const FAState &fa, double dt)
 	airspeed_pitot = std::max(airspeed3d.x(), 0.0);
 	diff_pressure = 0.5 * 1.225 * airspeed_pitot * airspeed_pitot / 100.0;	// Pa -> hPa
 
-	// Barometer: ISA from ASL (HIL_SENSOR.abs_pressure is hPa)
-	const double h = fa.m_altitudeASL_MTR;
+	// Barometer: ISA from geodetic altitude (HIL_SENSOR.abs_pressure is hPa).
+	// This MUST use the same datum as the GPS altitude reported by nedToLLA()
+	// (home_alt - position_ned.z), not the raw RealFlight ASL: the RF runway
+	// sits at its own arbitrary ASL and any mismatch shows up to EKF2 as a
+	// constant baro-vs-GPS height disagreement. position_ned is already set.
+	const double h = home_alt - position_ned.z();
 	abs_pressure = 101325.0 * std::pow(1.0 - 2.25577e-5 * h, 5.25588) / 100.0;
 	pressure_alt = h;
 	temperature = 25.0;
 
 	// Magnetometer: home earth field rotated to body (gauss)
 	mag_body = q_ned.inverse() * mag_ned;
+
+	// Rangefinder (ArduPilot SIM_FlightAxis): AGL projected onto the body-down
+	// axis; invalid when the body-down axis points up (vehicle inverted).
+	const double dcm_c_z = q_ned.toRotationMatrix()(2, 2);
+
+	if (dcm_c_z > 0.0) {
+		rangefinder_m = fa.m_altitudeAGL_MTR / dcm_c_z;
+
+	} else {
+		rangefinder_m = std::numeric_limits<double>::quiet_NaN();
+	}
 
 	// RPM (ArduPilot selection logic, single channel)
 	if (fa.m_propRPM > 0) {
@@ -332,6 +355,28 @@ mavlink_hil_state_quaternion_t VehicleState::getStateQuatMsg(int offset_us)
 	msg.xacc = (int16_t)(accel_body.x() * 1000.0 / GRAVITY_MSS);
 	msg.yacc = (int16_t)(accel_body.y() * 1000.0 / GRAVITY_MSS);
 	msg.zacc = (int16_t)(accel_body.z() * 1000.0 / GRAVITY_MSS);
+
+	return msg;
+}
+
+mavlink_distance_sensor_t VehicleState::getDistanceSensorMsg(int offset_us)
+{
+	// PX4 SimulatorMavlink::publish_distance_topic() reads the distance fields
+	// in cm and covariance in cm^2; PITCH_270 maps to ROTATION_DOWNWARD_FACING.
+	const double min_m = 0.1;
+	const double max_m = 40.0;
+
+	mavlink_distance_sensor_t msg{};
+
+	msg.time_boot_ms = (uint32_t)(((uint64_t)(time_sec * 1e6) + offset_us) / 1000);
+	msg.min_distance = (uint16_t)(min_m * 100.0);
+	msg.max_distance = (uint16_t)(max_m * 100.0);
+	msg.current_distance = (uint16_t)(constrain(rangefinder_m, min_m, max_m) * 100.0);
+	msg.type = MAV_DISTANCE_SENSOR_LASER;
+	msg.id = 0;
+	msg.orientation = MAV_SENSOR_ROTATION_PITCH_270;	// downward facing
+	msg.covariance = 0;					// unknown
+	msg.signal_quality = 100;
 
 	return msg;
 }

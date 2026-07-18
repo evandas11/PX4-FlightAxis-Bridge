@@ -1,17 +1,18 @@
 {
-    "Comment":        "reference-class quadplane on a RealFlight custom model",
-    "OptionsComment": "If the RF model expects the fixed-wing surfaces on ch1-4 and quad motors on ch5-8 swapped, add \"Rev4Servos\" to Options instead of editing the rf indices below",
+    "Comment":        "reference-class quadplane on a RealFlight custom model. The \"px4\" values are HIL_ACTUATOR_CONTROLS.controls[] indices and MUST match PWM_MAIN_FUNC* in ROMFS/px4fmu_common/init.d-posix/airframes/1202_flightaxis_quadplane: controls[0..3]=lift motors 1-4 [0,1], [4]=forward/pusher motor [0,1], [5]=aileron left, [6]=aileron right, [7]=elevator, [8]=rudder (surfaces are [-1,1]).",
+    "AileronComment": "The airframe declares split ailerons (CA_SV_CS0=left -> controls[5], CA_SV_CS1=right -> controls[6]); only the left one is mapped, because RealFlight models normally expect a single mixed aileron channel. If your RF model drives them independently, add a row for controls[6] on a spare rf slot.",
+    "OptionsComment": "Do NOT add \"Rev4Servos\": it swaps rf0-3 with rf4-7 wholesale, and the rf indices below are already written out directly, so enabling it would double-swap.",
     "RfModel":        "informational only - aircraft is selected inside RealFlight",
     "Options":        ["ResetPosition"],
     "Channels": [
-        {"rf": 0, "px4": 4, "scale": "bipolar",  "reverse": false, "comment": "aileron"},
-        {"rf": 1, "px4": 5, "scale": "bipolar",  "reverse": true,  "comment": "elevator"},
-        {"rf": 2, "px4": 6, "scale": "unipolar", "disarm": 0.0,    "comment": "fwd throttle"},
-        {"rf": 3, "px4": 7, "scale": "bipolar",  "comment": "rudder"},
-        {"rf": 4, "px4": 0, "scale": "unipolar", "disarm": 0.0},
-        {"rf": 5, "px4": 1, "scale": "unipolar", "disarm": 0.0},
-        {"rf": 6, "px4": 2, "scale": "unipolar", "disarm": 0.0},
-        {"rf": 7, "px4": 3, "scale": "unipolar", "disarm": 0.0}
+        {"rf": 0, "px4": 5, "scale": "bipolar",  "reverse": false, "comment": "aileron      <- controls[5] aileron left"},
+        {"rf": 1, "px4": 7, "scale": "bipolar",  "reverse": true,  "comment": "elevator     <- controls[7]"},
+        {"rf": 2, "px4": 4, "scale": "unipolar", "disarm": 0.0,    "comment": "fwd throttle <- controls[4] pusher motor"},
+        {"rf": 3, "px4": 8, "scale": "bipolar",  "reverse": false, "comment": "rudder       <- controls[8]"},
+        {"rf": 4, "px4": 0, "scale": "unipolar", "disarm": 0.0,    "comment": "lift motor 1 <- controls[0]"},
+        {"rf": 5, "px4": 1, "scale": "unipolar", "disarm": 0.0,    "comment": "lift motor 2 <- controls[1]"},
+        {"rf": 6, "px4": 2, "scale": "unipolar", "disarm": 0.0,    "comment": "lift motor 3 <- controls[2]"},
+        {"rf": 7, "px4": 3, "scale": "unipolar", "disarm": 0.0,    "comment": "lift motor 4 <- controls[3]"}
     ],
     "UnmappedDefault": 0.5
 }

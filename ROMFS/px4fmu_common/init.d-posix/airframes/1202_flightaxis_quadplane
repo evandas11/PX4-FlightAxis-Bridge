@@ -11,7 +11,20 @@
 param set-default EKF2_GPS_DELAY 0
 
 # Actuator geometry (QGC Actuators tab) MUST match the "px4" output indices
-# in Tools/simulation/flightaxis/models/quadplane.json
+# in Tools/simulation/flightaxis/flightaxis_bridge/models/quadplane.json.
+#
+# PWM_MAIN_FUNC<N> lands on HIL_ACTUATOR_CONTROLS.controls[N-1], so the
+# assignments below produce:
+#
+#   controls[0] = 101 Motor 1     lift motor 1    [0,1]  -> quadplane.json rf4
+#   controls[1] = 102 Motor 2     lift motor 2    [0,1]  -> quadplane.json rf5
+#   controls[2] = 103 Motor 3     lift motor 3    [0,1]  -> quadplane.json rf6
+#   controls[3] = 104 Motor 4     lift motor 4    [0,1]  -> quadplane.json rf7
+#   controls[4] = 105 Motor 5     forward/pusher  [0,1]  -> quadplane.json rf2
+#   controls[5] = 201 Servo 1     aileron left    [-1,1] -> quadplane.json rf0
+#   controls[6] = 202 Servo 2     aileron right   [-1,1] -> unmapped (see quadplane.json)
+#   controls[7] = 203 Servo 3     elevator        [-1,1] -> quadplane.json rf1
+#   controls[8] = 204 Servo 4     rudder          [-1,1] -> quadplane.json rf3
 param set-default CA_AIRFRAME 2
 
 param set-default CA_ROTOR_COUNT 5
@@ -31,13 +44,18 @@ param set-default CA_ROTOR4_AX 1
 param set-default CA_ROTOR4_AZ 0
 param set-default CA_ROTOR4_PX 0.2
 
-param set-default CA_SV_CS_COUNT 3
+# The gazebo-classic standard_vtol reference stops at 3 surfaces (no rudder).
+# A rudder is added here because RealFlight quadplane models fly fixed-wing
+# with a real fin, and rf3 in quadplane.json needs an actuator to read.
+param set-default CA_SV_CS_COUNT 4
 param set-default CA_SV_CS0_TYPE 1
 param set-default CA_SV_CS0_TRQ_R -0.5
 param set-default CA_SV_CS1_TYPE 2
 param set-default CA_SV_CS1_TRQ_R 0.5
 param set-default CA_SV_CS2_TYPE 3
 param set-default CA_SV_CS2_TRQ_P 1
+param set-default CA_SV_CS3_TYPE 4
+param set-default CA_SV_CS3_TRQ_Y 1
 
 param set-default PWM_MAIN_FUNC1 101
 param set-default PWM_MAIN_FUNC2 102
@@ -47,6 +65,7 @@ param set-default PWM_MAIN_FUNC5 105
 param set-default PWM_MAIN_FUNC6 201
 param set-default PWM_MAIN_FUNC7 202
 param set-default PWM_MAIN_FUNC8 203
+param set-default PWM_MAIN_FUNC9 204
 
 param set-default FW_AIRSPD_MAX 25
 param set-default NPFG_PERIOD 12

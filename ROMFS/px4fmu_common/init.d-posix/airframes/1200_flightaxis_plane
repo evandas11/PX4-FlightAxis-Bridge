@@ -35,7 +35,16 @@ param set-default RWTO_TKOFF 1
 param set-default RWTO_MAX_PITCH 20
 
 # Actuator geometry (QGC Actuators tab) MUST match the "px4" output indices
-# in Tools/simulation/flightaxis/models/plane.json
+# in Tools/simulation/flightaxis/flightaxis_bridge/models/plane.json.
+#
+# PWM_MAIN_FUNC<N> lands on HIL_ACTUATOR_CONTROLS.controls[N-1], so the
+# assignments below produce:
+#
+#   controls[0] = 101 Motor 1     throttle        [0,1]  -> plane.json rf2
+#   controls[1] = 201 Servo 1     aileron left    [-1,1] -> plane.json rf0
+#   controls[2] = 202 Servo 2     aileron right   [-1,1] -> unmapped (see plane.json)
+#   controls[3] = 203 Servo 3     elevator        [-1,1] -> plane.json rf1
+#   controls[4] = 204 Servo 4     rudder          [-1,1] -> plane.json rf3
 param set-default CA_AIRFRAME 1
 
 param set-default CA_ROTOR_COUNT 1

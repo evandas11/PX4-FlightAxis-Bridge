@@ -1,13 +1,15 @@
 {
-    "Comment":        "Helicopter on a RealFlight heli model. HeliDemix converts the three swash servo outputs (rf0-2) into RealFlight roll/pitch/collective: roll=s1-s2, pitch=(s1+s2)/2-s3, col=(s1+s2+s3)/3, recentered 0..1",
+    "Comment":        "Helicopter on a RealFlight heli model. The \"px4\" values are HIL_ACTUATOR_CONTROLS.controls[] indices and MUST match PWM_MAIN_FUNC* in ROMFS/px4fmu_common/init.d-posix/airframes/1203_flightaxis_heli. CA_AIRFRAME 10 orders the allocator motors first, then the swash servos: controls[0]=main rotor motor [0,1], [1]=yaw tail motor [0,1], [2..4]=swash plate servos 1-3 [-1,1].",
+    "DemixComment":   "HeliDemix converts the three swash servo outputs on rf0-2 back into the roll/pitch/collective triple RealFlight expects: roll=s1-s2, pitch=(s1+s2)/2-s3, col=(s1+s2+s3)/3, recentered to 0..1. That inverse is only exact for a swash geometry with servos 1 and 2 mirrored about the X axis and servo 3 on the axis, which is why the airframe overrides CA_SP0_ANG* to 300/60/180 instead of the PX4 defaults 0/140/220.",
+    "YawComment":     "rf3 is unipolar, not bipolar: under CA_AIRFRAME 10 the yaw tail is a MOTOR, so PWMSim normalises it to [0,1] already (PWMSim.cpp:78-80). Scaling it as bipolar would fold [0,1] into [0.5,1.0] and leave yaw permanently offset. Switch to CA_AIRFRAME 11 (tail servo) if you want a bipolar tail, and change this row to match.",
     "RfModel":        "informational only - aircraft is selected inside RealFlight",
     "Options":        ["ResetPosition", "HeliDemix"],
     "Channels": [
-        {"rf": 0, "px4": 0, "scale": "bipolar",  "comment": "swash servo 1 (demixed to roll)"},
-        {"rf": 1, "px4": 1, "scale": "bipolar",  "comment": "swash servo 2 (demixed to pitch)"},
-        {"rf": 2, "px4": 2, "scale": "bipolar",  "comment": "swash servo 3 (demixed to collective)"},
-        {"rf": 3, "px4": 3, "scale": "bipolar",  "comment": "tail rotor / yaw"},
-        {"rf": 4, "px4": 4, "scale": "unipolar", "disarm": 0.0, "comment": "main motor / RSC throttle"}
+        {"rf": 0, "px4": 2, "scale": "bipolar",  "comment": "swash servo 1 <- controls[2] (demixed to roll)"},
+        {"rf": 1, "px4": 3, "scale": "bipolar",  "comment": "swash servo 2 <- controls[3] (demixed to pitch)"},
+        {"rf": 2, "px4": 4, "scale": "bipolar",  "comment": "swash servo 3 <- controls[4] (demixed to collective)"},
+        {"rf": 3, "px4": 1, "scale": "unipolar", "disarm": 0.0, "comment": "tail rotor / yaw <- controls[1] yaw tail motor"},
+        {"rf": 4, "px4": 0, "scale": "unipolar", "disarm": 0.0, "comment": "main motor / RSC throttle <- controls[0]"}
     ],
     "UnmappedDefault": 0.5
 }

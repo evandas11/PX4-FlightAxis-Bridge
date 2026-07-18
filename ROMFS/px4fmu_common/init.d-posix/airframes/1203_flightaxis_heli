@@ -11,8 +11,44 @@
 param set-default EKF2_GPS_DELAY 0
 
 # Actuator geometry (QGC Actuators tab) MUST match the "px4" output indices
-# in Tools/simulation/flightaxis/models/heli.json
+# in Tools/simulation/flightaxis/flightaxis_bridge/models/heli.json.
+#
+# CA_AIRFRAME 10 is "Helicopter (tail ESC)": the allocator emits the two motors
+# first, then the swash plate servos. PWM_MAIN_FUNC<N> lands on
+# HIL_ACTUATOR_CONTROLS.controls[N-1], so the assignments below produce:
+#
+#   controls[0] = 101 Motor 1     main rotor / RSC    [0,1]  -> heli.json rf4
+#   controls[1] = 102 Motor 2     yaw tail motor      [0,1]  -> heli.json rf3
+#   controls[2] = 201 Servo 1     swash plate servo 1 [-1,1] -> heli.json rf0
+#   controls[3] = 202 Servo 2     swash plate servo 2 [-1,1] -> heli.json rf1
+#   controls[4] = 203 Servo 3     swash plate servo 3 [-1,1] -> heli.json rf2
+#
+# Note the yaw tail is a MOTOR under this airframe, so PWMSim normalises it to
+# [0,1] and heli.json must scale rf3 as "unipolar". Selecting CA_AIRFRAME 11
+# ("Helicopter (tail Servo)") instead would make it [-1,1]/bipolar; if you
+# change one, change the other.
 param set-default CA_AIRFRAME 10
+
+param set-default PWM_MAIN_FUNC1 101
+param set-default PWM_MAIN_FUNC2 102
+param set-default PWM_MAIN_FUNC3 201
+param set-default PWM_MAIN_FUNC4 202
+param set-default PWM_MAIN_FUNC5 203
+
+# Swash plate geometry. CA_SP0_ANG<i> is measured clockwise seen from above,
+# 0 = forward (+X). The allocator drives each servo with
+#   servo_i = collective + pitch*cos(ang_i)*arm - roll*sin(ang_i)*arm
+# and the bridge's HeliDemix inverts that as roll=s1-s2,
+# pitch=(s1+s2)/2-s3, col=(s1+s2+s3)/3. That inverse is only exact when
+# servos 1 and 2 are mirrored about the X axis and servo 3 sits on it.
+# The PX4 defaults (0/140/220) put the mirrored pair on servos 2 and 3, which
+# leaves the demix cross-coupling roll into pitch, so override them: with
+# 300/60/180 the demix yields exactly (1.732*roll, 1.5*pitch, collective)
+# with no cross terms and no sign inversion on any axis.
+param set-default CA_SP0_COUNT 3
+param set-default CA_SP0_ANG0 300
+param set-default CA_SP0_ANG1 60
+param set-default CA_SP0_ANG2 180
 
 # Start with FF-dominant rate loops (see 16001_helicopter);
 # tune P/I after the FF gain is set for the RealFlight model.

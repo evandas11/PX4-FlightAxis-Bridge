@@ -44,6 +44,7 @@
 #ifndef VEHICLE_STATE_H
 #define VEHICLE_STATE_H
 
+#include <cmath>
 #include <random>
 
 #include <common/mavlink.h>
@@ -60,8 +61,12 @@ public:
 	VehicleState(double home_lat_deg, double home_lon_deg, double home_alt_m);
 
 	// Full RF->NED conversion pipeline for a NORMAL physics frame.
-	// dt = physics-time delta in seconds (already glitch-capped by caller).
-	void setFAData(const FAState &fa, double dt);
+	// dt      = physics-time delta in seconds (already glitch-capped by caller),
+	//           used to advance the internal clock.
+	// dt_true = the real elapsed physics time; differs from dt only when the
+	//           caller swallowed a glitch. Used for the on-ground accel finite
+	//           difference so a capped frame does not overstate acceleration.
+	void setFAData(const FAState &fa, double dt, double dt_true);
 
 	// Extrapolation step (duplicate physics frame): advance attitude by
 	// q (x) exp(0.5*omega*dt_step), hold accel/gyro, bump internal time.
@@ -71,8 +76,19 @@ public:
 	// first frame and after every reset) so home anchors the RF world.
 	void resetPositionOffset(const FAState &fa);
 
+	// Drop the captured offset so the NEXT real frame re-anchors from a
+	// post-reset position (ArduPilot SIM_FlightAxis position_offset.zero()).
+	void invalidatePositionOffset() { offset_captured = false; }
+
 	mavlink_hil_sensor_t getSensorMsg(int offset_us);
 	mavlink_hil_state_quaternion_t getStateQuatMsg(int offset_us);
+
+	// Rangefinder (spec 6): AGL along the body-down axis, NAN when inverted.
+	bool rangefinderValid() const { return std::isfinite(rangefinder_m); }
+	mavlink_distance_sensor_t getDistanceSensorMsg(int offset_us);
+
+	// internal physics clock, us (what the HIL message timestamps carry)
+	uint64_t timeUsec() const { return (uint64_t)(time_sec * 1e6); }
 
 	void setPXControls(const mavlink_hil_actuator_controls_t &controls);
 	const mavlink_hil_actuator_controls_t &lastControls() const { return last_controls; }
@@ -112,6 +128,7 @@ private:
 	double diff_pressure;			// hPa
 	double airspeed_true;			// m/s (RF total TAS)
 	double airspeed_pitot;			// m/s (body-X, computed)
+	double rangefinder_m;			// m along body-down axis, NAN if invalid
 
 	// controls
 	mavlink_hil_actuator_controls_t last_controls;

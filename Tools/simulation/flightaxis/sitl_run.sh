@@ -31,8 +31,21 @@ echo "FlightAxis setup"
 cd "${src_path}/Tools/simulation/flightaxis/flightaxis_bridge/"
 ./FA_check.py "${FA_IP}" || { echo "RealFlight FlightAxis not reachable at ${FA_IP}:18083"; exit 1; }
 
+# Capture the bridge argv first: the bridge is backgrounded below, so a failure
+# here would otherwise be invisible (empty argv -> bridge prints usage and dies,
+# and PX4 then blocks forever on TCP 4560 with no diagnostic).
+if ! fa_bridge_params=`./get_FAbridge_params.py "models/${model}.json"`; then
+	echo "get_FAbridge_params.py failed for models/${model}.json" >&2
+	exit 1
+fi
+
+if [ -z "$fa_bridge_params" ]; then
+	echo "get_FAbridge_params.py produced no parameters for models/${model}.json" >&2
+	exit 1
+fi
+
 "${build_path}/build_flightaxis_bridge/flightaxis_bridge" 0 "${FA_IP}" \
-	`./get_FAbridge_params.py "models/${model}.json"` &
+	$fa_bridge_params &
 FA_BRIDGE_PID=$!
 
 pushd "$rootfs" >/dev/null

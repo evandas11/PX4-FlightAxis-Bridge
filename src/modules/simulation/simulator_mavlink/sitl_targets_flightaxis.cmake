@@ -6,7 +6,10 @@ if(ENABLE_LOCKSTEP_SCHEDULER STREQUAL "no")
 	include(ExternalProject)
 	ExternalProject_Add(flightaxis_bridge
 		SOURCE_DIR ${PX4_SOURCE_DIR}/Tools/simulation/flightaxis/flightaxis_bridge
-		CMAKE_ARGS -DCMAKE_INSTALL_PREFIX=${CMAKE_INSTALL_PREFIX}
+		# RelWithDebInfo: the bridge has to sustain 250+ Hz SOAP round-trips
+		# (ArduPilot builds its SITL at -O3); plain -g would leave Eigen and
+		# the MAVLink encoders unoptimised.
+		CMAKE_ARGS -DCMAKE_INSTALL_PREFIX=${CMAKE_INSTALL_PREFIX} -DCMAKE_BUILD_TYPE=RelWithDebInfo
 		BINARY_DIR ${PX4_BINARY_DIR}/build_flightaxis_bridge
 		INSTALL_COMMAND ""
 		USES_TERMINAL_CONFIGURE true
@@ -46,6 +49,13 @@ if(ENABLE_LOCKSTEP_SCHEDULER STREQUAL "no")
 	)
 
 	foreach(model ${models})
+
+		# sitl_run.sh unconditionally runs get_FAbridge_params.py on
+		# models/${model}.json; without this check a missing or renamed JSON
+		# configures cleanly and only fails at launch with a Python traceback.
+		if(NOT EXISTS "${PX4_SOURCE_DIR}/Tools/simulation/flightaxis/flightaxis_bridge/models/${model}.json")
+			message(WARNING "flightaxis missing model JSON: ${PX4_SOURCE_DIR}/Tools/simulation/flightaxis/flightaxis_bridge/models/${model}.json")
+		endif()
 
 		# match model to airframe
 		set(airframe_model_only)

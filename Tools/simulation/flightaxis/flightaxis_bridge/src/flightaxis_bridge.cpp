@@ -84,7 +84,7 @@ struct ChannelMap {
 	double disarm;		// 0..1, or -1 = hold last/neutral
 };
 
-static int stop = 0;
+static volatile sig_atomic_t stop = 0;
 
 static void termSignalHandler(int)
 {
@@ -266,6 +266,28 @@ int main(int argc, char **argv)
 		     << " disarm=" << maps[i].disarm << endl;
 	}
 
+	// a duplicate rf index would silently last-wins in buildChannels(); a
+	// duplicate px4 index is almost always a typo in the model JSON
+	for (int i = 0; i < nmaps; i++) {
+		for (int j = i + 1; j < nmaps; j++) {
+			if (maps[i].rf == maps[j].rf) {
+				cerr << "[flightaxis_bridge] bad channel map: RealFlight channel rf"
+				     << maps[i].rf << " is mapped twice (entries " << i << " and " << j
+				     << ") - fix the model JSON" << endl;
+				delete [] maps;
+				return -1;
+			}
+
+			if (maps[i].px4 == maps[j].px4) {
+				cerr << "[flightaxis_bridge] bad channel map: PX4 control index px4["
+				     << maps[i].px4 << "] is mapped twice (entries " << i << " and " << j
+				     << ") - fix the model JSON" << endl;
+				delete [] maps;
+				return -1;
+			}
+		}
+	}
+
 	// home position (anchors the RealFlight world in PX4's geodetic frame)
 	const double home_lat = envOrDefault("PX4_HOME_LAT", 47.397742);
 	const double home_lon = envOrDefault("PX4_HOME_LON", 8.545594);
@@ -333,6 +355,33 @@ int main(int argc, char **argv)
 	uint64_t last_socket_frame_counter = 0;
 	double last_frame_count_s = 0.0;
 
+	// ArduPilot report_FPS(): called from BOTH the extrapolation path and the
+	// normal-frame path, otherwise the printed rate drifts
+	auto report_FPS = [&](const FAState &st) {
+		if (frame_counter++ % 1000 != 0) {
+			return;
+		}
+
+		if (last_frame_count_s != 0.0) {
+			const uint64_t frames = socket_frame_counter - last_socket_frame_counter;
+			last_socket_frame_counter = socket_frame_counter;
+			const double dtw = st.m_currentPhysicsTime_SEC - last_frame_count_s;
+
+			if (!(options & OPT_SILENCE_FPS) && dtw > 0.0 && average_frame_time_s > 0.0) {
+				fprintf(stderr, "[flightaxis_bridge] %.1f/%.1f FPS avg=%.1f glitches=%u\n",
+					frames / dtw, 1000.0 / dtw, 1.0 / average_frame_time_s,
+					(unsigned)glitch_count);
+			}
+
+			if (fabs(st.m_currentPhysicsSpeedMultiplier - 1.0) > 0.01) {
+				fprintf(stderr, "[flightaxis_bridge] WARNING: RealFlight physics speed multiplier is %.2f"
+					" (set it to 1.0)\n", st.m_currentPhysicsSpeedMultiplier);
+			}
+		}
+
+		last_frame_count_s = st.m_currentPhysicsTime_SEC;
+	};
+
 	bool announced_first_controls = false;
 	unsigned fail_count = 0;
 	bool have_fa_data = false;
@@ -355,8 +404,9 @@ int main(int argc, char **argv)
 			}
 
 			fail_count++;
-			unsigned shift = (fail_count < 7) ? fail_count : 7;
-			usleep(10000u << shift);	// 20 ms .. 1.28 s backoff
+			// cap the shift: usleep() is only specified for < 1 s
+			unsigned shift = (fail_count < 6) ? fail_count : 6;
+			usleep(10000u << shift);	// 20 ms .. 640 ms backoff
 
 			if (!fa.controllerStarted()) {
 				fa.startController(reset_position);
@@ -386,12 +436,23 @@ int main(int argc, char **argv)
 
 			if (fa.startController(reset_position)) {
 				cerr << "[flightaxis_bridge] controller injected, aircraft reset" << endl;
-				vehicle.resetPositionOffset(state);
+				// `state` was parsed BEFORE ResetAircraft ran, so it describes the
+				// pre-reset location. Drop the offset (ArduPilot zeroes it) and let
+				// the next real frame re-anchor from the post-reset position.
+				vehicle.invalidatePositionOffset();
 
 			} else {
 				usleep(200000);
 			}
 
+			// Keep the sensor stream alive across the reinject: PX4 trips its
+			// sensor-timeout failsafe after ~0.5 s of silence, and spec 11.6 wants
+			// this to self-heal. Hold the last state, advance the clock one step,
+			// and keep draining actuator controls so the 4560 buffer cannot back up.
+			vehicle.extrapolate(0.001);
+			time_now_us += 1000;
+			px4.Send(0);
+			px4.Recieve(false);
 			continue;
 		}
 
@@ -411,7 +472,8 @@ int main(int argc, char **argv)
 			cerr << "[flightaxis_bridge] physics time went backwards - RealFlight restart, re-basing" << endl;
 			initial_time_s = time_now_us * 1.0e-6;
 			last_time_s = state.m_currentPhysicsTime_SEC;
-			vehicle.resetPositionOffset(state);
+			// genuine restart: drop the anchor, the next real frame recaptures it
+			vehicle.invalidatePositionOffset();
 			px4.Recieve(false);
 			continue;
 		}
@@ -436,17 +498,20 @@ int main(int argc, char **argv)
 			}
 
 			px4.Recieve(false);
-			frame_counter++;
+			report_FPS(state);
 			continue;
 		}
 
 		// ---- branch 3: normal frame
 		extrapolated_s = 0.0;
 
+		// Time-epoch rebase only (ArduPilot SIM_FlightAxis.cpp update()). This
+		// condition stays true for every frame while RealFlight's physics clock
+		// is still near zero, so it must NOT re-capture the position offset -
+		// that is driven by VehicleState's offset_captured flag instead.
 		if (initial_time_s <= 0.0 || !have_fa_data) {
 			dt = 0.001;
 			initial_time_s = state.m_currentPhysicsTime_SEC - dt;
-			vehicle.resetPositionOffset(state);
 		}
 
 		// glitch compensation: swallow 50 ms - 2 s network hiccups by
@@ -482,33 +547,16 @@ int main(int argc, char **argv)
 		last_time_s = state.m_currentPhysicsTime_SEC;
 		have_fa_data = true;
 
-		vehicle.setFAData(state, dt_effective);
+		// dt is the true elapsed physics time; dt_effective may have been capped
+		// by the glitch compensation above
+		vehicle.setFAData(state, dt_effective, dt);
 		px4.Send(0);
 
 		// drain HIL_ACTUATOR_CONTROLS (non-blocking) for the next exchange
 		px4.Recieve(false);
 
 		// FPS report every 1000 frames (ArduPilot report_FPS)
-		if (frame_counter++ % 1000 == 0) {
-			if (last_frame_count_s != 0.0) {
-				const uint64_t frames = socket_frame_counter - last_socket_frame_counter;
-				last_socket_frame_counter = socket_frame_counter;
-				const double dtw = state.m_currentPhysicsTime_SEC - last_frame_count_s;
-
-				if (!(options & OPT_SILENCE_FPS) && dtw > 0.0 && average_frame_time_s > 0.0) {
-					fprintf(stderr, "[flightaxis_bridge] %.1f/%.1f FPS avg=%.1f glitches=%u\n",
-						frames / dtw, 1000.0 / dtw, 1.0 / average_frame_time_s,
-						(unsigned)glitch_count);
-				}
-
-				if (fabs(state.m_currentPhysicsSpeedMultiplier - 1.0) > 0.01) {
-					fprintf(stderr, "[flightaxis_bridge] WARNING: RealFlight physics speed multiplier is %.2f"
-						" (set it to 1.0)\n", state.m_currentPhysicsSpeedMultiplier);
-				}
-			}
-
-			last_frame_count_s = state.m_currentPhysicsTime_SEC;
-		}
+		report_FPS(state);
 	}
 
 	cerr << "[flightaxis_bridge] exiting" << endl;
