@@ -16,15 +16,6 @@ verified against ArduPilot `SIM_FlightAxis.cpp`).
 
 ---
 
-## ⚠️ Sync reminder
-
-> This repo **mirrors** files that live inside a PX4 source tree. If you edit a file
-> directly in the PX4 tree, **you must update the copy here too** (and vice versa).
-> Use `./scripts/sync-from-px4.sh` / `./scripts/sync-to-px4.sh`.
-> Full rules: **[README-DONT-FORGET.md](README-DONT-FORGET.md)**.
-
----
-
 ## Repository layout
 
 Paths are identical to where the files go inside `PX4-Autopilot/`, so installation is a
