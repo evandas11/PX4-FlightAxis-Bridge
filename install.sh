@@ -574,7 +574,8 @@ fi
 
 printf '%sWhat to do next%s\n' "$C_BLD" "$C_OFF"
 printf '  1. On the Windows machine running RealFlight, enable %sFlightAxis Link%s\n' "$C_BLD" "$C_OFF"
-printf '     (Simulation > Settings > FlightAxis Link; it listens on TCP 18083).\n'
+printf '     (Settings -> Physics -> Quality -> enable "RealFlight Link"; on RealFlight 8/9\n'
+printf '     it is Settings -> Physics. It listens on TCP 18083.)\n'
 printf '     Use a wired network - WiFi cannot hold the ~250 Hz SOAP rate.\n'
 printf '  2. Launch SITL from %s:\n' "$PX4_DIR"
 printf '\n       %sPX4_FLIGHTAXIS_IP=<windows-ip> make px4_sitl_nolockstep flightaxis_plane%s\n\n' "$C_BLD" "$C_OFF"

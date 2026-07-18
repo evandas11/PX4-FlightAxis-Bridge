@@ -27,8 +27,9 @@ def main():
             pass
     except OSError as e:
         print("FlightAxis check: cannot reach {}:{} ({})".format(ip, FLIGHTAXIS_PORT, e))
-        print("  - Is RealFlight running with FlightAxis Link enabled?")
-        print("    (RealFlight: Settings -> Physics -> Quality -> FlightAxis Link Enabled)")
+        print("  - Is RealFlight running with the FlightAxis (RealFlight Link) option enabled?")
+        print("    (RealFlight Evolution: press ESC, Settings -> Physics -> Quality,")
+        print("     enable 'RealFlight Link'; on RealFlight 8/9 it is Settings -> Physics)")
         print("  - Is the host reachable / firewall open on TCP {}?".format(FLIGHTAXIS_PORT))
         print("  - Set PX4_FLIGHTAXIS_IP if RealFlight is not on {}.".format(ip))
         return 1
