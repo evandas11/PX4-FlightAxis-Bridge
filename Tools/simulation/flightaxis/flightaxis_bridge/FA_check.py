@@ -15,9 +15,16 @@ FLIGHTAXIS_PORT = 18083
 TIMEOUT_S = 2.0
 
 
+def log(msg):
+    # stderr, matching get_FAbridge_params.py: this diagnostic block is the most
+    # useful text the tooling emits and on stdout it lands in the middle of
+    # make's output
+    sys.stderr.write(msg + "\n")
+
+
 def main():
     if len(sys.argv) != 2:
-        print("usage: FA_check.py <realflight_ip>")
+        log("usage: FA_check.py <realflight_ip>")
         return 1
 
     ip = sys.argv[1]
@@ -26,14 +33,14 @@ def main():
         with socket.create_connection((ip, FLIGHTAXIS_PORT), timeout=TIMEOUT_S):
             pass
     except OSError as e:
-        print("FlightAxis check: cannot reach {}:{} ({})".format(ip, FLIGHTAXIS_PORT, e))
-        print("  - Is RealFlight running with FlightAxis Link enabled?")
-        print("    (RealFlight: Settings -> Physics -> Quality -> FlightAxis Link Enabled)")
-        print("  - Is the host reachable / firewall open on TCP {}?".format(FLIGHTAXIS_PORT))
-        print("  - Set PX4_FLIGHTAXIS_IP if RealFlight is not on {}.".format(ip))
+        log("FlightAxis check: cannot reach {}:{} ({})".format(ip, FLIGHTAXIS_PORT, e))
+        log("  - Is RealFlight running with FlightAxis Link enabled?")
+        log("    (RealFlight: Settings -> Physics -> Quality -> FlightAxis Link Enabled)")
+        log("  - Is the host reachable / firewall open on TCP {}?".format(FLIGHTAXIS_PORT))
+        log("  - Set PX4_FLIGHTAXIS_IP if RealFlight is not on {}.".format(ip))
         return 1
 
-    print("FlightAxis check: RealFlight reachable at {}:{}".format(ip, FLIGHTAXIS_PORT))
+    log("FlightAxis check: RealFlight reachable at {}:{}".format(ip, FLIGHTAXIS_PORT))
     return 0
 
 

@@ -1,7 +1,7 @@
 {
-    "Comment":   "Quadcopter on a RealFlight multirotor model - rf0-3 are motors 1-4, direct from PX4 motor outputs. The \"px4\" values are HIL_ACTUATOR_CONTROLS.controls[] indices and MUST match PWM_MAIN_FUNC* in ROMFS/px4fmu_common/init.d-posix/airframes/1201_flightaxis_quad: controls[0..3] = motors 1-4, each already [0,1].",
-    "RfModel":   "informational only - aircraft is selected inside RealFlight",
-    "Options":   ["ResetPosition"],
+    "Comment":        "Quadcopter on a RealFlight multirotor model - rf0-3 are motors 1-4, direct from PX4 motor outputs. The \"px4\" values are HIL_ACTUATOR_CONTROLS.controls[] indices and MUST match PWM_MAIN_FUNC* in ROMFS/px4fmu_common/init.d-posix/airframes/1201_flightaxis_quad: controls[0..3] = motors 1-4, each already [0,1].",
+    "RfModel":        "informational only - aircraft is selected inside RealFlight",
+    "Options":        ["ResetPosition"],
     "Channels": [
         {"rf": 0, "px4": 0, "scale": "unipolar", "disarm": 0.0, "comment": "motor 1"},
         {"rf": 1, "px4": 1, "scale": "unipolar", "disarm": 0.0, "comment": "motor 2"},
