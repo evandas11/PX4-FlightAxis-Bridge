@@ -9,6 +9,30 @@ Assumes the bridge is already installed into a PX4 v1.16 checkout (`./install.sh
 
 ---
 
+## Quick reference — every shipped model
+
+Four vehicles ship. Each has a self-contained section in §2 — jump straight to yours, you do not
+need to read the others. Everything below assumes the **`px4_sitl_nolockstep`** build.
+
+| Make target | Airframe (`SYS_AUTOSTART`) | Vehicle type | Description | Status |
+|---|---|---|---|---|
+| `flightaxis_plane` | `1200_flightaxis_plane` (1200) | Fixed-wing (`CA_AIRFRAME 1`) | Conventional plane: aileron / elevator / throttle / rudder | **Working** — channel map verified end to end |
+| `flightaxis_quad` | `1201_flightaxis_quad` (1201) | Multirotor quad-X (`CA_AIRFRAME 0`) | Four motors, direct from PX4 motor outputs | **Working** — channel map verified end to end |
+| `flightaxis_quadplane` | `1202_flightaxis_quadplane` (1202) | Standard VTOL (`CA_AIRFRAME 2`) | reference-class: 4 lift motors + pusher + 4 surfaces | **Partial** — map verified by reasoning only, not flown (§8) |
+| `flightaxis_heli` | `1203_flightaxis_heli` (1203) | Helicopter, tail ESC (`CA_AIRFRAME 10`) | Collective-pitch heli; bridge demixes swash to roll/pitch/collective | **Partial** — `HeliDemix` never tested against a real swashplate (§8) |
+
+`flightaxis` on its own is an alias for `flightaxis_plane`.
+
+**Ground vehicles (rover), surface vessels (boat) and underwater vehicles (UUV) are not
+supported, and are not planned.** RealFlight is an RC *flight* simulator: it ships no ground,
+surface or underwater models, its model format has no chassis or hull component, and the
+FlightAxis SOAP reply carries no wheel, water-surface or depth telemetry the bridge could pass
+to PX4. A model JSON only remaps actuator channels — it cannot manufacture sensor physics that
+the simulator never produced. Use PX4's Gazebo rover targets (e.g. `gz_rover_ackermann`) or
+ArduPilot's purpose-built `motorboat` / `sailboat` SITL backends instead.
+
+---
+
 ## 0. If you know the ArduPilot command
 
 This ArduPilot invocation:
@@ -159,6 +183,18 @@ guarded by `if(ENABLE_LOCKSTEP_SCHEDULER STREQUAL "no")`).
 Targets that exist: `flightaxis` (alias for plane), `flightaxis_plane`, `flightaxis_quad`,
 `flightaxis_quadplane`, `flightaxis_heli`.
 
+**In every command below, `192.168.10.1` is a worked example — it is the address of the Windows
+box running RealFlight.** Substitute your own: the variable is
+`PX4_FLIGHTAXIS_IP=<your-windows-ip>`, read by `sitl_run.sh`, and it defaults to `127.0.0.1`
+(same-host case, §1.6). Find the right value with §1.2 and prove it is reachable with §1.5
+*before* launching anything.
+
+Each section below is self-contained: launch command, airframe, RealFlight model preparation,
+channel table, QGC check, gotchas, and a first-flight check for that vehicle. The
+model-preparation steps immediately below apply to all four.
+
+Sections are HITL-agnostic — they describe SITL. For hardware-in-the-loop, see `HITL.md`.
+
 ### Reading the channel tables
 
 - **RF ch** — RealFlight channel slot (0-based, as the bridge counts them; RealFlight's own UI
@@ -198,7 +234,7 @@ PX4_FLIGHTAXIS_IP=192.168.10.1 make px4_sitl_nolockstep flightaxis_plane
 ```
 
 Airframe: `1200_flightaxis_plane` (`SYS_AUTOSTART` 1200, `CA_AIRFRAME 1`).
-Channel map: `models/plane.json`. Options: `ResetPosition`.
+Channel map: `models/plane.json`. Options: `ResetPosition` (bitmask **1**).
 
 **RealFlight aircraft:** any conventional fixed-wing with aileron / elevator / throttle / rudder
 on channels 1–4 — the standard ArduPilot RealFlight convention.
@@ -228,6 +264,12 @@ independently, add a row for the other one on a spare RF slot, e.g.:
 aileron-left, aileron-right, elevator, rudder. Moving the "Aileron left" slider must move the
 RealFlight ailerons; "Aileron right" must move nothing.
 
+**First flight.** Do the generic static/rates/taxi checks in §8 first, then: arm on the runway in
+**Position** mode and confirm the throttle idles at zero (disarm value 0.0, not half). Take off
+in **Stabilized**, hold wings level, and check the stick-to-surface polarity matches §8 step 2.
+Only then try **Mission** — the airframe sets `RWTO_TKOFF 1`, so a runway takeoff is expected,
+and `NAV_ACC_RAD 15` means waypoints are considered hit from 15 m out.
+
 ---
 
 ### 2.2 Quad (multirotor)
@@ -238,7 +280,7 @@ PX4_FLIGHTAXIS_IP=192.168.10.1 make px4_sitl_nolockstep flightaxis_quad
 ```
 
 Airframe: `1201_flightaxis_quad` (`SYS_AUTOSTART` 1201, `CA_AIRFRAME 0`, quad X).
-Channel map: `models/quad.json`. Options: `ResetPosition`.
+Channel map: `models/quad.json`. Options: `ResetPosition` (bitmask **1**).
 
 **RealFlight aircraft:** any quad-X multirotor whose four motors sit on channels 1–4
 individually (no RealFlight-side mixing).
@@ -262,6 +304,12 @@ indices in `quad.json` (not the `px4` ones) to match your model.
 **QGC check:** Actuators shows exactly four motors, no servos. Sliding Motor 1 must spin the
 RealFlight front-right rotor.
 
+**First flight.** Verify the motor mapping *on the ground* before leaving it — in QGC Actuators,
+slide each motor one at a time and confirm the correct RealFlight rotor spins, in the correct
+direction. A wrong map here flips the aircraft in the first half second. Then arm in
+**Stabilized**, lift to ~2 m, and check that a small roll-right input drops the right side. Only
+then switch to **Position** and hover hands-off to confirm EKF position hold.
+
 ---
 
 ### 2.3 Quadplane (VTOL)
@@ -272,7 +320,7 @@ PX4_FLIGHTAXIS_IP=192.168.10.1 make px4_sitl_nolockstep flightaxis_quadplane
 ```
 
 Airframe: `1202_flightaxis_quadplane` (`SYS_AUTOSTART` 1202, `CA_AIRFRAME 2`, standard VTOL,
-`VT_TYPE 2`). Channel map: `models/quadplane.json`. Options: `ResetPosition`.
+`VT_TYPE 2`). Channel map: `models/quadplane.json`. Options: `ResetPosition` (bitmask **1**).
 
 **RealFlight aircraft:** a reference-class quadplane — aileron / elevator / forward throttle /
 rudder on channels 1–4, four lift motors on channels 5–8.
@@ -314,6 +362,12 @@ dead motor. Do not re-enable it here.
 **QGC check:** Actuators shows five motors then four servos. Motors 1–4 must move the RealFlight
 lift rotors, Motor 5 the pusher.
 
+**First flight.** Confirm on the ground that Motors 1–4 drive the *lift* rotors and Motor 5 the
+pusher — if they are swapped you have the `Rev4Servos` double-swap described above. Then hover in
+**Stabilized** on the lift motors alone and confirm multirotor control is sane *before*
+attempting any transition. Transition last, with plenty of altitude: it is the least verified
+part of this airframe (§8), and a failed forward transition drops the aircraft.
+
 ---
 
 ### 2.4 Helicopter
@@ -324,7 +378,8 @@ PX4_FLIGHTAXIS_IP=192.168.10.1 make px4_sitl_nolockstep flightaxis_heli
 ```
 
 Airframe: `1203_flightaxis_heli` (`SYS_AUTOSTART` 1203, `CA_AIRFRAME 10` = "Helicopter
-(tail ESC)"). Channel map: `models/heli.json`. Options: `ResetPosition`, **`HeliDemix`**.
+(tail ESC)"). Channel map: `models/heli.json`. Options: `ResetPosition` + **`HeliDemix`**
+(bitmask **5** = 1 | 4).
 
 **RealFlight aircraft:** a collective-pitch heli expecting the usual
 roll / pitch / collective / tail / RSC channel set on channels 1–5.
@@ -377,6 +432,13 @@ then add P and I. It will not fly well out of the box.
 
 **QGC check:** Actuators shows Motor 1, Motor 2, then three swash servos, and the swashplate
 angles read 300/60/180.
+
+**First flight.** Check the swashplate on the ground first: cyclic right must tilt the RealFlight
+swash right with **no** pitch component, and cyclic forward must tilt it forward with no roll
+component. Cross-coupling here means the `CA_SP0_ANG*` override did not take, and `HeliDemix` is
+no longer a correct inverse — fix it before spooling up. Then bring the rotor to speed, raise
+collective to a light skid, and confirm yaw holds before lifting off. Expect to tune
+`MC_*RATE_FF` for your model; it will not fly well out of the box.
 
 ---
 
