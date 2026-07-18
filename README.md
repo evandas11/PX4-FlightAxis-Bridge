@@ -337,8 +337,11 @@ Spec §11 has the full checklist these correspond to.
 
 ## Credits / references
 
-- ArduPilot `SIM_FlightAxis.{h,cpp}` — ground truth for conversions, timing, and the
-  SOAP socket/reconnect logic.
+- [ArduPilot](https://github.com/ArduPilot/ardupilot) `SIM_FlightAxis.{h,cpp}` — ground
+  truth for conversions, timing, and the SOAP socket/reconnect logic. `fa_communicator`,
+  the three-branch timing in `flightaxis_bridge.cpp`, and the conversions in
+  `vehicle_state.cpp` are ports of it, which is why this project is GPLv3. GPLv3,
+  © ArduPilot Dev Team.
 - [PX4-FlightGear-Bridge](https://github.com/PX4/PX4-FlightGear-Bridge) (ThunderFly
   s.r.o.) — the integration template. `geo_mag_declination.{h,cpp}` and
   `cmake/FindMAVLink.cmake` are reused verbatim; `px4_communicator.{h,cpp}` is adapted from
@@ -347,4 +350,13 @@ Spec §11 has the full checklist these correspond to.
 
 ## License
 
-BSD-3-Clause (same as PX4 and the FlightGear bridge components this reuses).
+**GPLv3 or later** — see [LICENSE](LICENSE), and [COPYRIGHT.md](COPYRIGHT.md) for
+per-file provenance.
+
+The bridge's SOAP client, physics-time handling and RealFlight→NED conversions are
+literal ports of ArduPilot's GPLv3 `SIM_FlightAxis.{h,cpp}`, so the combined work is
+GPLv3. The files reused from PX4-FlightGear-Bridge keep their BSD-3-Clause notices,
+which is GPL-compatible.
+
+This covers the files in this repository only. The bridge is a standalone executable
+that talks to PX4 over MAVLink — installing it does not relicense your PX4 checkout.
