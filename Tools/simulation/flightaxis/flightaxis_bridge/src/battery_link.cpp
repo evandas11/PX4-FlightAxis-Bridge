@@ -62,9 +62,50 @@ constexpr uint64_t SEND_INTERVAL_US = 500000;
 constexpr double CELL_EMPTY_V = 3.30;
 constexpr double CELL_FULL_V  = 4.20;
 
+// Per-cell internal resistance used to undo load sag before the map above is
+// applied. See the sag block in update() for why this is not optional.
+//
+// PX4's own Battery class does exactly this (src/lib/battery/battery.cpp:213-236,
+// `_voltage_v + _current_a * _internal_resistance`), and defaults BAT1_R_INTERNAL
+// to -1 = estimate it online with RLS. There is no equivalent estimator here and
+// nothing to seed it from, so this is a fixed, deliberately CONSERVATIVE value:
+// 5 mOhm/cell is mid-range for the LiPo packs RealFlight models, and erring low
+// only means we under-correct - i.e. we stay closer to the old behaviour - rather
+// than inventing charge the pack does not have.
+constexpr double CELL_R_INTERNAL = 0.005;
+
+// Time constant of the low-pass on the compensated per-cell voltage. The sag
+// correction handles the sustained component; this handles the spikes that
+// survive it. Sized well above the 500 ms send interval and well below a flight.
+constexpr double SOC_FILTER_TAU_S = 3.0;
+
 // Nominal pack used when the RealFlight model reports no battery at all.
-constexpr double SYNTHETIC_CELLS = 4.0;
+constexpr int    SYNTHETIC_CELLS = 4;
 constexpr double SYNTHETIC_V     = 4.0 * 4.10;
+
+/*
+ * PLAUSIBILITY FLOOR FOR A PROPULSION PACK.
+ *
+ * RealFlight uses -1 as the "this model does not have one" sentinel, and 0 also
+ * shows up transiently (aircraft reset, the first frames after the controller is
+ * injected, physics not yet stepped). Neither is a battery.
+ *
+ * 3.0 V is under a fully flat 1S cell, so nothing real is rejected, while every
+ * sentinel is. The floor is NOT set high enough to reject a 4.8 V receiver pack,
+ * because it cannot be: a 4.8 V NiMH and a 2S LiPo overlap, and no voltage
+ * threshold separates them. The fuel field is what separates them - see below.
+ */
+constexpr double PACK_MIN_V = 3.0;
+
+// A tank reading above this means the model HAS a tank. Same sentinel story:
+// -1 for electrics, and a genuinely dry tank reads 0.0 - which is information,
+// not absence, so it must not be mistaken for "no fuel system".
+constexpr double FUEL_EPS_OZ = 1.0e-6;
+
+// Frames of DISAGREEING evidence required to move an already-latched class.
+// At the 2 Hz send rate this is ~1.5 s of consistent contradiction, which a
+// model swap produces and a one-frame glitch does not.
+constexpr int CLASS_CONFIRM_FRAMES = 3;
 
 double clamp(double v, double lo, double hi)
 {
@@ -132,12 +173,96 @@ void BatteryLink::update(const FAState &fa, uint64_t now_us)
 	const double i_raw    = fa.m_batteryCurrentDraw_AMPS;
 	const double fuel_oz  = fa.m_fuelRemaining_OZ;
 
+	/*
+	 * ======================= PROPULSION AUTO-DETECTION =======================
+	 *
+	 * Which of these two numbers is meaningful is decided HERE, from the frame,
+	 * with no parameter and nothing for the user to set. A glow/gas/turbine
+	 * model has to be right the moment it loads.
+	 *
+	 * THE RULE, and it is deliberately asymmetric:
+	 *
+	 *   a tank exists  -> FUEL, whatever the voltage field says
+	 *   else a plausible pack voltage -> ELECTRIC
+	 *   else -> undecided; report a nominal pack until something shows up
+	 *
+	 * Fuel wins over voltage rather than the other way round because the
+	 * conflict case is real and only resolves one way. Plenty of RealFlight IC
+	 * models carry an onboard receiver/ignition battery, so they can report BOTH
+	 * a tank and a small positive voltage. Treating that 4.8 V NiMH as the
+	 * propulsion pack is a disaster: the per-cell map calls it 1 cell, and the
+	 * moment it reads below 4.2 V the aircraft is "flat" - remaining hits 0,
+	 * PX4 raises EMERGENCY and takes away every navigation mode, mid-flight,
+	 * on an aircraft whose tank is full. An electric model, by contrast, has no
+	 * tank at all and reports fuel = -1, so it never enters this branch. The
+	 * asymmetry costs electrics nothing and saves IC models from the exact
+	 * failure mode this bridge already ate once.
+	 *
+	 * WHAT THIS CANNOT DISTINGUISH, stated plainly: a genuine hybrid - electric
+	 * propulsion with a fuel-burning generator - would be classed as Fuel. Its
+	 * tank is still the thing that ends the flight, so the answer is arguably
+	 * right anyway, and RealFlight does not model such an aircraft.
+	 *
+	 * Once Electric or Fuel is latched it survives bad frames (see the streak
+	 * counter). That matters most for a dry tank: fuel = 0 is the single most
+	 * important reading an IC aircraft ever produces, and the old code read it
+	 * as "no fuel system" and reported a nominal FULL pack - reporting 100% at
+	 * the exact moment the engine is about to quit.
+	 */
+	const bool fuel_plausible = std::isfinite(fuel_oz) && fuel_oz > FUEL_EPS_OZ;
+	const bool pack_plausible = std::isfinite(v_raw) && v_raw >= PACK_MIN_V;
+
+	Source observed = Source::None;
+
+	if (fuel_plausible) {
+		observed = Source::Fuel;
+
+	} else if (pack_plausible) {
+		observed = Source::Electric;
+	}
+
+	if (observed == Source::None) {
+		// No evidence this frame. Never a reason to abandon a latched class -
+		// it is the normal reading for a dry tank and for a momentary dropout.
+		_class_streak = 0;
+
+	} else if (_source == Source::None) {
+		// First real evidence: adopt immediately, no waiting. The very first
+		// battery packet PX4 sees should already be the truth.
+		adopt(observed);
+
+	} else if (observed != _source) {
+		// Sustained contradiction = the user loaded a different aircraft.
+		if (++_class_streak >= CLASS_CONFIRM_FRAMES) {
+			adopt(observed);
+		}
+
+	} else {
+		_class_streak = 0;
+	}
+
 	double voltage_v = 0.0;
 	double current_a = 0.0;
 	double remaining = 1.0;
+	int    cells     = SYNTHETIC_CELLS;
+	uint8_t batt_type = MAV_BATTERY_TYPE_LIPO;
 	Source source    = Source::Synthetic;
 
-	if (std::isfinite(v_raw) && v_raw > 0.0) {
+	if (_source == Source::Electric && !pack_plausible) {
+		/*
+		 * Latched electric, but THIS frame's voltage is a sentinel or garbage.
+		 * Re-send the last values derived from a real sample instead of running
+		 * a 0 V reading through the per-cell map. That map would return 0%,
+		 * and PX4 latches the resulting EMERGENCY upward and never lowers it -
+		 * so one bad frame would permanently end a flight on a full pack.
+		 */
+		source    = Source::Electric;
+		voltage_v = _last_voltage_v;
+		current_a = 0.0;
+		remaining = _last_remaining;
+		cells     = (_cell_count > 0) ? _cell_count : SYNTHETIC_CELLS;
+
+	} else if (_source == Source::Electric) {
 		// ---- Electric: RealFlight is modelling a real pack ----------------
 		source    = Source::Electric;
 		voltage_v = v_raw;
@@ -165,12 +290,54 @@ void BatteryLink::update(const FAState &fa, uint64_t now_us)
 			_cell_count = n;
 		}
 
-		const double per_cell = voltage_v / (double)_cell_count;
-		remaining = clamp((per_cell - CELL_EMPTY_V) / (CELL_FULL_V - CELL_EMPTY_V), 0.0, 1.0);
+		/*
+		 * Undo load sag BEFORE mapping voltage to state of charge.
+		 *
+		 * CELL_EMPTY_V/CELL_FULL_V describe a pack AT REST. Feeding them the
+		 * loaded terminal voltage asks a resting curve about a working pack and
+		 * gets the answer wrong in the one direction that matters: low. The
+		 * error is worst exactly when current is highest, which for a quadplane
+		 * is the hover - i.e. every takeoff.
+		 *
+		 * The window is only 0.90 V wide per cell, so the map is savagely
+		 * sensitive down there: on an 8S pack, 27.5 V reads 15% and 26.9 V reads
+		 * 7%. Six hundred millivolts across the whole pack - well inside hover
+		 * sag on a healthy battery - is the entire distance from LOW to
+		 * CRITICAL.
+		 *
+		 * That distance is a one-way trip. PX4 latches the warning upward while
+		 * armed and never lowers it (batteryCheck.cpp:189-192), and at CRITICAL
+		 * it marks every navigation mode unavailable (NavModes::All, ibid:205-207)
+		 * - which is a full failsafe, reached with COM_LOW_BAT_ACT still on
+		 * "warning only", because that parameter does not gate this path. So a
+		 * SINGLE sagged sample ends the flight, and the pack it condemns may be
+		 * nearly full.
+		 *
+		 * Estimating open-circuit voltage costs one multiply and removes the
+		 * sustained component; the filter below removes what is left.
+		 */
+		const double per_cell_raw = voltage_v / (double)_cell_count;
+		const double per_cell_ocv = per_cell_raw + current_a * CELL_R_INTERNAL;
+
+		if (_per_cell_filt < 0.0 || dt_s <= 0.0) {
+			// first sample: seed rather than filter, so the reported SoC starts
+			// at the truth instead of ramping up to it from zero
+			_per_cell_filt = per_cell_ocv;
+
+		} else {
+			const double alpha = dt_s / (SOC_FILTER_TAU_S + dt_s);
+			_per_cell_filt += alpha * (per_cell_ocv - _per_cell_filt);
+		}
+
+		remaining = clamp((_per_cell_filt - CELL_EMPTY_V) / (CELL_FULL_V - CELL_EMPTY_V), 0.0, 1.0);
 
 		_discharged_mah += current_a * dt_s * (1000.0 / 3600.0);
 
-	} else if (std::isfinite(fuel_oz) && fuel_oz > 0.0) {
+		cells           = _cell_count;
+		_last_voltage_v = voltage_v;
+		_last_remaining = remaining;
+
+	} else if (_source == Source::Fuel) {
 		// ---- Internal combustion --------------------------------------------
 		// This is the case the spec's pitfalls ledger flags: RealFlight's IC
 		// models report battery = -1. They do report fuel, and fuel is the
@@ -186,34 +353,85 @@ void BatteryLink::update(const FAState &fa, uint64_t now_us)
 		source    = Source::Fuel;
 		voltage_v = SYNTHETIC_V;
 		current_a = 0.0;
+		cells     = SYNTHETIC_CELLS;
+		batt_type = MAV_BATTERY_TYPE_UNKNOWN;	// it is a tank, not a pack
 
-		// Take the largest reading seen as a full tank. Re-arm upwards so a
-		// refuel or an aircraft reset restores 100% instead of leaving the
-		// fraction pinned low for the rest of the session.
+		/*
+		 * TANK CAPACITY: FlightAxis does not report one.
+		 *
+		 * m-fuelRemaining-OZ is instantaneous ounces and there is no companion
+		 * "capacity" key anywhere in the ExchangeData reply, so a true percentage
+		 * is not derivable. The honest fallback is the largest reading ever seen,
+		 * taken as full - and it is normally exactly right, because the first
+		 * frame after a model load or an aircraft reset is a full tank.
+		 *
+		 * Re-armed UPWARDS rather than latched so a refuel or a reset restores
+		 * 100% instead of pinning the fraction low for the rest of the session.
+		 *
+		 * Where it is wrong, and it cannot be fixed from here: if the bridge
+		 * attaches to an aircraft that is ALREADY part-used, that partial tank
+		 * becomes "full" and the reported percentage reads high until the next
+		 * reset re-arms it. Load the model fresh and this never arises.
+		 */
 		if (fuel_oz > _fuel_full_oz) {
 			_fuel_full_oz = fuel_oz;
 		}
 
 		remaining = (_fuel_full_oz > 0.0) ? clamp(fuel_oz / _fuel_full_oz, 0.0, 1.0) : 1.0;
 
+		_last_voltage_v = voltage_v;
+		_last_remaining = remaining;
+
+		/*
+		 * ENGINE-OUT: report it, do NOT act on it.
+		 *
+		 * A dead engine aloft is the defining emergency of an IC aircraft and
+		 * the user should hear about it immediately - RealFlight's own cue is
+		 * just the sound stopping. But it must not be folded into `remaining`:
+		 * PX4 turns a low remaining into WARNING_CRITICAL and strips every
+		 * navigation mode, and a dead-stick aircraft is still flyable and still
+		 * needs those modes to reach a field. So this is a message and nothing
+		 * more - the tank fraction stays the tank fraction.
+		 *
+		 * Gated on not-touching-ground so that a normal pre-start sit on the
+		 * runway, and the shutdown after landing, stay silent.
+		 */
+		const bool running = fa.m_anEngineIsRunning;
+
+		if (!_engine_known) {
+			_engine_known   = true;
+			_engine_running = running;
+
+		} else if (running != _engine_running) {
+			_engine_running = running;
+
+			if (!fa.m_isTouchingGround) {
+				fprintf(stderr, "[flightaxis_bridge] ENGINE %s IN FLIGHT (fuel %.1f%% remaining)\n",
+					running ? "RESTARTED" : "STOPPED", remaining * 100.0);
+			}
+		}
+
 	} else {
-		// ---- Model reports neither ------------------------------------------
+		// ---- Nothing has shown a pack or a tank yet -------------------------
 		// The airframes turn battery_simulator off (SIM_BAT_ENABLE 0) so that
 		// there is exactly ONE publisher on battery_status; that makes this
 		// bridge responsible for always producing something. A model with no
 		// electrical or fuel model at all still has to pass preflight, so send
 		// a nominal full pack. Obviously synthetic, and logged as such.
+		//
+		// This does NOT write _cell_count. It used to, and that was a live bug
+		// for electric models: any frame reaching here first - an aircraft
+		// reset, the frames before RealFlight's electrical model starts
+		// stepping - latched 4 cells permanently. A 3S pack then divided by 4
+		// reads 2.78 V/cell, i.e. 0%, i.e. EMERGENCY on a full battery.
 		source    = Source::Synthetic;
 		voltage_v = SYNTHETIC_V;
 		current_a = 0.0;
 		remaining = 1.0;
-
-		if (_cell_count == 0) {
-			_cell_count = (int)SYNTHETIC_CELLS;
-		}
+		cells     = SYNTHETIC_CELLS;
 	}
 
-	if (source != _source) {
+	if (source != _reported) {
 		const char *name = "unknown";
 
 		switch (source) {
@@ -222,11 +440,12 @@ void BatteryLink::update(const FAState &fa, uint64_t now_us)
 			break;
 
 		case Source::Fuel:
-			name = "fuel (internal combustion; battery=-1, voltage reported is NOMINAL not measured)";
+			name = "fuel / internal combustion (tank drives remaining; "
+			       "the voltage reported to PX4 is NOMINAL, not measured)";
 			break;
 
 		case Source::Synthetic:
-			name = "synthetic (model reports neither battery nor fuel)";
+			name = "synthetic (no pack and no tank seen yet; nominal full)";
 			break;
 
 		default:
@@ -234,18 +453,44 @@ void BatteryLink::update(const FAState &fa, uint64_t now_us)
 		}
 
 		fprintf(stderr, "[flightaxis_bridge] battery source: %s\n", name);
-		_source = source;
+		_reported = source;
 	}
 
-	send(voltage_v, current_a, remaining, _discharged_mah, now_us);
+	send(voltage_v, current_a, remaining, _discharged_mah, cells, batt_type, now_us);
+}
+
+void BatteryLink::adopt(Source s)
+{
+	_source       = s;
+	_class_streak = 0;
+
+	// Every accumulator below is per-class. Carrying any of them across a model
+	// swap is worse than starting over: a stale cell count mis-scales the new
+	// pack, and a stale tank size mis-scales the new tank.
+	_cell_count     = 0;
+	_per_cell_filt  = -1.0;
+	_fuel_full_oz   = 0.0;
+	_discharged_mah = 0.0;
+	_last_voltage_v = 0.0;
+	_last_remaining = 1.0;
+	_engine_known   = false;
+	_engine_running = false;
 }
 
 void BatteryLink::send(double voltage_v, double current_a, double remaining,
-		       double discharged_mah, uint64_t now_us)
+		       double discharged_mah, int cells, uint8_t batt_type,
+		       uint64_t now_us)
 {
 	_last_send_us = now_us;
 
-	int cells = (_cell_count > 0) ? _cell_count : 1;
+	if (cells < 1) {
+		cells = 1;
+	}
+
+	if (cells > 10) {
+		cells = 10;
+	}
+
 	const double per_cell_mv = (voltage_v / (double)cells) * 1000.0;
 
 	uint16_t voltages[10];
@@ -267,7 +512,7 @@ void BatteryLink::send(double voltage_v, double current_a, double remaining,
 		_sysid, BATTERY_COMPID, MAVLINK_COMM_1, &msg,
 		0,					// id
 		MAV_BATTERY_FUNCTION_ALL,		// battery_function
-		MAV_BATTERY_TYPE_LIPO,			// type
+		batt_type,				// LIPO, or UNKNOWN for a fuel tank
 		INT16_MAX,				// temperature: "unknown" per spec
 		voltages,
 		(int16_t)clamp(current_a * 100.0, -32768.0, 32767.0),	// cA

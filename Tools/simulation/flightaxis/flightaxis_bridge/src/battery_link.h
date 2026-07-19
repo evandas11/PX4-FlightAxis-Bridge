@@ -134,16 +134,29 @@ public:
 	bool active() const { return _fd >= 0; }
 
 private:
-	// Which of the three sources the last update used. Logged on change only.
+	/*
+	 * PROPULSION CLASS - decided from the data, never from a parameter.
+	 *
+	 * Electric and Fuel are LATCHED once seen. Synthetic is only ever a
+	 * REPORTED label, never a latched class: a model that has proven it has a
+	 * pack or a tank must not be able to fall back to "nominal full" just
+	 * because one frame came back odd. That fallback is precisely how an
+	 * empty fuel tank used to report 100%.
+	 */
 	enum class Source {
 		None,		// nothing decided yet
-		Electric,	// RealFlight reported a real pack voltage
-		Fuel,		// internal combustion: voltage is -1, fuel is real
-		Synthetic,	// model reports neither; a nominal full pack is sent
+		Electric,	// RealFlight reported a plausible propulsion pack voltage
+		Fuel,		// internal combustion: a fuel tank exists
+		Synthetic,	// reported only: model has shown neither pack nor tank
 	};
 
+	// Adopt a new propulsion class and drop every per-class accumulator, so a
+	// model swap mid-session cannot carry a stale cell count or tank size over.
+	void adopt(Source s);
+
 	void send(double voltage_v, double current_a, double remaining,
-		  double discharged_mah, uint64_t now_us);
+		  double discharged_mah, int cells, uint8_t batt_type,
+		  uint64_t now_us);
 
 	int _fd{-1};
 	int _instance{0};
@@ -152,18 +165,39 @@ private:
 	uint64_t _last_send_us{0};
 	uint64_t _last_update_us{0};
 
-	// electric: inferred once, so voltages[] can be filled per-cell
+	// electric: inferred once from a PLAUSIBLE measured voltage, so voltages[]
+	// can be filled per-cell. Deliberately NOT written by the synthetic path -
+	// a synthetic 4S guess latched here would divide a real 3S pack by 4 and
+	// report it flat, which PX4 turns straight into an EMERGENCY.
 	int _cell_count{0};
 
 	// coulomb counter, mAh
 	double _discharged_mah{0.0};
+
+	// Low-passed open-circuit per-cell voltage driving `remaining`. Negative
+	// means "not seeded yet" - see the sag block in BatteryLink::update().
+	double _per_cell_filt{-1.0};
 
 	// fuel: largest reading seen, taken as "full tank". Re-armed upwards on
 	// refuel / aircraft reset rather than latched, so a mid-session reset
 	// does not leave the fraction pinned below 1.0 forever.
 	double _fuel_full_oz{0.0};
 
-	Source _source{Source::None};
+	// Last values actually derived from a plausible sample. A single bad frame
+	// re-sends these rather than recomputing a bogus 0 V -> 0% -> EMERGENCY.
+	double _last_voltage_v{0.0};
+	double _last_remaining{1.0};
+
+	// Consecutive frames of evidence DISAGREEING with the latched class.
+	// Reclassification needs several; one glitch is not a model swap.
+	int _class_streak{0};
+
+	// fuel: edge detector for engine-out reporting.
+	bool _engine_known{false};
+	bool _engine_running{false};
+
+	Source _source{Source::None};		// latched propulsion class
+	Source _reported{Source::None};		// last label logged, for change-only logging
 };
 
 #endif
