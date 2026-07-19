@@ -79,6 +79,22 @@ param set EKF2_MULTI_IMU 1
 # input_rc until RC_MAP_* and the per-channel RC_MIN/RC_TRIM/RC_MAX are set.
 param set-default COM_RC_IN_MODE 4
 
+# PX4's remaining-flight-time failsafe cannot work with a MAVLink-injected
+# battery, and its default action is Return.
+#
+# The bridge feeds RealFlight's real pack voltage, current and fuel to PX4 as
+# BATTERY_STATUS. But mavlink_receiver's handler never sets
+# battery_status.time_remaining_s, so it keeps the zero from struct
+# initialisation. batteryCheck.cpp then reads that 0.0, PX4_ISFINITE(0.0) is
+# true, and PX4 concludes there are zero seconds of flight left - so
+# COM_FLTT_LOW_ACT 3 fires an RTL within seconds of arming, every time.
+#
+# This is structural: the estimate is not something we can supply through that
+# message, so acting on it means acting on a number PX4 never received. Set to
+# None. Low-battery protection is unaffected - BAT_LOW_THR, BAT_CRIT_THR and
+# BAT_EMERGEN_THR all act on "remaining", which the bridge does supply.
+param set-default COM_FLTT_LOW_ACT 0
+
 # Negative disables the pre-takeoff auto-disarm. rc.heli_defaults sets 60 s,
 # which cuts a bench test of the swash/tail response short and reads like a bug.
 param set-default COM_DISARM_PRFLT -1
