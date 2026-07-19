@@ -18,8 +18,8 @@ need to read the others. Everything below assumes the **`px4_sitl_nolockstep`** 
 |---|---|---|---|---|
 | `flightaxis_plane` | `1200_flightaxis_plane` (1200) | Fixed-wing (`CA_AIRFRAME 1`) | Conventional plane: aileron / elevator / throttle / rudder | **Working** — channel map verified end to end |
 | `flightaxis_quad` | `1201_flightaxis_quad` (1201) | Multirotor quad-X (`CA_AIRFRAME 0`) | Four motors, direct from PX4 motor outputs | **Working** — channel map verified end to end |
-| `flightaxis_quadplane` | `1202_flightaxis_quadplane` (1202) | Standard VTOL (`CA_AIRFRAME 2`) | reference-class: 4 lift motors + pusher + 4 surfaces | **Partial** — map verified by reasoning only, not flown (§8) |
-| `flightaxis_heli` | `1203_flightaxis_heli` (1203) | Helicopter, tail ESC (`CA_AIRFRAME 10`) | Collective-pitch heli; bridge demixes swash to roll/pitch/collective | **Partial** — `HeliDemix` never tested against a real swashplate (§8) |
+| `flightaxis_quadplane` | `1202_flightaxis_quadplane` (1202) | Standard VTOL (`CA_AIRFRAME 2`) | reference-class: 4 lift motors + pusher + 4 surfaces | **Partial** — map verified by reasoning only, not flown (§9) |
+| `flightaxis_heli` | `1203_flightaxis_heli` (1203) | Helicopter, tail servo (`CA_AIRFRAME 11`) | Collective-pitch heli; bridge demixes swash to roll/pitch/collective | **Partial** — `HeliDemix` never tested against a real swashplate, gains never flown (§9) |
 
 `flightaxis` on its own is an alias for `flightaxis_plane`.
 
@@ -264,9 +264,9 @@ independently, add a row for the other one on a spare RF slot, e.g.:
 aileron-left, aileron-right, elevator, rudder. Moving the "Aileron left" slider must move the
 RealFlight ailerons; "Aileron right" must move nothing.
 
-**First flight.** Do the generic static/rates/taxi checks in §8 first, then: arm on the runway in
+**First flight.** Do the generic static/rates/taxi checks in §9 first, then: arm on the runway in
 **Position** mode and confirm the throttle idles at zero (disarm value 0.0, not half). Take off
-in **Stabilized**, hold wings level, and check the stick-to-surface polarity matches §8 step 2.
+in **Stabilized**, hold wings level, and check the stick-to-surface polarity matches §9 step 2.
 Only then try **Mission** — the airframe sets `RWTO_TKOFF 1`, so a runway takeoff is expected,
 and `NAV_ACC_RAD 15` means waypoints are considered hit from 15 m out.
 
@@ -355,9 +355,16 @@ RealFlight airframe is much draggier or lighter than a reference airframe, trans
 complete. Tune `VT_F_TRANS_DUR` / `VT_ARSP_TRANS` for your model rather than assuming the
 defaults fit.
 
-**Gotcha — actuator failure detector.** `FD_ACT_EN 0` is set deliberately: the lift motors idle
-in fixed-wing cruise and SITL reports 0 A for every ESC, which the detector otherwise reads as a
-dead motor. Do not re-enable it here.
+**Gotcha — there is no motor-failure detection.** The airframe used to carry `FD_ACT_EN 0`,
+inherited from `1040_gazebo-classic_standard_vtol` along with a comment claiming SITL reports
+0 A per ESC. It does not: `SimulatorMavlink` publishes `esc_current = 1 + |control| * 15` while
+armed. The undercurrent test is `esc_current < esc_throttle * FD_ACT_MOT_C2T` with
+`FD_ACT_MOT_C2T` defaulting to 2.0, and `1 + 15c < 2c` has no solution for any throttle — so
+the detector cannot fire in v1.16 SITL at all, for any vehicle. The `FD_ACT_*` overrides were
+therefore suppressing nothing and have been **removed entirely**; the parameters sit at their
+firmware defaults so that detection starts working here if upstream ever fixes the SITL ESC
+current model. The corollary is worth stating plainly: you get no motor-failure detection in
+SITL, and a lift motor that quietly dies in cruise will not be reported.
 
 **QGC check:** Actuators shows five motors then four servos. Motors 1–4 must move the RealFlight
 lift rotors, Motor 5 the pusher.
@@ -366,7 +373,7 @@ lift rotors, Motor 5 the pusher.
 pusher — if they are swapped you have the `Rev4Servos` double-swap described above. Then hover in
 **Stabilized** on the lift motors alone and confirm multirotor control is sane *before*
 attempting any transition. Transition last, with plenty of altitude: it is the least verified
-part of this airframe (§8), and a failed forward transition drops the aircraft.
+part of this airframe (§9), and a failed forward transition drops the aircraft.
 
 ---
 
@@ -377,8 +384,8 @@ cd ~/PX4-Autopilot
 PX4_FLIGHTAXIS_IP=192.168.10.1 make px4_sitl_nolockstep flightaxis_heli
 ```
 
-Airframe: `1203_flightaxis_heli` (`SYS_AUTOSTART` 1203, `CA_AIRFRAME 10` = "Helicopter
-(tail ESC)"). Channel map: `models/heli.json`. Options: `ResetPosition` + **`HeliDemix`**
+Airframe: `1203_flightaxis_heli` (`SYS_AUTOSTART` 1203, `CA_AIRFRAME 11` = "Helicopter
+(tail Servo)"). Channel map: `models/heli.json`. Options: `ResetPosition` + **`HeliDemix`**
 (bitmask **5** = 1 | 4).
 
 **RealFlight aircraft:** a collective-pitch heli expecting the usual
@@ -386,23 +393,38 @@ roll / pitch / collective / tail / RSC channel set on channels 1–5.
 
 | RF ch | PX4 | Drives (before demix) | Scale | Reverse | Disarm |
 |---|---|---|---|---|---|
-| 0 | `controls[2]` | swash plate servo 1 | bipolar | no | hold |
-| 1 | `controls[3]` | swash plate servo 2 | bipolar | no | hold |
-| 2 | `controls[4]` | swash plate servo 3 | bipolar | no | hold |
-| 3 | `controls[1]` | tail rotor / yaw (Motor 2) | **unipolar** | no | **0.0** |
+| 0 | `controls[2]` | swash plate servo 1 | bipolar | no | **0.5** |
+| 1 | `controls[3]` | swash plate servo 2 | bipolar | no | **0.5** |
+| 2 | `controls[4]` | swash plate servo 3 | bipolar | no | **0.5** |
+| 3 | `controls[1]` | tail rotor pitch / yaw (Servo 1) | bipolar | no | **0.5** |
 | 4 | `controls[0]` | main rotor / RSC (Motor 1) | unipolar | no | **0.0** |
 
-Airframe side: `PWM_MAIN_FUNC1..5 = 101, 102, 201, 202, 203` →
-`controls[0]`=Motor 1 main rotor, `[1]`=Motor 2 yaw tail, `[2..4]`=swash servos 1–3.
+Airframe side: `PWM_MAIN_FUNC1..5 = 101, 201, 202, 203, 204` →
+`controls[0]`=Motor 1 main rotor, `[1]`=Servo 1 yaw tail, `[2..4]`=Servos 2–4, the swash
+plate servos 1–3.
+
+**Every row carries an explicit `disarm`**, and none may be omitted. `HeliDemix` rewrites the
+channel array after it is built, so a row left on the `-1` "hold last output" default would
+have its already-demixed value fed back through the demix on the next frame. That iteration
+diverges: from a plausible in-flight swash it rails within about three frames. Neutral is a
+fixed point, so this only bites on the armed→disarmed transition with the swash deflected —
+that is, on every landing — and nothing is logged when it does.
 
 **Then `HeliDemix` rewrites RF channels 0–2** before they are sent, because RealFlight expects
 roll/pitch/collective, not three swash servos:
 
 ```
-roll  = s1 - s2
-pitch = (s1 + s2)/2 - s3
+roll  = (s1 - s2) / 1.732
+pitch = ((s1 + s2)/2 - s3) / 1.5
 col   = (s1 + s2 + s3)/3      (recentred to 0..1)
 ```
+
+The two divisors are gain normalisation, not part of the geometric inverse. With the swash
+angles the airframe pins (below) and the 0.5 per-servo scale, the raw differences come out at
+gain 0.866 for roll and 0.750 for pitch, where RealFlight wants 0.5 about its 0.5 centre;
+dividing by 0.866/0.5 = √3 and 0.750/0.5 = 1.5 lands them exactly. Without this the cyclic
+saturates at ±0.577 of commanded roll and ±0.667 of pitch, with roll noticeably hotter than
+pitch. Collective is already at gain 0.5 and is left alone.
 
 So what RealFlight actually receives is:
 
@@ -418,27 +440,52 @@ So what RealFlight actually receives is:
 geometry with servos 1 and 2 mirrored about the X axis and servo 3 on the axis. PX4's defaults
 (`CA_SP0_ANG*` = 0/140/220) put the mirrored pair on servos 2 and 3, which leaves the demix
 cross-coupling roll into pitch. The airframe therefore **forces `CA_SP0_ANG0/1/2 = 300/60/180`**.
-With those, the demix yields exactly `(1.732*roll, 1.5*pitch, collective)` with no cross terms
-and no sign inversion. If you change the swash geometry in QGC, `HeliDemix` stops being correct.
+With those, the demix decouples exactly — no cross terms, no sign inversion on any axis — and
+the two divisors above are the correct ones. Change the swash geometry in QGC and both
+properties are lost. The airframe also pins `CA_SP0_ARM_L0/1/2` to 1.0 and `CA_MAX_SVO_THROW`
+to 0 for the same reason: unequal arms break the inverse, and a non-zero throw limit enables a
+per-servo `asin()` linearisation that makes the mapping non-linear.
 
-**Gotcha — the tail is a motor, so it is unipolar.** Under `CA_AIRFRAME 10` the yaw tail is a
-*motor*, and PX4 has already normalised it to `[0,1]`. Scaling it bipolar would fold `[0,1]` into
-`[0.5,1.0]` and leave yaw permanently offset. If you switch to `CA_AIRFRAME 11` ("Helicopter
-(tail Servo)") you must also change the `rf3` row to `"bipolar"`. Change one, change the other.
+**Gotcha — the tail is a servo, so it is bipolar.** Under `CA_AIRFRAME 11` the yaw tail is a
+*servo* on `[-1,1]`, and 0.5 on the wire is zero tail pitch — which is what a collective-pitch
+tail rotor wants, and what nearly every stock RealFlight single-rotor heli models. Under
+`CA_AIRFRAME 10` ("tail ESC") the tail would be a motor clamped to `[0,1]`: the entire negative
+half of the yaw command is clipped, the tail idles on its lower stop, and there is **no left
+yaw authority at all**. If you genuinely fly a model with a separate unidirectional electric
+tail motor, switch to `CA_AIRFRAME 10`, renumber `PWM_MAIN_FUNC2..5` to `102/201/202/203` — the
+swash shifts down one servo index because the tail no longer consumes Servo 1 — and change
+`rf3` back to `"unipolar"` with `"disarm": 0.0`. The `controls[]` indices are unchanged by that
+swap.
 
-**Gotcha — tuning.** The airframe deliberately ships FF-dominant rate loops
-(`MC_*RATE_P/I/D = 0`, `MC_*RATE_FF = 0.1`). Set the FF gain for your RealFlight model first,
-then add P and I. It will not fly well out of the box.
+**Gotcha — tuning.** The airframe ships real rate gains, taken from ArduPilot's shipped
+helicopter tuning: roll/pitch `P 0.025 I 0.15 D 0.001 FF 0.15`, yaw `P 0.18 I 0.12 D 0.003
+FF 0.02`. They are feed-forward dominant on purpose — a swash gives a large, fast, near-linear
+torque response, so a large P term only chases rotor phase lag. This is a starting point, not a
+tune: **it has never been flown against RealFlight physics.** Refine it in Acro. The airframe
+also sets an explicit collective curve (`CA_HELI_PITCH_C*`, spanning RealFlight 0.45–0.85 so
+hover sits near mid-stick rather than near the top of a quarter of the travel) and yaw
+compensation for main-rotor torque (`CA_HELI_YAW_CP_S 0.25`); the blade angle a given channel
+value actually produces is a property of the RealFlight model, so verify and rescale.
 
-**QGC check:** Actuators shows Motor 1, Motor 2, then three swash servos, and the swashplate
-angles read 300/60/180.
+**Gotcha — the RealFlight model needs work.** More than the other three vehicles. RC heli
+models ship with stabilisation and mixing inside the model, and all of it fights PX4: the
+tail heading-hold gyro must be zeroed (it is an independent yaw controller and will produce a
+slow oscillation no `MC_YAWRATE_*` value fixes), CCPM/eCCPM swash mixing must be off since the
+bridge already sends demixed roll/pitch/collective, and the model's own collective and throttle
+curves must be flattened because PX4 owns both. Leave a governor on, if the model has one — PX4
+holds the throttle channel at a constant 100 % and expects constant head speed.
+
+**QGC check:** Actuators shows Motor 1, then four servos — yaw tail first, then the three swash
+servos — and the swashplate angles read 300/60/180.
 
 **First flight.** Check the swashplate on the ground first: cyclic right must tilt the RealFlight
 swash right with **no** pitch component, and cyclic forward must tilt it forward with no roll
 component. Cross-coupling here means the `CA_SP0_ANG*` override did not take, and `HeliDemix` is
-no longer a correct inverse — fix it before spooling up. Then bring the rotor to speed, raise
-collective to a light skid, and confirm yaw holds before lifting off. Expect to tune
-`MC_*RATE_FF` for your model; it will not fly well out of the box.
+no longer a correct inverse — fix it before spooling up. Check yaw in both directions while you
+are there: full left and full right must move the tail servo symmetrically about its centre. If
+left yaw does nothing, the airframe is on `CA_AIRFRAME 10` or `rf3` is unipolar. Then bring the
+rotor to speed, raise collective to a light skid, and confirm yaw holds before lifting off.
+Expect to refine the rate gains and the collective curve for your model.
 
 ---
 
@@ -626,7 +673,7 @@ the aircraft was reset to the runway. RealFlight's own controls are now overridd
 Before this the model deliberately sees nothing.
 
 ```
-[flightaxis_bridge] exchanges=248.3/s loop=612.7/s avg=249.1 FPS glitches=0
+[flightaxis_bridge] exchanges=248.3/s loop=612.7/s avg=249.1 FPS rtf=1.00 glitches=0
 ```
 ↑ Printed every 1000 bridge frames. Read it as:
 
@@ -634,8 +681,19 @@ Before this the model deliberately sees nothing.
 |---|---|
 | `exchanges=` | SOAP round-trips completed per second of physics time |
 | `loop=` | bridge main-loop iterations per second — informational only; the loop free-runs and extrapolates between real frames, so this is normally *higher* than the exchange rate |
-| `avg=` | **the authoritative number** — the true physics frame rate, `1/average_frame_time`. This is what you judge the setup on. Want ~200–300. |
+| `avg=` | the true physics frame rate, `1/average_frame_time`. Want ~200–300. |
+| `rtf=` | **realtime factor** — physics seconds per wall-clock second over the reporting window. **This is the one to watch.** Want 1.00. |
 | `glitches=` | cumulative count of >50 ms physics-time discontinuities swallowed. **Should stay at 0 or near it.** A steadily rising count means the network (usually WiFi). |
+
+`rtf` deserves the attention because nothing in the sensor data can reveal what it catches. PX4
+timestamps the SITL sensor stream with its *own* clock on arrival, not with the physics time in
+the message, so if RealFlight's physics falls to 0.8× the aircraft flies in slow motion while
+every sensor value still looks perfectly correct — and velocities, accelerations and every
+control loop are scaled wrong. The glitch compensation actively hides this, because it smooths
+the bridge's exported clock rather than the arrival rate. The bridge warns (at most once every
+5 s) when `rtf` leaves 0.95–1.05. Note this is a different fault from the physics speed
+multiplier warning below it: that one is RealFlight's self-reported *setting*, while `rtf`
+catches RealFlight reporting 1.0 and the machine simply not keeping up.
 
 Occasional single lines are normal and benign:
 
@@ -770,6 +828,19 @@ Lost the SOAP connection mid-run. The bridge retries and prints
 `ExchangeData recovered after N retries` when it comes back. Persistent failure = RealFlight was
 closed, the aircraft was changed, or the network dropped.
 
+### `PX4 link lost - shutting down`
+
+The PX4 side vanished — the `px4` binary exited or was killed — and the bridge exited with it.
+**A dead PX4 link is terminal by design; the bridge does not retry.** Left retrying it would log
+thousands of lines a second and keep hammering RealFlight with SOAP requests for a simulation
+nobody is consuming. Reconnecting is deliberately not attempted either: re-accepting a fresh PX4
+whose clock starts at zero, while the bridge's has not, produces a worse failure than exiting.
+Restart both sides; under `make` that means re-running the target. Detection is by `POLLHUP`, a
+zero-length TCP read, a fatal `send()` errno, or 100 consecutive send failures.
+
+If you see this immediately at startup, PX4 died during boot — scroll up for its error, and see
+the silent-hang entry above.
+
 ### `RealFlight controller inactive - reinjecting controller` / `... reset - reinjecting`
 
 RealFlight took control back — someone hit the spacebar (reset), changed aircraft, or changed
@@ -801,7 +872,7 @@ a time), then:
 - **Right surface, wrong direction** → flip `"reverse"` on that row.
 - **Surface only moves through half its travel, or sits off-centre** → wrong `scale`. Motors are
   `unipolar`, control surfaces are `bipolar`. Scaling a motor as bipolar folds `[0,1]` into
-  `[0.5,1]` (this is the classic heli tail bug).
+  `[0.5,1]`; scaling a servo as unipolar throws away its whole negative half.
 - **Nothing moves at all** → the RealFlight model may still have its own mixes/expo, or PX4 is
   disarmed and the row's `disarm` is holding it.
 
@@ -823,9 +894,9 @@ a time), then:
 | Baro and GPS altitude disagree by a constant | Should not happen — both are derived from `PX4_HOME_ALT - position_ned.z` by design. If it does, someone changed `vehicle_state.cpp`. |
 | EKF rejects GPS with a fixed delay error | The airframes force `EKF2_GPS_DELAY 0` with `param set` (not `set-default`) because `px4-rc.mavlinksim` runs *after* the airframe and would re-default it to 10 ms. Don't change it back. |
 | Quadplane reports a motor failure in cruise | Shouldn't happen: the detector cannot fire in v1.16 SITL at all. `SimulatorMavlink` reports 1–16 A per ESC while armed, and the undercurrent test `1 + 15c < 2c` has no solution. If you see this, something outside SITL changed. |
-| Heli rolls when you command pitch | Swashplate angles are not 300/60/180 (§2.4). |
-| Heli has no left yaw, tail sits at zero | `1203` is on `CA_AIRFRAME 10` (tail ESC), which clamps yaw to [0,1]. It should be `11` (tail servo), with `rf3` bipolar. |
-| Heli cyclic saturates early, roll hotter than pitch | Known: the demix runs after the 0..1 remap, over-driving roll 1.732× and pitch 1.5×. |
+| Heli rolls when you command pitch | Swashplate angles are not 300/60/180, or the arm lengths are not all 1.0 (§2.4). |
+| Heli has no left yaw, tail sits at zero | Someone put `1203` back on `CA_AIRFRAME 10` (tail ESC), which clamps the tail to [0,1], or set `rf3` unipolar in `heli.json`. It ships as `CA_AIRFRAME 11` (tail servo) with `rf3` bipolar, disarm 0.5 (§2.4). |
+| Heli swash rails or goes chaotic on landing | A row in `heli.json` lost its explicit `"disarm"` and fell back to `-1` "hold last", so `HeliDemix` re-demixes the held value every frame (§2.4). |
 | Bridge on the wrong side of the network | SOAP round-trip dominates the loop; MAVLink to PX4 tolerates far more latency. Put the bridge next to RealFlight, not next to a remote PX4. |
 
 ---
@@ -856,16 +927,24 @@ Read this before drawing conclusions from a session. The status below mirrors
 [`FLIGHTAXIS_PX4_INTEGRATION.md`](FLIGHTAXIS_PX4_INTEGRATION.md) §11 — RealFlight is Windows-only
 and **no Windows machine has been in the loop yet**.
 
-### Verified
+### Verified — against a mock FlightAxis server
 
-- The bridge builds; all four `flightaxis_*` make targets exist and resolve.
+Everything in this list was observed against a local SOAP responder replaying the RealFlight
+schema. It has **no flight dynamics**: it returns a fixed aircraft state whatever actuator
+values it is given. So this list is evidence about the software path and nothing else — no
+aircraft has been flown, in RealFlight or anywhere.
+
+- The bridge builds; all four `flightaxis_*` and all four `flightaxis_hitl_*` make targets exist
+  and resolve.
 - All four model JSONs flatten cleanly through `get_FAbridge_params.py`.
 - `FA_check.py` fails correctly, with its diagnostics, against an unreachable host.
-- **End-to-end against a mock FlightAxis server**: PX4 connects on TCP 4560, EKF2 converges, the
-  synthesised sensors are sane, and baro and GPS altitudes agree.
+- **End to end**: PX4 connects on TCP 4560, EKF2 converges, the synthesised sensors are sane,
+  and baro and GPS altitudes agree.
 - Channel maps correct end to end for **plane and quad**, including bipolar/reverse/unipolar
   scaling and disarm values.
 - Resilience: reconnect, aircraft reset, glitch swallow, and bridge death all behave as designed.
+- The ROS 2 path, including an offboard node arming and driving the actuators — see
+  [`ROS2.md`](ROS2.md) §8 for what that does and does not establish.
 
 ### Not yet verified — needs a real RealFlight session
 
@@ -876,6 +955,11 @@ and **no Windows machine has been in the loop yet**.
 - **A flown circuit** — EKF innovation bounds over a real manoeuvre are unknown.
 - The **quadplane and heli** channel maps beyond static reasoning, and `HeliDemix` against a real
   swashplate.
+- The **heli rate gains, collective curve and yaw compensation** (§2.4). They are derived from
+  ArduPilot's shipped helicopter tuning, not measured against RealFlight physics.
+
+Hardware-in-the-loop has its own, separate status: nothing in [`HITL.md`](HITL.md) has been run
+against a physical flight-controller board.
 
 ### First-flight procedure
 

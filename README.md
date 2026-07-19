@@ -27,9 +27,10 @@ verified against ArduPilot `SIM_FlightAxis.cpp`).
 ## Status
 
 Tested against **PX4 v1.16.0**. **No part of this has yet been run against a real RealFlight
-installation** — RealFlight is Windows-only and no Windows machine has been in the loop.
-What has been verified, and what has not, is listed under [Validation status](#validation-status)
-before you rely on any of it.
+installation** — RealFlight is Windows-only and no Windows machine has been in the loop —
+and **no part of the HITL path has been run against a physical flight-controller board**.
+Everything described below was exercised against a mock FlightAxis server and, for HITL, a
+PTY loopback. Read [Validation status](#validation-status) before you rely on any of it.
 
 ## Prerequisites
 
@@ -304,8 +305,11 @@ Other keys:
 
 - `"reverse": true` is applied *after* scaling, as `v -> 1-v`.
 - `"disarm"` is the value sent while PX4 is disarmed. **`-1`, which is also the default when the
-  key is omitted, means "hold the last output"** — correct for surfaces, wrong for motors, so
-  every motor row sets `"disarm": 0.0` explicitly.
+  key is omitted, means "hold the last output"** — correct for a plain surface, wrong for a
+  motor, so every motor row sets `"disarm": 0.0` explicitly. It is also wrong for any row a
+  post-pass option rewrites: `HeliDemix` and `Rev4Servos` transform the channel array after it
+  is built, so a held slot gets re-transformed every frame. Every row in `heli.json` therefore
+  carries an explicit `"disarm"` (`0.5` for the swash and tail servos, `0.0` for the rotor).
 - `"UnmappedDefault"` is sent on every RealFlight channel the map does not mention.
 - **Duplicate `rf` or `px4` indices abort the bridge at startup** with a message naming both
   offending entries, rather than silently letting one win.
@@ -318,7 +322,7 @@ Other keys:
 |---|---|
 | `ResetPosition` | issue `ResetAircraft` on startup, so every run begins from a known state. On by default in all four shipped models. |
 | `Rev4Servos` | swap RealFlight channels 1–4 with 5–8 wholesale, for RF models built that way. **Do not combine with an already-reordered map** such as `quadplane.json` — you would double-swap. |
-| `HeliDemix` | convert the three swash servo outputs back into the roll/pitch/collective triple RealFlight expects (`roll=s1−s2`, `pitch=(s1+s2)/2−s3`, `col=(s1+s2+s3)/3`). Requires the swash geometry `1203_flightaxis_heli` forces via `CA_SP0_ANG*` = 300/60/180. |
+| `HeliDemix` | convert the three swash servo outputs back into the roll/pitch/collective triple RealFlight expects (`roll=(s1−s2)/1.732`, `pitch=((s1+s2)/2−s3)/1.5`, `col=(s1+s2+s3)/3`). The two divisors normalise the raw differences to unit gain — without them the cyclic saturates at 0.577 of commanded roll and 0.667 of pitch. They are exact only for the swash geometry `1203_flightaxis_heli` forces via `CA_SP0_ANG*` = 300/60/180, which is why that airframe pins the angles and the arm lengths. |
 | `SilenceFPS` | suppress the periodic FPS/glitch line on stderr. |
 
 Full derivation, per-model tables, and the heli traps: spec §5.
@@ -330,7 +334,8 @@ Four steps (same workflow as the FlightGear bridge). **Number your airframe in t
 uninstaller leave them, and your model JSONs, strictly alone:
 
 1. New `models/<name>.json` (channel map — see above, and spec §5).
-2. Add the model name to the `models` list in `sitl_targets_flightaxis.cmake`.
+2. Add the model name to the `models` list in `sitl_targets_flightaxis.cmake`. That one line
+   creates both `flightaxis_<name>` and `flightaxis_hitl_<name>`.
 3. New airframe script `12xx_flightaxis_<name>`, whose `PWM_MAIN_FUNC*` assignments must agree
    with the JSON's `px4` indices.
 4. **Register that airframe in
@@ -349,26 +354,42 @@ uninstaller leave them, and your model JSONs, strictly alone:
 | `glitch 0.35s` lines appearing | The bridge absorbed a physics-time jump (network hiccup) so it does not reach EKF2 as a time jump. Occasional lines are benign; a steady stream means the link cannot keep up — go wired, or move the bridge closer to the RealFlight machine. |
 | **Hangs silently at `waiting for PX4 on TCP 4560`** | The bridge is up and waiting, but PX4 never connected. Usually PX4 exited at startup — scroll back for its error. The most common cause is the missing airframes `CMakeLists.txt` registration (see step 4 above): the airframe is absent from the ROMFS, so `SYS_AUTOSTART` matches nothing. Also check that nothing else already holds TCP 4560. |
 | Aircraft twitches or flies inverted on one axis | Channel map mismatch. Compare the JSON's `px4` indices against the `PWM_MAIN_FUNC*` block in the matching airframe script — they are derived, not free (see [Model JSON](#model-json-channel-maps)). |
-| Heli yaw permanently offset | The tail row must be `"scale": "unipolar"` — under `CA_AIRFRAME 10` the tail is a motor and PX4 already normalises it to `[0,1]`. |
+| Heli has no left yaw at all; the tail sits on its lower stop | The tail row must be `"scale": "bipolar"` with `"disarm": 0.5`. `1203_flightaxis_heli` uses `CA_AIRFRAME 11` ("tail Servo"), so the tail is a servo on `[-1,1]`. Under `CA_AIRFRAME 10` it would be a motor clamped to `[0,1]` and the whole negative half of the yaw command would be clipped away. |
+| Bridge exits with `PX4 link lost - shutting down` | Expected, not a fault: a dead PX4 link is terminal by design. PX4 exited, the board rebooted, or the cable was pulled. Restart both sides — the bridge deliberately does not re-accept a fresh PX4 whose clock starts at zero. |
 
 ## Validation status
 
-**Verified on this machine:**
+**Verified against a mock, not against RealFlight.** Everything in the first list below was
+observed with a local SOAP responder standing in for RealFlight — a protocol stub with no
+flight dynamics. It proves the software path; it proves nothing about how the aircraft flies.
 
-- The bridge builds; the four `flightaxis_*` make targets exist and resolve.
+**Verified against the mock, on this machine:**
+
+- The bridge builds; the four `flightaxis_*` and four `flightaxis_hitl_*` make targets exist
+  and resolve.
 - All four model JSONs flatten cleanly through `get_FAbridge_params.py`.
 - `FA_check.py` fails correctly against an unreachable host.
-- **End to end against a mock FlightAxis server:** PX4 connects, EKF2 converges, the synthesised
-  sensors are sane (baro and GPS altitudes agree), the plane and quad channel maps are correct
-  end to end including bipolar/reverse/unipolar scaling and disarm values, and the
-  reconnect / reset / glitch / sim-death resilience cases all behave.
+- **SITL end to end:** PX4 connects on TCP 4560, EKF2 converges, the synthesised sensors are
+  sane (baro and GPS altitudes agree), the plane and quad channel maps are correct end to end
+  including bipolar/reverse/unipolar scaling and disarm values, and the reconnect / reset /
+  glitch / sim-death resilience cases all behave.
+- **ROS 2 end to end:** uXRCE-DDS topics populate, and an offboard node armed the vehicle and
+  drove the actuators from ROS 2. Details and measured rates: [ROS2.md](ROS2.md).
+- **The HITL transport, framing and message profile**, over a PTY loopback with a
+  MAVLink-decoding harness. No board was involved: [HITL.md](HITL.md) §11.
 
 **Not yet verified — needs a real Windows RealFlight machine:**
 
 - Rate sign conventions, taxi N/E tracking, high-alpha pitot behaviour, compass heading, and the
   nose-up-90° attitude case.
-- A flown circuit, so EKF innovation bounds in real flight are unknown.
-- The quadplane and heli channel maps beyond static reasoning, and `HeliDemix` against a real swash.
+- A flown circuit, so EKF innovation bounds in real flight are unknown. Since the mock has no
+  dynamics, nothing here has ever flown.
+- The quadplane and heli channel maps beyond static reasoning, `HeliDemix` against a real swash,
+  and the heli rate gains, collective curve and yaw compensation, which are a starting point
+  taken from ArduPilot's helicopter tuning rather than a measured result.
+
+**Not yet verified — needs a physical flight-controller board:** everything in HITL.md, which
+keeps its own list.
 
 Spec §11 has the full checklist these correspond to.
 
@@ -382,8 +403,9 @@ Spec §11 has the full checklist these correspond to.
 - [PX4-FlightGear-Bridge](https://github.com/PX4/PX4-FlightGear-Bridge) (ThunderFly
   s.r.o.) — the integration template. `geo_mag_declination.{h,cpp}` and
   `cmake/FindMAVLink.cmake` are reused verbatim; `px4_communicator.{h,cpp}` is adapted from
-  it (per-message decimation added for RealFlight's ~250 Hz frame rate, plus the
-  DISTANCE_SENSOR path). BSD-3-Clause.
+  it: per-message decimation for RealFlight's ~250 Hz frame rate, the DISTANCE_SENSOR
+  path, the serial and UDP transports and message profile used for HITL, and the
+  dead-link policy. BSD-3-Clause.
 
 ## License
 

@@ -146,7 +146,7 @@ Relevant environment overrides: `PX4_UXRCE_DDS_PORT` (default 8888), `PX4_UXRCE_
 
 | We send | Handler | uORB topics | Gating |
 |---|---|---|---|
-| `HIL_SENSOR` | `:479` | `sensor_accel`, `sensor_gyro`, `sensor_mag`, `sensor_baro`, `differential_pressure` | per-field, via the `fields_updated` bitmask (`:192,199,242,285,304,329`) |
+| `HIL_SENSOR` | `:479` | `sensor_accel`, `sensor_gyro`, `sensor_mag`, `sensor_baro`, `differential_pressure` | per-field, via the `fields_updated` bitmask (`:192,199,242,285,304,329`) — and the bridge sub-rates that bitmask, see below |
 | `HIL_GPS` | `:408` | `sensor_gps` (`PublicationMulti`, `:456-472`) | — |
 | `HIL_STATE_QUATERNION` | `:527` | `vehicle_attitude_groundtruth` `:556`, `vehicle_local_position_groundtruth` `:614`, `vehicle_global_position_groundtruth` `:569`, `vehicle_angular_velocity_groundtruth` `:544` | — |
 | `DISTANCE_SENSOR` | `:401` | `distance_sensor` | — |
@@ -161,16 +161,25 @@ EKF2 and the sensor hub from those primitives, exactly as on a real vehicle.
 ```
 sensor_accel            1380 Hz     sensor_gps                            10 Hz
 sensor_gyro             1380 Hz     distance_sensor                       20 Hz
-sensor_mag              1380 Hz     vehicle_attitude_groundtruth          50 Hz
-sensor_baro             1380 Hz     vehicle_local_position_groundtruth    50 Hz
-differential_pressure   1380 Hz     vehicle_global_position_groundtruth   50 Hz
-rpm                     1380 Hz     vehicle_angular_velocity_groundtruth  50 Hz
-sensor_combined          204 Hz     vehicle_attitude                     204 Hz
-battery_status           100 Hz     vehicle_local_position               100 Hz
+rpm                     1380 Hz     vehicle_attitude_groundtruth          50 Hz
+sensor_combined          204 Hz     vehicle_local_position_groundtruth    50 Hz
+vehicle_attitude         204 Hz     vehicle_global_position_groundtruth   50 Hz
+battery_status           100 Hz     vehicle_angular_velocity_groundtruth  50 Hz
+vehicle_local_position   100 Hz
 ```
 
-10 / 20 / 50 Hz match the bridge's decimation constants exactly
-(`px4_communicator.h:246-247`, `GPS_INTERVAL_US = 100000`, `STATE_QUAT_INTERVAL_US = 20000`).
+10 / 20 / 50 Hz match the bridge's decimation constants exactly (`GPS_INTERVAL_US = 100000`,
+`DISTANCE_INTERVAL_US = 50000`, `STATE_QUAT_INTERVAL_US = 20000`, all in
+`px4_communicator.h`).
+
+> **These figures predate the `fields_updated` sub-rating and no longer describe mag, baro or
+> differential pressure.** That run was taken when every `HIL_SENSOR` carried `0x1FFF` ("every
+> sensor is new"), so `sensor_mag`, `sensor_baro` and `differential_pressure` were republished
+> at the full `HIL_SENSOR` rate — 1380 Hz alongside the IMU. The bridge now masks the slow
+> fields down to their own intervals in SITL as well as HITL: **magnetometer 100 Hz, barometer
+> 50 Hz, differential pressure 50 Hz.** Accel and gyro are never masked and still follow the
+> frame rate. Expect those three topics at their sub-rates, not at the IMU rate; the surplus
+> was being dropped by `VehicleAirData` anyway, after inflating every ulog for nothing.
 
 Values were sanity-checked and are physically correct for a stationary aircraft: accel
 `z = -9.804 m/s²`, gyro ≈ 0, baro 95599 Pa at 488 m, mag consistent with the Zurich default
@@ -178,8 +187,8 @@ home position, `distance_sensor 0.1 m`, GPS `fix_type 3` with 10 satellites at 4
 
 > **The 1380 Hz figure is a mock artifact, not what RealFlight will give you.** The mock does
 > not rate-limit its SOAP exchanges to wall clock, so the bridge free-ran at ~11 000 exchanges/s
-> and `HIL_SENSOR` — which is sent every frame in the SITL profile
-> (`px4_communicator.cpp:109-115`, `sensor_interval_us = 0`) — followed it up. Against real
+> and `HIL_SENSOR` — which is sent every frame in the SITL profile (`sensor_interval_us = 0` in
+> `px4_communicator.cpp`) — followed it up. Against real
 > RealFlight, expect IMU rates at roughly the SOAP frame rate (~250–300 Hz). The
 > *time-decimated* topics (GPS/ground truth/distance) are unaffected and were exact, which is
 > itself evidence the bridge decimates on its physics clock rather than on frame count.
@@ -276,10 +285,21 @@ estimated offset, and the client reported `timesync converged: true`.
 
 **Verified working end-to-end**, commanded entirely from ROS 2, against the mock.
 
-PX4's requirements are the stock ones — nothing in the FlightAxis airframes changes them.
-The airframes set only `EKF2_GPS_DELAY`, control-allocation geometry and `PWM_MAIN_FUNC*`
-(see `1201_flightaxis_quad`); none of `COM_OBL_*`, `COM_RC_IN_MODE` or the offboard failsafe
-parameters are touched, so PX4 defaults apply.
+PX4's requirements are the stock ones. The FlightAxis airframes change none of the offboard
+parameters proper: `COM_OBL_*` and the offboard-loss failsafe are untouched, so PX4 defaults
+apply. What they do set, beyond control-allocation geometry, `PWM_MAIN_FUNC*` and per-vehicle
+tuning (see `1201_flightaxis_quad`), is worth knowing about:
+
+| Parameter | Value | Why it matters here |
+|---|---|---|
+| `EKF2_GPS_DELAY` | `0` | RealFlight free-runs and the synthesised GPS samples are current. Forced with `param set`, not `set-default` — `px4-rc.mavlinksim` runs after the airframe and would re-default it to 10 ms. |
+| `EKF2_MULTI_IMU` | `1` | The bridge only ever supplies IMU instance 0, so the two extra EKF instances `px4-rc.mavlinksim` asks for would run on dead sensors. Also forced with `param set`. |
+| `COM_RC_IN_MODE` | `4` | "Ignore any stick input" — the only value that skips the RC-loss failsafe. A headless ROS 2 run has no manual control source at all, so **this is what stops RC-loss failsafe from pre-empting your offboard session.** |
+| `SDLOG_MODE` | `4` | "From first arm until shutdown", so a log spans several arm/disarm cycles instead of closing at the first disarm. |
+
+`COM_RC_IN_MODE 4` is the one with a behavioural consequence for offboard work: if you port
+these airframes or set the parameters by hand and leave it at the default of 1, an offboard
+session with no joystick and no RC will eventually trip the RC-loss failsafe.
 
 What you must do:
 

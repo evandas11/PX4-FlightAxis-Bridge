@@ -35,7 +35,7 @@ in the table below instead, which is where you should look for those two.
 | `fa_communicator.{h,cpp}` | Ported from ArduPilot `SIM_FlightAxis.{h,cpp}` — socket/creator-thread design, SOAP request bodies, reply parser key table and scan, startup and reconnect logic | GPLv3, © ArduPilot Dev Team |
 | `vehicle_state.{h,cpp}` | Frame conversions, ground-accelerometer override, pitot derivation and rangefinder ported from `SIM_FlightAxis.cpp`; sensor-message synthesis follows PX4-FlightGear-Bridge `vehicle_state.cpp` | GPLv3, © ArduPilot Dev Team; BSD-3, © 2020 ThunderFly s.r.o. |
 | `flightaxis_bridge.cpp` | Three-branch physics-time handling (restart / duplicate-frame extrapolation / glitch compensation), `Rev4Servos` and `HeliDemix` ported from `SIM_FlightAxis.cpp` `update()` and `exchange_data()`; overall structure follows `flightgear_bridge.cpp` | GPLv3, © ArduPilot Dev Team; BSD-3, © 2020 ThunderFly s.r.o. |
-| `px4_communicator.{h,cpp}` | **Adapted** from PX4-FlightGear-Bridge (message decimation and a non-blocking receive drain added) | BSD-3, © 2020 ThunderFly s.r.o. |
+| `px4_communicator.{h,cpp}` | **Adapted** from PX4-FlightGear-Bridge. Added: per-message decimation, `fields_updated` sub-rating, a non-blocking receive drain, the serial and UDP transports and HITL message profile, and the dead-link policy | BSD-3, © 2020 ThunderFly s.r.o. |
 | `geo_mag_declination.{cpp,h}` | **Verbatim** from PX4-FlightGear-Bridge (which itself carries it verbatim from the MAV GEO Library) | BSD-3, © 2014 MAV GEO Library (MAVGEO) |
 
 `Tools/simulation/flightaxis/flightaxis_bridge/cmake/FindMAVLink.cmake` — verbatim
@@ -46,6 +46,10 @@ is none here either and this entry is the notice of record.
 `Tools/simulation/flightaxis/sitl_run.sh`, `flightaxis_bridge/CMakeLists.txt`,
 `src/modules/simulation/simulator_mavlink/sitl_targets_flightaxis.cmake` and the
 `ROMFS` airframes follow the corresponding PX4 files (BSD-3, © PX4 Development Team).
+
+`Tools/simulation/flightaxis/hitl_run.sh` is original work for this project and
+carries its own GPLv3 header. It mirrors `sitl_run.sh`'s structure but has no PX4
+counterpart to follow: PX4 ships no HITL runner.
 
 Model JSONs, `FA_check.py`, `get_FAbridge_params.py`, `install.sh`, `uninstall.sh`,
 `scripts/*` and the documentation are original work for this project.

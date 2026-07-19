@@ -306,9 +306,20 @@ int PX4Communicator::InitUdp()
 }
 
 /*
- * Write one framed MAVLink packet. Serial and UDP need different calls, and a
- * non-blocking serial fd can accept a partial write, so a short write is
- * retried rather than treated as a failure.
+ * Write one framed MAVLink packet.
+ *
+ * UDP is a datagram transport: send() delivers the whole frame or none of it,
+ * so there is nothing to retry and a short write cannot occur.
+ *
+ * Serial and TCP are BYTE STREAMS and are handled identically, because they
+ * fail identically: a short write is possible on both (a full tty output
+ * buffer on the non-blocking serial fd; a signal interrupting a socket write),
+ * and abandoning the tail of a half-written frame desynchronises the MAVLink
+ * parser on the far side permanently - it resynchronises only by luck, on the
+ * next byte that happens to look like a start-of-frame. TCP used to take the
+ * one-shot `send() == len` path and drop the remainder, so the transport that
+ * carries every SITL run had strictly weaker framing guarantees than the one
+ * added for HITL.
  */
 bool PX4Communicator::SendBuffer(const uint8_t *buf, int len)
 {
@@ -316,43 +327,52 @@ bool PX4Communicator::SendBuffer(const uint8_t *buf, int len)
         return false;
     }
 
-    if (transport == PX4Transport::Serial) {
-        int written = 0;
-
-        while (written < len) {
-            ssize_t n = write(commFd, buf + written, (size_t)(len - written));
-
-            if (n > 0) {
-                written += (int)n;
-                continue;
-            }
-
-            if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
-                // Output buffer full: the link is saturated. Wait briefly for
-                // drain rather than dropping a half-written frame, which would
-                // desynchronise the parser on the board.
-                struct pollfd pfd = {};
-                pfd.fd = commFd;
-                pfd.events = POLLOUT;
-
-                if (poll(&pfd, 1, 100) <= 0) {
-                    return false;
-                }
-
-                continue;
-            }
-
-            if (n < 0 && errno == EINTR) {
-                continue;
-            }
-
-            return false;
-        }
-
-        return true;
+    if (transport == PX4Transport::Udp) {
+        return send(commFd, buf, (size_t)len, MSG_NOSIGNAL) == (ssize_t)len;
     }
 
-    return send(commFd, buf, (size_t)len, 0) == (ssize_t)len;
+    int written = 0;
+
+    while (written < len) {
+        ssize_t n;
+
+        if (transport == PX4Transport::Serial) {
+            n = write(commFd, buf + written, (size_t)(len - written));
+
+        } else {
+            // MSG_NOSIGNAL rather than relying on the bridge's SIGPIPE
+            // disposition: a closed peer must surface as EPIPE here, which
+            // NoteSendFailure() treats as fatal.
+            n = send(commFd, buf + written, (size_t)(len - written), MSG_NOSIGNAL);
+        }
+
+        if (n > 0) {
+            written += (int)n;
+            continue;
+        }
+
+        if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+            // Output buffer full: the link is saturated. Wait briefly for
+            // drain rather than dropping a half-written frame.
+            struct pollfd pfd = {};
+            pfd.fd = commFd;
+            pfd.events = POLLOUT;
+
+            if (poll(&pfd, 1, 100) <= 0) {
+                return false;
+            }
+
+            continue;
+        }
+
+        if (n < 0 && errno == EINTR) {
+            continue;
+        }
+
+        return false;
+    }
+
+    return true;
 }
 
 int PX4Communicator::InitTcpServer(int portOffset)

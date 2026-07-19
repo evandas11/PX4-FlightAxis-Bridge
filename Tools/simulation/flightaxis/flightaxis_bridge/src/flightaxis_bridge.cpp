@@ -248,20 +248,23 @@ static void buildChannels(const VehicleState &veh, const ChannelMap *maps, int n
 			continue;
 		}
 
-		double out;
+		// NOT named `out`: that shadows the out[] parameter, in the one
+		// function whose whole point is that channels[] and out[] are
+		// different arrays.
+		double scaled;
 
 		if (m.scale == 1) {
-			out = (v + 1.0) / 2.0;	// bipolar surface, -1..1 -> 0..1
+			scaled = (v + 1.0) / 2.0;	// bipolar surface, -1..1 -> 0..1
 
 		} else {
-			out = v;		// unipolar motor, already 0..1
+			scaled = v;			// unipolar motor, already 0..1
 		}
 
 		if (m.reverse) {
-			out = 1.0 - out;
+			scaled = 1.0 - scaled;
 		}
 
-		channels[m.rf] = constrain(out, 0.0, 1.0);
+		channels[m.rf] = constrain(scaled, 0.0, 1.0);
 	}
 
 	// From here on the option post-passes read the untransformed channels[] and
@@ -576,7 +579,6 @@ int main(int argc, char **argv)
 	// including ResetAircraft, so it must not run once per loop iteration
 	const uint64_t REINJECT_INTERVAL_US = 300000;	// 300 ms
 	uint64_t last_reinject_us = 0;
-	uint64_t last_alive_us = 0;		// keep-alive pacing while reinjecting
 
 	// FPS reporting (ArduPilot report_FPS)
 	uint64_t frame_counter = 0;
@@ -692,9 +694,81 @@ int main(int argc, char **argv)
 	unsigned fail_count = 0;
 	bool have_fa_data = false;
 
-	// Set while the reinject keep-alive is driving the clock off wall time.
+	// Set while a keep-alive is driving the clock off wall time.
 	// Cleared by the rebase on the first good frame afterwards - see there.
 	bool keepalive_active = false;
+
+	/*
+	 * WALL-CLOCK KEEP-ALIVE.
+	 *
+	 * Shared by the two situations where RealFlight's physics clock is not
+	 * advancing but PX4 still needs a sensor stream:
+	 *   - the controller reinject (spacebar reset / aircraft change), and
+	 *   - a STALLED physics clock: RealFlight paused, a modal dialog open, the
+	 *     window minimised. The bridge keeps getting valid ExchangeData replies
+	 *     carrying the same m-currentPhysicsTime-SEC over and over.
+	 *
+	 * Both look identical from here - a valid frame with no new physics in it -
+	 * so they get identical treatment: hold the last state, advance the exported
+	 * clock off WALL time at ~1 kHz, and send. Pacing off the loop iteration
+	 * instead would run the clock at the several-kHz loop rate.
+	 *
+	 * Setting keepalive_active hands the reconciliation to branch 0, which
+	 * rebases the physics epoch onto the clock we have already exported once
+	 * real frames resume. That is what keeps this from desynchronising the two
+	 * clocks, and it is why both callers must go through here rather than
+	 * rolling their own clock advance.
+	 */
+	uint64_t last_alive_us = 0;		// keep-alive pacing (wall clock)
+
+	/*
+	 * How long the physics clock must be stalled before the keep-alive takes
+	 * over. This threshold is load-bearing in BOTH directions.
+	 *
+	 * Too low and the keep-alive fires during normal operation: the bridge
+	 * free-runs at several kHz against a 250 Hz RealFlight, so it routinely
+	 * finishes interpolating a frame and then waits out the rest of the frame
+	 * period with nothing to do. Treating that as a stall means branch 0
+	 * rebases the epoch on nearly every frame - which, measured, consumed most
+	 * real frames and left the realtime-factor monitor permanently reading
+	 * "n/a" because branch 0 also suppresses its next sample.
+	 *
+	 * Too high and PX4's sensor topics go stale: the arming checks want each
+	 * one updated within 1 s.
+	 *
+	 * 200 ms sits an order of magnitude above any plausible frame period
+	 * (4 ms at RealFlight's 250 Hz, 20 ms even at a badly degraded 50 Hz) and
+	 * a comfortable factor below the 1 s timeout.
+	 */
+	const uint64_t STALL_TIMEOUT_US = 200000;	// 200 ms
+	uint64_t stall_since_us = 0;		// wall time the physics clock stalled at
+
+	auto keepAlive = [&](uint64_t now_us) {
+		if (last_alive_us == 0) {
+			last_alive_us = now_us;
+			return;
+		}
+
+		uint64_t alive_dt_us = now_us - last_alive_us;
+
+		if (alive_dt_us < 1000) {
+			return;
+		}
+
+		// a long stall must not teleport the clock forward
+		if (alive_dt_us > 100000) {
+			alive_dt_us = 100000;
+		}
+
+		last_alive_us = now_us;
+		time_now_us += alive_dt_us;
+		vehicle.setTimeUsec(time_now_us);
+		vehicle.extrapolate(alive_dt_us * 1.0e-6);
+		px4.Send(0);
+		// the exported clock and initial_time_s have now diverged; branch 0
+		// reconciles them on the way out
+		keepalive_active = true;
+	};
 
 	// The FA-side state that decides whether an ExchangeData failure warrants
 	// re-running the full startup sequence (ArduPilot SIM_FlightAxis.cpp:295-298
@@ -732,6 +806,31 @@ int main(int argc, char **argv)
 			// cap the shift: usleep() is only specified for < 1 s
 			unsigned shift = (fail_count < 6) ? fail_count : 6;
 			usleep(10000u << shift);	// 20 ms .. 640 ms backoff
+
+			// Keep servicing the PX4 side while RealFlight is unreachable.
+			// This branch used to touch px4 not at all, which broke the
+			// dead-link policy that the rest of the bridge relies on: link
+			// loss is only ever detected inside Recieve() (poll HUP/ERR, a
+			// 0-length TCP read) or Send(), so with RealFlight down NOTHING
+			// was watching PX4. Measured: kill the simulator, then kill px4 -
+			// the bridge spun here forever instead of exiting, and the
+			// LinkLost() check at the top of the loop never fired because
+			// nothing ever set the latch.
+			//
+			// It also stopped draining 4560 while PX4 kept streaming
+			// HIL_ACTUATOR_CONTROLS at 200 Hz into a socket nobody was
+			// reading. The heartbeat is a no-op in the SITL profile.
+			//
+			// Deliberately NOT the sensor keep-alive: unlike the reinject
+			// case, RealFlight is GONE here, so there is no simulation to keep
+			// PX4's estimator alive for. Draining and noticing a dead peer is
+			// the whole job.
+			px4.SendHeartbeat();
+			px4.Recieve(false);
+
+			if (px4.LinkLost()) {
+				continue;	// the check at the top of the loop shuts us down
+			}
 
 			// Re-run the startup sequence only when the LAST KNOWN FlightAxis
 			// state says the controller actually needs re-injecting - i.e.
@@ -832,36 +931,14 @@ int main(int argc, char **argv)
 			//
 			// RealFlight's physics clock is unusable here (the controller is not
 			// injected, so we are not getting fresh frames), so the keep-alive runs
-			// off wall time at ~1 kHz. Pacing it off the loop iteration instead
-			// would run the clock at the several-kHz loop rate.
-			if (last_alive_us == 0) {
-				last_alive_us = now_us;
-			}
-
-			uint64_t alive_dt_us = now_us - last_alive_us;
-
-			if (alive_dt_us >= 1000) {
-				// a long stall must not teleport the clock forward
-				if (alive_dt_us > 100000) {
-					alive_dt_us = 100000;
-				}
-
-				last_alive_us = now_us;
-				time_now_us += alive_dt_us;
-				vehicle.setTimeUsec(time_now_us);
-				vehicle.extrapolate(alive_dt_us * 1.0e-6);
-				px4.Send(0);
-				// the exported clock and initial_time_s have now diverged; the
-				// rebase below reconciles them on the way out
-				keepalive_active = true;
-			}
+			// off wall time - see keepAlive() above.
+			keepAlive(now_us);
 
 			px4.Recieve(false);
 			continue;
 		}
 
 		last_reinject_us = 0;
-		last_alive_us = 0;
 
 		// ---- branch 0: leaving the reinject keep-alive.
 		//
@@ -905,6 +982,10 @@ int main(int argc, char **argv)
 			// this frame is consumed by the rebase (as in branch 1); the
 			// keep-alive already sent a sample ~1 ms ago, so nothing is owed
 			extrapolated_s = 0.0;
+			// the keep-alive is over; the next one must start pacing afresh
+			// rather than measure against a timestamp from this one
+			last_alive_us = 0;
+			stall_since_us = 0;
 			px4.Recieve(false);
 			continue;
 		}
@@ -937,6 +1018,8 @@ int main(int argc, char **argv)
 			// in branch 3 left a stale value here, which then shortened (or
 			// zeroed) the first extrapolation steps after the restart.
 			extrapolated_s = 0.0;
+			last_alive_us = 0;
+			stall_since_us = 0;
 			// genuine restart: drop the anchor, the next real frame recaptures it
 			vehicle.invalidatePositionOffset();
 			px4.Recieve(false);
@@ -965,6 +1048,49 @@ int main(int argc, char **argv)
 				vehicle.extrapolate(delta_time);
 				px4.Send(0);
 				extrapolated_s += delta_time;
+
+			} else {
+				/*
+				 * Interpolation is exhausted: we have already run a full
+				 * average_frame_time_s past the last real frame and RealFlight
+				 * still has not produced a new one. Its physics clock has
+				 * STALLED - paused sim, a modal dialog, a minimised window.
+				 *
+				 * Extrapolating further is not an option: it would push the
+				 * exported clock past physics time, and when physics resumes
+				 * the epoch arithmetic in branch 3 sees the clock go backwards
+				 * - either freezing it (< 500 ms) or, worse, tripping the
+				 * "genuine reset" path and dropping the position anchor.
+				 *
+				 * But sending NOTHING is what the code used to do here, and
+				 * that is worse. Measured against the mock with `freeze 6`:
+				 * HIL_SENSOR stopped ~52 ms after the stall began and PX4 went
+				 * on to log "MAG #0 failed: TIMEOUT", "BARO #0 failed:
+				 * TIMEOUT" and "angular velocity no longer valid (timeout)",
+				 * failing every sensor arming check - exactly the failure the
+				 * reinject keep-alive exists to prevent, reached by a
+				 * different route. (It also meant the whole stall was later
+				 * applied to the clock as one jump: a 6 s freeze produced a
+				 * 6 s forward step, silently, since it exceeds the 2 s glitch
+				 * ceiling.)
+				 *
+				 * So hand it to the same wall-clock keep-alive the reinject
+				 * path uses. Branch 0 then rebases the epoch when real frames
+				 * resume, which is what removes the jump as well.
+				 *
+				 * Only after STALL_TIMEOUT_US, though: arriving here is NORMAL
+				 * once per frame (the bridge outruns RealFlight and waits out
+				 * the rest of the frame period), and treating that as a stall
+				 * breaks the realtime monitor - see the threshold's comment.
+				 */
+				const uint64_t now_wall_us = micros();
+
+				if (stall_since_us == 0) {
+					stall_since_us = now_wall_us;
+
+				} else if (now_wall_us - stall_since_us >= STALL_TIMEOUT_US) {
+					keepAlive(now_wall_us);
+				}
 			}
 
 			px4.Recieve(false);
@@ -974,6 +1100,11 @@ int main(int argc, char **argv)
 
 		// ---- branch 3: normal frame
 		extrapolated_s = 0.0;
+		// a real frame arrived, so no keep-alive is in progress; drop the
+		// pacing timestamp so a later stall does not measure its first step
+		// against a stale one (which would advance the clock by that gap).
+		last_alive_us = 0;
+		stall_since_us = 0;
 
 		// Time-epoch rebase only (ArduPilot SIM_FlightAxis.cpp update()). This
 		// condition stays true for every frame while RealFlight's physics clock

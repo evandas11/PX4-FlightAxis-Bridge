@@ -195,14 +195,17 @@ would burst to catch up after exactly the kind of stall that caused it.
 
 ### `fields_updated`
 
-`vehicle_state.cpp:311` sets `fields_updated = 0x1FFF` — "every sensor is new" — on every
-message. On a real board that makes the receiver republish the magnetometer, barometer and
-differential pressure at the full `HIL_SENSOR` rate: 250 Hz of baro and mag into an MCU whose
-real drivers would run them at 50–100 Hz. It costs no extra bytes (the fields are in the
-message either way) but it costs CPU and misrepresents the sensor suite to the estimator.
+`vehicle_state.cpp` builds every `HIL_SENSOR` with `fields_updated = 0x1FFF` — "every sensor is
+new". Left alone, that makes the receiver republish the magnetometer, barometer and
+differential pressure at the full `HIL_SENSOR` rate: on a real board, 250 Hz of baro and mag
+into an MCU whose real drivers would run them at 50–100 Hz. It costs no extra bytes (the fields
+are in the message either way) but it costs CPU and misrepresents the sensor suite to the
+estimator. In SITL it is if anything worse — `SimulatorMavlink::update_sensors()` publishes
+`sensor_baro` *twice* for every message carrying the BARO bits — which is why the masking is
+applied on both targets rather than only in HITL.
 
-Accel and gyro are never masked and stay at the full `HIL_SENSOR` rate. The three slow sensors
-are masked down to:
+`px4_communicator` therefore masks the bitmask down on the way out. Accel and gyro are never
+masked and stay at the full `HIL_SENSOR` rate. The three slow sensors are masked down to:
 
 | Field | SITL | HITL |
 |---|---|---|
@@ -280,6 +283,8 @@ console. **`SYS_HITL` is `@reboot_required` — reboot after setting it.**
 | `CBRK_SUPPLY_CHK` | `894281` | allow arming with no battery — **see §1** |
 | `COM_RC_IN_MODE` | `1` or `4` | no real RC transmitter attached |
 | `EKF2_GPS_DELAY` | `0` | RealFlight free-runs; GPS samples arrive fresh (same as the SITL airframes) |
+| `EKF2_MULTI_IMU` | `1` | The bridge sends `HIL_SENSOR` with `id = 0` only, so only IMU instance 0 is ever supplied; leaving this higher runs EKF instances on dead sensors (same as the SITL airframes) |
+| `SDLOG_MODE` | `4` | Optional, but it makes a log span several arm/disarm cycles instead of closing at the first disarm. `@reboot_required` |
 
 ### 6.2 MAVLink instance
 
@@ -397,7 +402,7 @@ for.
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `PX4_HITL_TRANSPORT` | `tcp-server` | `tcp-server` (SITL) \| `serial` \| `udp` |
+| `PX4_HITL_TRANSPORT` | `tcp-server` | `tcp-server` (SITL) \| `serial` \| `udp`. The default is the *bridge's*; `hitl_run.sh` defaults it to `serial` instead and rejects `tcp-server`, since a HITL runner has no SITL to serve. |
 | `PX4_HITL_SERIAL_DEV` | — | e.g. `/dev/ttyACM0` |
 | `PX4_HITL_SERIAL_BAUD` | `921600` | ignored on USB CDC-ACM |
 | `PX4_HITL_UDP_HOST` | — | board IP |

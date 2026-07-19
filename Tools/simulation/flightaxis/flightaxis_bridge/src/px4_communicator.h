@@ -378,8 +378,18 @@ private:
 	 *   - SEND_FAIL_LIMIT consecutive send failures of any kind (catches the
 	 *     serial POLLOUT-timeout case, which has no distinguishing errno)
 	 *
-	 * UDP has no such signal at all - a datagram to a dead board succeeds
-	 * forever. That is inherent to the transport, not an omission here.
+	 * UDP is weaker than the other two, but NOT signal-free, which is what this
+	 * comment used to claim. InitUdp() connect()s the socket, and the kernel
+	 * records an incoming ICMP error against a connected UDP socket: if the
+	 * board is up but nothing is bound to the port, the next send() reports
+	 * ECONNREFUSED (fatal, above) or poll() reports POLLERR (handled in
+	 * Recieve()), so that case IS caught.
+	 *
+	 * What genuinely cannot be detected is a board that stops answering without
+	 * anything generating an ICMP reply - powered off, cable pulled, dropped
+	 * off the network. No datagram send will ever fail. That much is inherent
+	 * to the transport, not an omission here, and it means a UDP HITL link has
+	 * no bound on how long a dead board can go unnoticed.
 	 */
 	static const uint32_t SEND_FAIL_LIMIT = 100;
 	bool link_lost = false;

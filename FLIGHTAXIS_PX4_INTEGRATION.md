@@ -2,7 +2,8 @@
 
 **RealFlight (FlightAxis Link) as a PX4 SITL simulator, integrated the same way as the FlightGear bridge: files live in the PX4 tree, get compiled by the PX4 make system, and launch with one `make` command.**
 
-Version: 3.1 — July 2026
+Version: 3.2 — July 2026
+- v3.2: reconciled with the shipped implementation a second time. The helicopter moved to `CA_AIRFRAME 11` (tail servo) with a bipolar tail, real rate gains, a collective curve and yaw compensation (§5, §9, §12); the `HeliDemix` over-gain is now corrected in the bridge and is no longer a defect (§5, §12); `fields_updated` is sub-rated rather than `0x1FFF` on every message (§8.2); a realtime-factor monitor was added (§7); a dead PX4 link is terminal (§8.2); the quadplane's `FD_ACT_*` overrides were removed because the detector cannot fire in v1.16 SITL at all (§12); HITL support and ROS 2 verification landed (§8.2, §11); rotor-geometry magnitudes are normalised away by the allocator and only the symmetry matters (§9); airframe parameter forcing extended beyond `EKF2_GPS_DELAY` (§9); per-file line-number citations replaced with function and file names, which do not rot.
 - v3.1: reconciled with the shipped implementation. Registration moved to the **PX4 v1.16 pattern** (`src/modules/simulation/simulator_mavlink/sitl_targets_flightaxis.cmake`, §3); baro/pitot units and the baro datum corrected (§6); DISTANCE_SENSOR and RAW_RPM documented, RC passthrough marked not implemented (§8.2); model-JSON example replaced with the real shipped channel maps and the rule that generates them (§5); airframe example marked abridged (§9); pitfalls ledger pruned of stale rows and extended with the fixes actually made (§12); validation status stated explicitly (§11).
 - v3.0: restructured around the **FlightGear-bridge pattern** (`Tools/simulation/` standalone bridge + build-system registration + `sitl_run.sh` + per-model JSON) — build it with the PX4 you already have, no PX4 stack modification.
 - v2.0: all frame conversions & timing verified against ArduPilot `SIM_FlightAxis.cpp` source (§6–§7 — unchanged, still the ground truth).
@@ -46,7 +47,7 @@ Key consequences:
   [flightaxis_bridge] connecting to RealFlight at 192.168.10.1:18083
   [flightaxis_bridge] controller injected, aircraft reset
   [flightaxis_bridge] waiting for PX4 on TCP 4560 ... connected
-  [flightaxis_bridge] 247.3/250.0 FPS avg=248.1 glitches=0
+  [flightaxis_bridge] exchanges=247.3/s loop=612.7/s avg=248.1 FPS rtf=1.00 glitches=0
   INFO  [simulator_mavlink] Simulator connected on TCP port 4560
   ```
 
@@ -67,6 +68,7 @@ Key consequences:
 PX4-Autopilot/
 ├── Tools/simulation/flightaxis/                      # NEW (submodule or in-tree)
 │   ├── sitl_run.sh
+│   ├── hitl_run.sh                                   # HITL runner (see HITL.md)
 │   └── flightaxis_bridge/
 │       ├── CMakeLists.txt
 │       ├── FA_check.py                               # sanity-ping 18083 before start
@@ -104,9 +106,9 @@ Copied verbatim from the FlightGear bridge (byte-identical): `geo_mag_declinatio
 `./cmake` on `CMAKE_MODULE_PATH` and `find_package(MAVLink)` is what supplies the MAVLink
 headers out of the PX4 build, so MAVLink is never a separate dependency to install.
 `px4_communicator.{cpp,h}` is **adapted**, not copied: the FlightGear original emits every
-message on every frame, which at RealFlight's ~250 Hz would swamp PX4, so it gained
-per-message decimation state and intervals (`px4_communicator.h:81-92`,
-`px4_communicator.cpp:182-239`) and the DISTANCE_SENSOR path (§8.2).
+message on every frame, which at RealFlight's ~250 Hz would swamp PX4, so it gained per-message
+decimation state and intervals, the `fields_updated` sub-rating, the DISTANCE_SENSOR path
+(§8.2), the serial and UDP transports used for HITL, and the dead-link policy.
 
 ---
 
@@ -167,7 +169,15 @@ boilerplate elsewhere gets wrong:
 
 The shipped file additionally warns at configure time if a listed model has no
 `models/<model>.json` or no matching `*_flightaxis_<model>` airframe — both are otherwise
-silent misconfigurations that only surface as a Python traceback at launch.
+silent misconfigurations that only surface as a Python traceback at launch. It also declares a
+`flightaxis_hitl_<model>` target per model, which runs `hitl_run.sh` and **depends on
+`flightaxis_bridge` only, deliberately not on `px4`**: in HITL the firmware is on a board and
+there is no `px4` binary to build or run. Those targets live in this file, which is included
+from `simulator_mavlink/CMakeLists.txt`, purely because this is where the `flightaxis_bridge`
+ExternalProject is defined and a target cannot depend on it from elsewhere — HITL does not use
+`simulator_mavlink` at all. The consequence is that you configure a `px4_sitl_nolockstep` tree
+to get a HITL runner, which is odd but harmless, since nothing SITL is built or started.
+`hitl_run.sh` can equally be called directly; it needs nothing from CMake beyond the binary.
 
 ### 3.1 PX4 v1.13–v1.15 — `platforms/posix/cmake/sitl_target.cmake`
 
@@ -215,8 +225,8 @@ manual form.
 ### 3.3 Bridge `CMakeLists.txt`
 
 Same skeleton as the FG bridge. Eigen3 is the only external package it needs; MAVLink arrives
-via the copied `FindMAVLink.cmake`, and the shipped file also falls back to the FlightGear
-bridge's own `cmake/` directory so an in-tree checkout works even if the copy is missing:
+via the in-tree copy of `FindMAVLink.cmake`, which is why `./cmake` goes on
+`CMAKE_MODULE_PATH`. Abridged:
 
 ```cmake
 cmake_minimum_required(VERSION 3.10)
@@ -235,11 +245,27 @@ target_compile_options(flightaxis_bridge PUBLIC -g -fexceptions -Wno-cast-align 
 target_link_libraries(flightaxis_bridge Eigen3::Eigen pthread)
 ```
 
+Two things the shipped file adds that the sketch above omits, both for the sake of a standalone
+`cmake && make` rather than the ExternalProject path:
+
+- **It defaults `CMAKE_BUILD_TYPE` to `RelWithDebInfo`** when neither that nor
+  `CMAKE_CONFIGURATION_TYPES` is set. The ExternalProject registration passes the build type
+  explicitly, but a hand-run configure would otherwise get `-O0` Eigen quaternion maths and
+  MAVLink encoders, which surfaces only as a climbing `glitches=` counter with no hint that the
+  build type is the cause.
+- **It turns a missing MAVLink into a `FATAL_ERROR` with instructions**, rather than leaving
+  `find_package(MAVLink)` un-`REQUIRED` as the flightgear and jsbsim bridges do. That is
+  survivable for them because they are only ever configured by the ExternalProject step; here a
+  miss leaves the include directory as the literal string `_MAVLINK_INCLUDE_DIR-NOTFOUND` and
+  cmake fails at generate time without mentioning MAVLink at all. `FindMAVLink` looks in
+  `<build dir>/../mavlink/`, so a standalone build must be configured from inside a PX4 build
+  tree — which the ExternalProject step does implicitly and a hand-run cmake elsewhere does not.
+
 ---
 
 ## 4. Runner — `Tools/simulation/flightaxis/sitl_run.sh`
 
-Adapted line-for-line from the FlightGear one; the difference is RealFlight isn't launched (it lives on the Windows gaming box) — we only verify reachability. Abridged below (the shipped script also echoes its arguments and the SITL command):
+Adapted line-for-line from the FlightGear one; the difference is RealFlight isn't launched (it lives on the Windows gaming box) — we only verify reachability. Abridged below. The shipped script additionally echoes its arguments and the SITL command; honours `DONT_RUN` and `NO_PXH` (the latter passing `-d` so the target can be driven from CI or a non-tty); invokes both Python helpers as `python3 ./script.py` rather than relying on the exec bit and shebang, which a zip round-trip or a `noexec` mount would defeat — and which would make the `||` branch misreport a working network as unreachable; and captures PX4's exit status *before* the cleanup `kill`, since otherwise a PX4 crash reports success and a clean Ctrl-C reports failure, timing-dependently:
 
 ```bash
 #!/usr/bin/env bash
@@ -291,9 +317,9 @@ PX4_FLIGHTAXIS_IP=192.168.10.1 make px4_sitl_nolockstep flightaxis_plane
 ```
 
 **Multi-instance: supported by the bridge, not reachable from `make`.** The first bridge argv is
-the PX4 instance id and it does offset the listen port (`flightaxis_bridge.cpp:239,302`;
-`px4_communicator.cpp:59`, `portBase+portOffset`). But `sitl_run.sh:47` passes a hard-coded `0`
-with no environment override, so **no `make` target can start a second instance** — a second
+the PX4 instance id and it does offset the listen port (`PX4Communicator::InitTcpServer()` binds
+`portBase + portOffset`). But `sitl_run.sh` passes a hard-coded `0` with no environment
+override, so **no `make` target can start a second instance** — a second
 `flightaxis_*` target would just collide on TCP 4560. Running two aircraft at once today means
 invoking the bridge binary by hand with a different instance id (and pointing each at its own
 RealFlight host — one RealFlight instance serves one aircraft anyway). Threading an
@@ -348,20 +374,34 @@ Each shipped airframe script carries this derivation as a comment block next to 
 | `plane` | aileron, elevator, throttle, rudder | `1, 3, 0, 4` | `controls[0]` is the motor, so throttle is `rf2 -> px4 0` |
 | `quad` | motors 1–4 | `0, 1, 2, 3` | the only model where the orders coincide |
 | `quadplane` | aileron, elevator, throttle, rudder, lift 1–4 | `5, 7, 4, 8, 0, 1, 2, 3` | as above |
-| `heli` | swash 1–3, tail, main | `2, 3, 4, 1, 0` | `CA_AIRFRAME 10` orders motors first: `controls[0]`=main rotor, `[1]`=yaw tail, `[2..4]`=swash |
+| `heli` | swash 1–3, tail, main | `2, 3, 4, 1, 0` | `CA_AIRFRAME 11` orders motors first, then servos: `controls[0]`=main rotor motor, `[1]`=yaw tail servo, `[2..4]`=swash |
 
-Two heli-specific traps, both documented inside `heli.json`: the **tail rotor is unipolar**, not
-bipolar, because under `CA_AIRFRAME 10` the yaw tail is a *motor* and PX4 has already normalised it
-to `[0,1]` — scaling it as bipolar would fold `[0,1]` into `[0.5,1.0]` and leave yaw permanently
-offset. And `HeliDemix` only inverts correctly for the swash geometry the airframe forces via
-`CA_SP0_ANG*` (§12).
+Three heli-specific traps, all documented inside `heli.json`:
+
+- **The tail rotor is bipolar**, with `"disarm": 0.5`. Under `CA_AIRFRAME 11` ("Helicopter (tail
+  Servo)") the yaw tail is a *servo* on `[-1,1]`, and 0.5 on the wire is zero tail pitch — which
+  is what the collective-pitch tail rotor of nearly every stock RealFlight single-rotor heli
+  wants. `CA_AIRFRAME 10` ("tail ESC") would make it a motor clamped to `[0,1]`, clipping the
+  entire negative half of the yaw command: measured through the bridge, yaw −3 rad/s produced
+  `rf3 = 0.000` with the tail on its lower stop, i.e. **no left yaw authority at all**. Type 10
+  is only right for a heli with a separate unidirectional electric tail motor.
+- **Every row needs an explicit `"disarm"`**, including the swash servos. `HeliDemix` is applied
+  as a post-pass over the built channel array, so a row on the `-1` "hold last output" default
+  would have its already-demixed value re-demixed on the next frame. That iteration is a
+  non-involutive linear map and diverges: from a plausible in-flight swash it rails within about
+  three frames. Neutral is a fixed point, so it only shows up on the armed→disarmed transition
+  with the swash deflected — every landing — and nothing is logged.
+- **`HeliDemix` only inverts correctly for the swash geometry the airframe forces** via
+  `CA_SP0_ANG*` = 300/60/180, with equal arm lengths and `CA_MAX_SVO_THROW 0` (§12).
 
 - `px4` = index into `HIL_ACTUATOR_CONTROLS.controls[]` (defined by the airframe's actuator config, visible in the QGC Actuators tab — the JSON must mirror it).
 - Scaling: `unipolar` = clamp(v,0,1) for motors (HIL controls are 0..1 for motors); `bipolar` = (v+1)/2 for surfaces (−1..1). Net effect identical to ArduPilot's `(pwm−1000)/1000`. `reverse` is applied *after* scaling, as `v -> 1-v`.
-- `disarm` = the value sent while PX4 is disarmed or the control is NaN. **`disarm: -1` (also the default when the key is absent) means "hold the last output"** rather than driving the channel anywhere — right for control surfaces, wrong for motors, which is why every motor row states `"disarm": 0.0` explicitly (`flightaxis_bridge.cpp:180-187`).
-- **Duplicate indices are rejected at startup, not tolerated.** Two rows sharing an `rf` index would silently last-wins in `buildChannels()`, and a repeated `px4` index is almost always a typo, so the bridge refuses to start on either and names the two offending entries (`flightaxis_bridge.cpp:269-289`).
+- `disarm` = the value sent while PX4 is disarmed or the control is NaN. **`disarm: -1` (also the default when the key is absent) means "hold the last output"** rather than driving the channel anywhere — right for a plain control surface, wrong for a motor, which is why every motor row states `"disarm": 0.0` explicitly, and wrong for any row an option post-pass rewrites, which is why every row in `heli.json` states one (see the heli traps above).
+- **Duplicate indices are rejected at startup, not tolerated.** Two rows sharing an `rf` index would silently last-wins in `buildChannels()`, and a repeated `px4` index is almost always a typo, so the bridge refuses to start on either and names the two offending entries.
 - `UnmappedDefault` is the value sent on every RealFlight channel the map does not mention.
-- `Options` (port of ArduPilot `SIM_FLTAX_OPTS` bits, flattened to a bitmask by `get_FAbridge_params.py`): `ResetPosition` (=1, ResetAircraft on startup, default), `Rev4Servos` (=2, swap ch1–4 ↔ 5–8 wholesale for RF models built that way — do **not** combine it with an already-reordered map like the quadplane's or you double-swap), `HeliDemix` (=4, swash servos → RF roll/pitch/collective: `roll=s1−s2`, `pitch=(s1+s2)/2−s3`, `col=(s1+s2+s3)/3`, recentered 0..1), `SilenceFPS` (=8).
+- `Options` (port of ArduPilot `SIM_FLTAX_OPTS` bits, flattened to a bitmask by `get_FAbridge_params.py`): `ResetPosition` (=1, ResetAircraft on startup, default), `Rev4Servos` (=2, swap ch1–4 ↔ 5–8 wholesale for RF models built that way — do **not** combine it with an already-reordered map like the quadplane's or you double-swap), `HeliDemix` (=4, swash servos → RF roll/pitch/collective: `roll=(s1−s2)/1.732`, `pitch=((s1+s2)/2−s3)/1.5`, `col=(s1+s2+s3)/3`, recentered 0..1 — the divisors are gain normalisation, see below), `SilenceFPS` (=8).
+- **The `HeliDemix` gain normalisation.** The geometric inverse alone is not unit-gain. `buildChannels()` maps each bipolar swash servo to `(v+1)/2` before the post-pass runs, and with the pinned 300/60/180 geometry that leaves `s1−s2` at gain 0.866 and `(s1+s2)/2−s3` at 0.750, against the 0.5 about a 0.5 centre that RealFlight wants for a full-scale command. Undivided, the cyclic saturates at ±0.577 of commanded roll torque and ±0.667 of pitch, roll hotter than pitch. So roll is divided by 0.866/0.5 = √3 = 1.732 and pitch by 0.750/0.5 = 1.5. **Not** by 0.866 and 0.750: that recovers raw torque and clips at half command. Collective, `(s1+s2+s3)/3`, is already exactly gain 0.5 and is deliberately untouched. The constants are only valid for the pinned geometry — changing `CA_SP0_ANG*` or the arm lengths invalidates them.
+- **Both post-passes read a scratch copy, not the persistent channel array.** `channels[]` holds the untransformed per-channel state so that hold-last has something stable to hold; `out[]` is what goes to RealFlight. Transforming in place would re-transform every hold-last channel every frame — `HeliDemix` diverges, and `Rev4Servos`, whose swap is its own inverse, instead ping-pongs a held channel between `rf i` and `rf i+4` on alternate frames, a full-amplitude servo buzz at loop rate.
 - Adding a new aircraft takes **four** steps, not three: new JSON, one model name in the `models` list in `sitl_targets_flightaxis.cmake`, one airframe script — and that airframe must also be added to `ROMFS/px4fmu_common/init.d-posix/airframes/CMakeLists.txt` (§3.2) or it never reaches the ROMFS.
 
 RealFlight model prep (once per aircraft, in the RF editor): strip expo/mixes/gyros, max servo speed, one channel per actuator. Tridge's ArduPilot RealFlight model collection is directly reusable.
@@ -404,7 +444,7 @@ Critical for 3D/high-alpha models — total airspeed lies during hover/harrier/k
 
 **Pressure units are hPa, not Pa.** Both `HIL_SENSOR.abs_pressure` and `HIL_SENSOR.diff_pressure`
 are hectopascals in MAVLink, so the `/100` above is not cosmetic — dropping it feeds PX4 an
-airspeed error of a factor of 10. Declared as hPa at `vehicle_state.h:126,128`.
+airspeed error of a factor of 10. Both are declared as hPa in `vehicle_state.h`.
 
 **Rangefinder:** `AGL / dcm.c.z` when `dcm.c.z > 0`, else invalid (inverted). This is not
 computed and discarded: when valid it is packed into a `DISTANCE_SENSOR` message and sent to PX4
@@ -415,8 +455,8 @@ at 20 Hz (§8.2), which is what makes terrain-relative modes and landing usable.
 **Barometer:** ISA, `p = 101325·(1 − 2.25577e-5·h)^5.25588` Pa, converted to **hPa**. Temp ~25 °C.
 
 The altitude `h` fed into that formula is **deliberately not RealFlight's ASL**. It is
-`h = home_alt − position_ned.z()` (`vehicle_state.cpp:202-209`) — the same datum `nedToLLA()`
-uses for the GPS altitude it reports (`:267`). The reason is that a RealFlight runway sits at
+`h = home_alt − position_ned.z()` — the same datum `nedToLLA()` uses for the GPS altitude it
+reports. The reason is that a RealFlight runway sits at
 whatever arbitrary ASL its scenery author chose, which has nothing to do with the home altitude
 PX4 was given. Deriving baro from RF ASL while deriving GPS from `home_alt` would present EKF2
 with a *constant* baro-vs-GPS height disagreement — the estimator would either fight it forever
@@ -435,6 +475,21 @@ RealFlight free-runs (~250 Hz). The FG bridge already upsamples to dodge PX4's s
 3. **normal frame** → full pipeline, then glitch compensation: if physics time jumped 50 ms–2 s (network hiccup), swallow the excess by advancing the epoch (`initial_time += dt − 50 ms`), cap dt at 50 ms, count the glitch. Backwards >500 ms = true reset, accept.
 
 Timestamps in HIL messages = physics time (µs since epoch capture). Watch `m-currentPhysicsSpeedMultiplier ≠ 1` → warn. Print the ArduPilot-style FPS line every 1000 frames.
+
+**Realtime-factor monitor.** The three branches above keep the bridge's *exported* clock clean,
+which is necessary and not sufficient. PX4 timestamps the SITL sensor stream with its own clock
+on arrival (`SimulatorMavlink::handle_message_hil_sensor`), not with the physics time carried in
+the message, so what actually reaches EKF2 is the wall-clock arrival rate. If RealFlight's
+physics falls behind wall time, PX4 integrates the vehicle's motion over more real time than the
+physics covered: the aircraft flies in slow motion while every sensor value looks perfectly
+correct, and velocities, accelerations and every control loop are scaled wrong. Nothing in the
+sensor data reveals it, and the glitch compensation actively hides it, because it smooths the
+exported clock rather than the arrival rate. The bridge therefore measures physics seconds per
+wall second over each reporting window, prints it as `rtf=` in the FPS line, and warns (rate
+limited to once per 5 s) outside 0.95–1.05. This is distinct from the
+`m-currentPhysicsSpeedMultiplier` warning, which is RealFlight's *self-reported setting*: the
+realtime factor catches RealFlight reporting 1.0 and the machine failing to keep up. One sample
+is suppressed after a reinject keep-alive, where the physics clock was paused on purpose.
 
 ---
 
@@ -456,21 +511,61 @@ TCP server on 4560+instance; PX4 (`simulator_mavlink`) connects. Receives `HIL_A
 
 `Send()` runs at the full RealFlight frame rate plus every 1 ms extrapolation step (§7), which is
 far faster than most of these messages need. Only `HIL_SENSOR` genuinely wants that rate, so
-everything else is decimated against the bridge's own physics clock — the interval constants live
-at `px4_communicator.h:86-88` and the dispatch at `px4_communicator.cpp:182-250`. One of each is
-forced out on the first frame so PX4 has a complete picture immediately:
+everything else is decimated against the bridge's own physics clock; the interval constants and
+the dispatch both live in `px4_communicator`. One of each is forced out on the first frame so
+PX4 has a complete picture immediately:
 
 | Message | Rate | Notes |
 |---|---|---|
-| `HIL_SENSOR` | every frame / extrapolation step (~250 Hz+) | `fields_updated=0x1FFF`; pressures in hPa (§6) |
+| `HIL_SENSOR` | every frame / extrapolation step (~250 Hz+) | pressures in hPa (§6); `fields_updated` sub-rated, below |
 | `HIL_GPS` | **10 Hz** (`GPS_INTERVAL_US`) | COG = `atan2(vE,vN)`, **not** RF azimuth. PX4 publishes one `sensor_gps` per message with no rate limiting of its own, hence the decimation |
 | `HIL_STATE_QUATERNION` | **50 Hz** (`STATE_QUAT_INTERVAL_US`) | ground truth only — for log analysis, not consumed by the estimator |
-| `DISTANCE_SENSOR` | **20 Hz** (`DISTANCE_INTERVAL_US`) | built in `vehicle_state.cpp:362-382`; downward-facing (`PITCH_270`), 0.1–40 m, cm units. **Gated on `rangefinderValid()`** — suppressed entirely while the aircraft is inverted rather than sent as a bogus reading |
-| `RAW_RPM` | every frame | index 0, from RealFlight's prop/rotor RPM |
+| `DISTANCE_SENSOR` | **20 Hz** (`DISTANCE_INTERVAL_US`) | built by `VehicleState::getDistanceSensorMsg()`; downward-facing (`PITCH_270`), 0.1–40 m, cm units. **Gated on `rangefinderValid()`** — suppressed entirely while the aircraft is inverted rather than sent as a bogus reading |
+| `RAW_RPM` | every frame | index 0, from RealFlight's prop/rotor RPM. No PX4 handler exists, so this is wasted bandwidth on any link where bandwidth is not free; the HITL profile drops it |
+
+**Sub-rates *within* `HIL_SENSOR`.** `vehicle_state` builds every message with
+`fields_updated = 0x1FFF` — "every sensor is new" — and `px4_communicator` then masks that
+bitmask down on the way out. Accel and gyro are never masked and follow the full `HIL_SENSOR`
+rate; the magnetometer (100 Hz), barometer (50 Hz) and differential pressure (50 Hz) are masked
+out between their own intervals. This applies **in SITL as well as HITL**, which is why the
+intervals are not zero by default. The motivation on a real board is CPU and fidelity: 250 Hz of
+baro and mag into an MCU whose real drivers would run them at 50–100 Hz misrepresents the sensor
+suite to the estimator. In SITL it is log volume: `SimulatorMavlink::update_sensors()` publishes
+`sensor_baro` *twice* for every message carrying the BARO bits, plus mag and differential
+pressure once each, so at the ~1 kHz rate `Send()` runs the baro went out at roughly 20× and the
+mag and pitot at 10× their intended rates — surplus that `VehicleAirData` drains and averages
+away after inflating every ulog for nothing.
+
+Two details make this fiddlier than it looks. The masks are **all-bits-equal** tests, not
+any-bit: `BARO` needs bits 9, 11 and 12 together. And bit 12 is what latches
+`_sensors_temperature`, which accel, gyro and mag then read — so `BARO` must never be masked out
+of the *first* message. It is not: a `sent_first` flag backdates every interval timer so message
+one carries the full `0x1FFF`.
+
+**A dead PX4 link is terminal.** PX4 can vanish silently — the SITL binary exits, a USB cable is
+pulled, a board reboots — after which every send fails. The bridge does not retry: once the link
+is declared lost the communicator stops sending, `LinkLost()` latches, and the main loop breaks
+out and exits cleanly, which stops the SOAP traffic as a consequence. The alternative is
+thousands of log lines a second and continued hammering of RealFlight for a simulation nobody is
+consuming, and on serial up to 100 ms burnt in `poll(POLLOUT)` per failed frame. Reconnecting is
+deliberately not attempted either: for the TCP server that would mean re-`accept()`ing a fresh
+PX4 whose clock starts at zero while the bridge's has not, and the supervisor that started both
+sides is the right place to restart the pair. Detection is `POLLHUP`/`POLLERR`/`POLLNVAL`, a
+zero-length TCP read, a fatal `send()` errno, or 100 consecutive send failures — the last of
+which catches the serial `POLLOUT`-timeout case, which has no distinguishing errno. **UDP has no
+such signal at all**; a datagram to a dead board succeeds forever. That is inherent to the
+transport, not an omission.
+
+**HITL transports.** Beyond the SITL TCP server, `px4_communicator` also offers a serial client
+and a UDP client, selected by `PX4_HITL_TRANSPORT`, together with a HITL message profile that
+decimates `HIL_SENSOR`, drops `HIL_STATE_QUATERNION` and `RAW_RPM`, and adds a `HEARTBEAT`.
+`HIL_STATE_QUATERNION` matters most: in SITL it is ground truth for logging, but a real board
+*consumes* it and republishes straight onto EKF2's own output topics. Full treatment, including
+the bandwidth budget and the `_datarate > 5000` gate, is in [`HITL.md`](HITL.md).
 
 **RC passthrough — NOT IMPLEMENTED (future work).** The 12 `item` values echoed in every
 ExchangeData reply *are* the physical InterLink TX channels, and the bridge does parse them into
-`FAState.rcin[12]` (`fa_communicator.cpp:499`) — but nothing ever reads that array, and no
+`FAState.rcin[12]` — but nothing ever reads that array, and no
 `HIL_RC_INPUTS_RAW` is constructed or sent anywhere in the bridge. **You cannot currently fly PX4
 Manual/Acro from the RealFlight transmitter.** The data is one short function away from being
 usable, which is why the field is populated; if it is wired up, note that ArduPilot ships
@@ -505,16 +600,37 @@ stay in step with the matching `models/<name>.json` (§5).
 
 # RealFlight free-runs (no lockstep), GPS samples arrive fresh.
 param set EKF2_GPS_DELAY 0
+param set EKF2_MULTI_IMU 1
+param set-default SDLOG_MODE 4
+param set-default COM_RC_IN_MODE 4
 
-# ... 60 more lines: CA_* geometry, PWM_MAIN_FUNC* assignments, FW tuning ...
+# ... 60 more lines: CA_* geometry, PWM_MAIN_FUNC* assignments, per-vehicle tuning ...
 ```
 
-Note `param set`, **not** `param set-default`. All four airframes need it: `px4-rc.mavlinksim`
-runs *after* the airframe script and issues its own `param set-default EKF2_GPS_DELAY 10`
-(`px4-rc.mavlinksim:5`), which would quietly win over a default set here. A plain `param set`
-takes precedence and survives. The value itself is 0 because RealFlight free-runs and the GPS
-samples the bridge synthesises are current, with none of the transport delay the 10 ms default
-compensates for.
+**`param set` versus `param set-default`.** The first two use a plain `param set` deliberately,
+because `px4-rc.mavlinksim` runs *after* the airframe script and issues its own
+`param set-default` for both, which would quietly win over a default set here. A plain
+`param set` takes precedence and survives. The rest are `set-default`, so a user's saved value
+still wins. What each is for:
+
+| Parameter | Value | Why |
+|---|---|---|
+| `EKF2_GPS_DELAY` | `0` | RealFlight free-runs and the synthesised GPS samples are current, with none of the transport delay the 10 ms default compensates for. |
+| `EKF2_MULTI_IMU` | `1` | The bridge sends `HIL_SENSOR` with `id = 0` only, so `SimulatorMavlink` only ever fills IMU instance 0. `px4-rc.mavlinksim` asks for 3, leaving two EKF instances running on dead sensors. `0` is not an alternative — EKF2 clamps this to a minimum of 1 when `SENS_IMU_MODE` is 0. |
+| `SDLOG_MODE` | `4` | `rcS` sets 1, "from boot until disarm", which closes the log at the *first* disarm. The §11 checklist spans several arm/disarm cycles, so most of it — including the groundtruth-versus-estimate comparison — would never reach a log. 4 is "from first arm until shutdown". `@reboot_required`, so it has to be a startup default rather than a `pxh>` command. |
+| `COM_RC_IN_MODE` | `4` | A headless run has no manual control source at all, and 4 ("ignore any stick input") is the only value that skips the RC-loss failsafe. `NAV_RCL_ACT` is deliberately left alone: it is unreachable once this is 4, and the value usually suggested for it is outside the parameter's declared range. |
+
+**Rotor geometry: the symmetry matters, the magnitudes do not.** This was an open question and
+is now settled. PX4 normalises the multirotor mixing matrix by a scale derived from the mix
+columns themselves (`ControlAllocationPseudoInverse`), so the arm length divides straight back
+out: a ±0.15 m square, a ±0.25 m square and a ±0.50 m square produce a bit-identical matrix for
+any `KM` and `CT`, all of them ±0.7071 per motor — ArduPilot's cos(45°) frame table, reached by
+a different route. **So `CA_ROTOR*_P[XY]` needs no adjustment per RealFlight model, and no doc
+should suggest measuring it.** What is *not* free is asymmetry: feed asymmetric arms to a
+symmetric aircraft and roll and pitch stay clean while yaw cross-couples — with the Gazebo
+`standard_vtol` arms, a unit yaw command also produces a 53 % roll disturbance, which is
+structural and no rate tuning removes. The symmetric square in the shipped airframes is
+therefore a deliberate choice, not a placeholder awaiting real numbers.
 
 ---
 
@@ -542,18 +658,32 @@ The six items above are the *target*. This is where they actually stand. The dis
 because RealFlight is Windows-only and no Windows machine has been in the loop yet. (README.md
 carries the same status in shorter form; keep the two in step.)
 
-**Verified here:**
+**Not one of the six items has been closed against RealFlight.** Everything below marked
+verified was observed against a **mock FlightAxis server** — a local SOAP responder replaying
+the RealFlight schema, with no flight dynamics: it returns a fixed aircraft state whatever
+actuator values it is given. That is enough to exercise the software path end to end and nothing
+more. No aircraft has ever flown.
 
-- The bridge builds, and the `flightaxis_{plane,quad,quadplane,heli}` make targets exist and resolve.
+**Verified against the mock:**
+
+- The bridge builds, and the `flightaxis_{plane,quad,quadplane,heli}` and
+  `flightaxis_hitl_{plane,quad,quadplane,heli}` make targets exist and resolve.
 - All four model JSONs flatten cleanly through `get_FAbridge_params.py`.
 - `FA_check.py` fails correctly, with its diagnostic, against an unreachable host.
-- **End-to-end against a mock FlightAxis server** (a local SOAP responder replaying the RealFlight
-  schema): PX4 connects on TCP 4560, EKF2 converges, and the synthesised sensors are sane — in
-  particular baro and GPS altitudes agree, confirming the shared-datum choice in §6.
+- **End to end:** PX4 connects on TCP 4560, EKF2 converges, and the synthesised sensors are
+  sane — in particular baro and GPS altitudes agree, confirming the shared-datum choice in §6.
 - Channel maps correct end to end for **plane and quad**, including bipolar/reverse/unipolar
   scaling and the disarm values.
 - The resilience cases (item 6): reconnect, aircraft reset, glitch swallow, and sim death all
   behave as §7 and §8.1 describe.
+- The ROS 2 path, including offboard mode accepted from ROS 2 and driving the actuators through
+  to the simulator. Because the mock has no dynamics, this establishes that the commands are
+  wired through, **not** that the aircraft flies to a setpoint ([`ROS2.md`](ROS2.md)).
+
+**Verified without hardware, for HITL:** the serial transport over a PTY pair, the framing, the
+message profile and rates, and `hitl_run.sh`'s guards. A PTY has no baud rate, so real UART
+timing is untested. [`HITL.md`](HITL.md) §11 is the authority; nothing there has touched a
+physical board.
 
 **Still requires a real Windows RealFlight machine** — untested, and not to be presented otherwise:
 
@@ -563,6 +693,9 @@ carries the same status in shorter form; keep the two in step.)
 - The compass-heading and nose-up-90° parts of item 1.
 - Item 5 — no circuit has been flown, so EKF innovation bounds over a real manoeuvre are unknown.
 - The quadplane and heli channel maps beyond static reasoning, and `HeliDemix` against a real swash.
+- The heli rate gains, collective curve and yaw compensation (§9, §12). They follow ArduPilot's
+  shipped helicopter tuning and the blade angles are a property of the RealFlight model, so they
+  are a starting point to refine in Acro, not a tune.
 
 ## 12. Pitfalls Ledger
 
@@ -577,13 +710,20 @@ carries the same status in shorter form; keep the two in step.)
 | Channels sent before PX4 ready | selectedChannels 0 → 4095 after first actuator msg |
 | Aircraft change / spacebar mid-session | reconnect state machine (§8.1) |
 | Keep-alive assumption | per-request sockets + creator thread (§8.1) |
-| **Baro-vs-GPS datum mismatch** — RF runway sits at an arbitrary scenery ASL, so baro from RF ASL disagrees with GPS from `home_alt` by a constant, forever | derive both from `home_alt − position_ned.z` (`vehicle_state.cpp:202-206`, §6) |
+| **Baro-vs-GPS datum mismatch** — RF runway sits at an arbitrary scenery ASL, so baro from RF ASL disagrees with GPS from `home_alt` by a constant, forever | derive both from `home_alt − position_ned.z` (§6) |
 | **Pressures sent in Pa** — MAVLink `HIL_SENSOR` wants hPa | `/100` on both `abs_pressure` and `diff_pressure` (§6) |
-| **`EKF2_GPS_DELAY` silently clobbered** — `px4-rc.mavlinksim` runs after the airframe and re-defaults it to 10 | use `param set`, not `param set-default`, in the airframe (§9) |
-| **Heli swash demix cross-couples roll into pitch** — PX4's default `CA_SP0_ANG*` 0/140/220 puts the mirrored servo pair on 2 and 3, which the `HeliDemix` inverse does not expect | force 300/60/180 in the airframe (`1203_flightaxis_heli:40-53`) |
-| **Heli yaw permanently offset** — under `CA_AIRFRAME 10` the tail is a *motor*, already `[0,1]`; scaling it bipolar folds it into `[0.5,1.0]` | `rf3` is `unipolar` in `heli.json` (`heli.json:4`) |
-| **Quadplane trips the actuator failure detector** — lift motors idle in cruise and SITL reports 0 A per ESC, which reads as a dead motor | `FD_ACT_EN 0` (`1202_flightaxis_quadplane:15-17`) |
-| **Silent channel-map typo** — duplicate `rf` last-wins, duplicate `px4` is a typo | bridge refuses to start and names both entries (`flightaxis_bridge.cpp:269-289`, §5) |
+| **`EKF2_GPS_DELAY` and `EKF2_MULTI_IMU` silently clobbered** — `px4-rc.mavlinksim` runs after the airframe and re-defaults both | use `param set`, not `param set-default`, for those two (§9) |
+| **RC-loss failsafe on a headless run** — no joystick, no RC, no manual control source at all | `COM_RC_IN_MODE 4`, the only value that skips the check (§9) |
+| **Log closes at the first disarm**, so a multi-cycle validation session is mostly unlogged | `SDLOG_MODE 4` (§9) |
+| **Heli swash demix cross-couples roll into pitch** — PX4's default `CA_SP0_ANG*` 0/140/220 puts the mirrored servo pair on 2 and 3, which the `HeliDemix` inverse does not expect | force 300/60/180 in `1203_flightaxis_heli`, and pin the arm lengths and `CA_MAX_SVO_THROW 0` with it |
+| **Heli has no left yaw** — under `CA_AIRFRAME 10` the tail is a *motor* clamped to `[0,1]`, so the whole negative half of the yaw command is clipped and the tail sits on its lower stop | `CA_AIRFRAME 11` (tail Servo), with `rf3` `bipolar` and `disarm` 0.5 in `heli.json` (§5) |
+| **Heli demix over-drives the cyclic** — the raw differences are gain 0.866 / 0.750, not 0.5, so roll saturates at 0.577 of command and pitch at 0.667, roll hotter than pitch | divide roll by √3 and pitch by 1.5 in the bridge's `HeliDemix` post-pass (§5). *Fixed — this was a known defect in earlier drafts and is not one now.* |
+| **Heli hold-last swash re-demixed every frame**, diverging within ~3 frames on the armed→disarmed transition | every `heli.json` row carries an explicit `disarm`, and the post-passes read a scratch copy rather than the persistent channel array (§5) |
+| **Motor-failure detection does not work in SITL** — `SimulatorMavlink` reports 1–16 A per ESC while armed, and the undercurrent test `1 + 15c < 2c` has no solution for any throttle | nothing to fix, and nothing to suppress: the quadplane's inherited `FD_ACT_EN 0` / `FD_ACT_MOT_TOUT 500` were suppressing a detector that cannot fire, so they were **removed**. Left at firmware defaults, detection starts working if upstream fixes the SITL ESC current model. Corollary: no motor-failure detection in SITL today, for any vehicle. |
+| **Rotor arm lengths treated as a per-model measurement** — they are not; the allocator normalises the magnitudes away and only the symmetry pattern survives | keep the symmetric square; never "correct" it towards a reference airframe's measured arms (§9) |
+| **Dead PX4 link retried forever** — thousands of log lines a second and continued SOAP load for a simulation nobody consumes | a dead link is terminal: stop sending, latch, exit cleanly (§8.2) |
+| **Silent channel-map typo** — duplicate `rf` last-wins, duplicate `px4` is a typo | bridge refuses to start and names both entries (§5) |
+| **Physics falling behind wall time, invisibly** — PX4 timestamps on arrival, so the vehicle flies in slow motion with entirely correct-looking sensor values | realtime-factor monitor, printed as `rtf=` and warned outside 0.95–1.05 (§7) |
 | WiFi to RealFlight | wired / same host only |
 | Bridge lives on wrong side | run bridge on (or wired-adjacent to) the RealFlight machine; SOAP RTT dominates — MAVLink to PX4 tolerates more latency |
 
@@ -595,7 +735,7 @@ should assume them:
 - **RC passthrough.** `rcin[12]` is parsed and never read; no `HIL_RC_INPUTS_RAW` is sent (§8.2).
   The old "InterLink RC ch2 is reversed" row was advice for a feature that does not exist.
 - **Battery / ICE fuel telemetry.** `m-batteryVoltage-VOLTS` and `m-batteryCurrentDraw-AMPS` are
-  parsed into `FAState` (`fa_communicator.cpp:518-519`) but are not carried into any MAVLink
+  parsed into `FAState` but are not carried into any MAVLink
   message, so PX4 sees no simulated battery at all and the old "clamp/synthetic for ICE models
   reporting −1" fix has nothing to attach to. PX4 falls back to its own SITL battery model.
 - **Multi-instance from `make`.** Supported by the bridge, unreachable through `sitl_run.sh` (§4).
