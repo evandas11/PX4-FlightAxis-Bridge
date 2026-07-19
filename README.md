@@ -16,6 +16,8 @@ endpoints, troubleshooting: **[RUNNING.md](RUNNING.md)**.
 Using it with ROS 2 — uXRCE-DDS topics, offboard control, measured rates and the timestamp
 caveats: **[ROS2.md](ROS2.md)**.
 
+Driving a real flight-controller board instead of SITL: **[HITL.md](HITL.md)**.
+
 Full design rationale, frame conversions, and timing logic:
 [`FLIGHTAXIS_PX4_INTEGRATION.md`](FLIGHTAXIS_PX4_INTEGRATION.md) (the spec — §6/§7 are
 verified against ArduPilot `SIM_FlightAxis.cpp`).
@@ -56,6 +58,7 @@ Everything except the top-level documents and scripts sits at exactly the path i
 README.md                                # this file - the user manual
 RUNNING.md                               # day-to-day operation, channel maps, troubleshooting
 ROS2.md                                  # uXRCE-DDS topics, offboard control, rates
+HITL.md                                  # hardware-in-the-loop against a real board
 FLIGHTAXIS_PX4_INTEGRATION.md            # the spec - design rationale, frame conversions, timing
 CONTRIBUTING.md                          # maintainer notes: keeping repo and PX4 tree in sync
 COPYRIGHT.md                             # per-file provenance and licensing
