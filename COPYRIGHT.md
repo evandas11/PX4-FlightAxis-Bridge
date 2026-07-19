@@ -1,7 +1,14 @@
 # Copyright and licensing
 
+Copyright © 2026 Evangels Brilliant Dasmasela.
+
 This project is released under the **GNU General Public License v3 or later**
 (see [LICENSE](LICENSE)).
+
+That copyright covers the original work in this repository — the bridge's main loop
+and channel mapping, the model JSONs, the airframes, the Python and shell tooling, the
+installer, and the documentation. It does not extend to the third-party code this
+project reuses or derives from; the table below records who holds what.
 
 ## Why GPLv3 and not BSD-3
 

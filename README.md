@@ -409,6 +409,8 @@ Spec §11 has the full checklist these correspond to.
 
 ## License
 
+Copyright © 2026 Evangels Brilliant Dasmasela.
+
 **GPLv3 or later** — see [LICENSE](LICENSE), and [COPYRIGHT.md](COPYRIGHT.md) for
 per-file provenance.
 

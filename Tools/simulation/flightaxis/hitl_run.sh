@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
 # This file is part of the PX4-FlightAxis-Bridge project.
-# Copyright (c) 2026 the PX4-FlightAxis-Bridge contributors.
+# Copyright (c) 2026 Evangels Brilliant Dasmasela.
 #
 # This program is free software: you can redistribute it and/or modify
 # it under the terms of the GNU General Public License as published by
