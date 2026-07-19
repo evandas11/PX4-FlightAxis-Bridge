@@ -101,14 +101,21 @@ param set-default RWTO_PSP 8
 # in Tools/simulation/flightaxis/flightaxis_bridge/models/plane.json.
 #
 # HIL_ACT_FUNC<N> lands on HIL_ACTUATOR_CONTROLS.controls[N-1] -- exactly as
-# PWM_MAIN_FUNC<N> does in SITL -- so the model JSON indices are unchanged and
-# the assignments below produce:
+# PWM_MAIN_FUNC<N> does in SITL -- so these values are identical to the SITL
+# airframe's, and the assignment is CHOSEN so that controls[] comes out in the
+# RealFlight model's own channel order (ch1 aileron, ch2 elevator, ch3 throttle,
+# ch4 rudder). That is the invariant: PX4 output channel N == RealFlight
+# channel N, which makes models/plane.json a pure IDENTITY map (rf == px4).
+# The ordering decision lives here, in the params -- as it does in ArduPilot's
+# SERVOn_FUNCTION and in PX4's own gz bridge SIM_GZ_*_FUNC* -- not in the JSON.
+# If you change these values, fix them back until plane.json can stay identity;
+# do not re-scramble plane.json instead.
 #
-#   controls[0] = 101 Motor 1     throttle        [0,1]  -> plane.json rf2
-#   controls[1] = 201 Servo 1     aileron left    [-1,1] -> plane.json rf0
-#   controls[2] = 202 Servo 2     aileron right   [-1,1] -> unmapped (see plane.json)
-#   controls[3] = 203 Servo 3     elevator        [-1,1] -> plane.json rf1
-#   controls[4] = 204 Servo 4     rudder          [-1,1] -> plane.json rf3
+#   controls[0] = 201 Servo 1     aileron left    [-1,1] -> plane.json rf0 (RF ch1)
+#   controls[1] = 203 Servo 3     elevator        [-1,1] -> plane.json rf1 (RF ch2)
+#   controls[2] = 101 Motor 1     throttle        [0,1]  -> plane.json rf2 (RF ch3)
+#   controls[3] = 204 Servo 4     rudder          [-1,1] -> plane.json rf3 (RF ch4)
+#   controls[4] = 202 Servo 2     aileron right   [-1,1] -> RF ch5, unmapped (see plane.json)
 param set-default CA_AIRFRAME 1
 
 param set-default CA_ROTOR_COUNT 1
@@ -124,8 +131,8 @@ param set-default CA_SV_CS2_TYPE 3
 param set-default CA_SV_CS3_TRQ_Y 1
 param set-default CA_SV_CS3_TYPE 4
 
-param set-default HIL_ACT_FUNC1 101
-param set-default HIL_ACT_FUNC2 201
-param set-default HIL_ACT_FUNC3 202
-param set-default HIL_ACT_FUNC4 203
-param set-default HIL_ACT_FUNC5 204
+param set-default HIL_ACT_FUNC1 201
+param set-default HIL_ACT_FUNC2 203
+param set-default HIL_ACT_FUNC3 101
+param set-default HIL_ACT_FUNC4 204
+param set-default HIL_ACT_FUNC5 202

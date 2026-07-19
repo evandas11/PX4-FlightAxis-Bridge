@@ -112,15 +112,30 @@ param set-default COM_DISARM_PRFLT -1
 # PWM_MAIN_FUNC<N> does in SITL -- so the model JSON indices are unchanged and
 # the assignments below produce:
 #
-#   controls[0] = 101 Motor 1     lift motor 1    [0,1]  -> quadplane.json rf4
-#   controls[1] = 102 Motor 2     lift motor 2    [0,1]  -> quadplane.json rf5
-#   controls[2] = 103 Motor 3     lift motor 3    [0,1]  -> quadplane.json rf6
-#   controls[3] = 104 Motor 4     lift motor 4    [0,1]  -> quadplane.json rf7
-#   controls[4] = 105 Motor 5     forward/pusher  [0,1]  -> quadplane.json rf2
-#   controls[5] = 201 Servo 1     aileron left    [-1,1] -> quadplane.json rf0
-#   controls[6] = 202 Servo 2     aileron right   [-1,1] -> unmapped (see quadplane.json)
-#   controls[7] = 203 Servo 3     elevator        [-1,1] -> quadplane.json rf1
-#   controls[8] = 204 Servo 4     rudder          [-1,1] -> quadplane.json rf3
+#   controls[0] = 201 Servo 1     aileron left    [-1,1] -> quadplane.json rf0
+#   controls[1] = 203 Servo 3     elevator        [-1,1] -> quadplane.json rf1
+#   controls[2] = 105 Motor 5     forward/pusher  [0,1]  -> quadplane.json rf2
+#   controls[3] = 204 Servo 4     rudder          [-1,1] -> quadplane.json rf3
+#   controls[4] = 101 Motor 1     lift motor 1    [0,1]  -> quadplane.json rf4
+#   controls[5] = 102 Motor 2     lift motor 2    [0,1]  -> quadplane.json rf5
+#   controls[6] = 103 Motor 3     lift motor 3    [0,1]  -> quadplane.json rf6
+#   controls[7] = 104 Motor 4     lift motor 4    [0,1]  -> quadplane.json rf7
+#   controls[8] = 202 Servo 2     aileron right   [-1,1] -> quadplane.json rf8 (unmapped)
+#
+# THE INVARIANT: that assignment is not arbitrary and is not merely "some
+# consistent order". It is chosen so that the controls[] order matches the
+# RealFlight model's own channel order 1:1 -- the reference-class quadplane
+# there is ch1 aileron, ch2 elevator, ch3 forward throttle, ch4 rudder,
+# ch5-ch8 the four lift motors. Because of that, models/quadplane.json is a
+# PURE IDENTITY MAP: every row has rf == px4, i.e. PX4 output channel N drives
+# RealFlight channel N, with no renumbering hidden in the JSON.
+#
+# The ordering decision therefore lives HERE, in the airframe parameters --
+# the same place ArduPilot puts it (SERVOn_FUNCTION) and the same place PX4's
+# own Gazebo bridge puts it (SIM_GZ_*_FUNC*). If you change the FUNC values
+# below, restore identity by changing them BACK, not by renumbering the JSON:
+# the JSON's rf and px4 columns are deliberately identical and are meant to
+# stay that way.
 param set-default CA_AIRFRAME 2
 
 # Rotor geometry: the SYMMETRY matters, the MAGNITUDES do not. PX4 normalises
@@ -169,15 +184,15 @@ param set-default CA_SV_CS2_TRQ_P 1
 param set-default CA_SV_CS3_TYPE 4
 param set-default CA_SV_CS3_TRQ_Y 1
 
-param set-default HIL_ACT_FUNC1 101
-param set-default HIL_ACT_FUNC2 102
-param set-default HIL_ACT_FUNC3 103
-param set-default HIL_ACT_FUNC4 104
-param set-default HIL_ACT_FUNC5 105
-param set-default HIL_ACT_FUNC6 201
-param set-default HIL_ACT_FUNC7 202
-param set-default HIL_ACT_FUNC8 203
-param set-default HIL_ACT_FUNC9 204
+param set-default HIL_ACT_FUNC1 201
+param set-default HIL_ACT_FUNC2 203
+param set-default HIL_ACT_FUNC3 105
+param set-default HIL_ACT_FUNC4 204
+param set-default HIL_ACT_FUNC5 101
+param set-default HIL_ACT_FUNC6 102
+param set-default HIL_ACT_FUNC7 103
+param set-default HIL_ACT_FUNC8 104
+param set-default HIL_ACT_FUNC9 202
 
 param set-default FW_AIRSPD_MAX 25
 param set-default NPFG_PERIOD 12
