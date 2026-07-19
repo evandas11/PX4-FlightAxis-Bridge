@@ -214,8 +214,15 @@ static double envOrDefault(const char *name, double dflt)
 struct ModelHealth {
 	bool  initialised{false};
 	bool  lost_components{false};
-	bool  locked{false};
+	bool  locked{false};		// last REPORTED lock state
 	bool  engine_running{false};
+
+	// m_isLocked debounce / flap suppression - see reportModelHealth().
+	bool     lock_raw{false};		// last RAW value seen from RealFlight
+	uint64_t lock_raw_since_us{0};		// when lock_raw last changed
+	unsigned lock_flaps{0};			// raw transitions in the current window
+	uint64_t lock_window_us{0};		// start of the flap-counting window
+	bool     lock_flap_warned{false};
 };
 
 static void reportModelHealth(ModelHealth &prev, const FAState &state)
@@ -225,6 +232,7 @@ static void reportModelHealth(ModelHealth &prev, const FAState &state)
 		prev.lost_components = state.m_hasLostComponents;
 		prev.locked          = state.m_isLocked;
 		prev.engine_running  = state.m_anEngineIsRunning;
+		prev.lock_raw        = state.m_isLocked;
 
 		// Announce the starting condition only when it is already bad -
 		// a healthy model at startup is the expected case and needs no line.
@@ -259,15 +267,73 @@ static void reportModelHealth(ModelHealth &prev, const FAState &state)
 		prev.lost_components = state.m_hasLostComponents;
 	}
 
-	if (state.m_isLocked != prev.locked) {
-		if (state.m_isLocked) {
-			cerr << "[flightaxis_bridge] *** RealFlight model is LOCKED - it will not respond to controls ***" << endl;
+	/*
+	 * m_isLocked is DEBOUNCED; the other two flags are reported on the raw edge.
+	 *
+	 * WHY ONLY THIS ONE. m_hasLostComponents and m_anEngineIsRunning are latched
+	 * physical events - a wing comes off once, an engine quits once - so a raw
+	 * edge is exactly the right trigger. m_isLocked is different: it has been
+	 * observed alternating several times per second in real flight, which
+	 * produced ~20 contradictory lines in the seconds around a failsafe landing
+	 * and buried the messages that actually explained the flight.
+	 *
+	 * Nothing in this bridge ACTS on m_isLocked - it is logged and nowhere else
+	 * (and ArduPilot, whose parse table we mirror key-for-key, parses the field
+	 * into its state struct and then never reads it at all). So a flapping value
+	 * cannot affect control; it can only affect the log. That makes the log the
+	 * correct place to fix it, and makes suppression safe: no control path is
+	 * being deprived of information, because no control path consumes it.
+	 *
+	 * A change is reported only once the new value has been STABLE for
+	 * LOCK_DEBOUNCE_US. A genuine lock - the case worth knowing about, where the
+	 * model really has stopped responding - persists, so it still gets reported,
+	 * a quarter second late. Flicker never survives the filter.
+	 *
+	 * The raw transitions are still counted, because "this value is flapping" is
+	 * itself a diagnosis worth one line. It is emitted at most once per window
+	 * so it cannot become the flood it replaces.
+	 */
+	{
+		const uint64_t LOCK_DEBOUNCE_US    =  250000;	// stable-for before reporting
+		const uint64_t LOCK_FLAP_WINDOW_US = 5000000;	// flap-counting window
+		const unsigned LOCK_FLAP_LIMIT     = 4;		// raw changes/window = flapping
 
-		} else {
-			cerr << "[flightaxis_bridge] RealFlight model unlocked" << endl;
+		const uint64_t now_us = micros();
+
+		if (state.m_isLocked != prev.lock_raw) {
+			prev.lock_raw = state.m_isLocked;
+			prev.lock_raw_since_us = now_us;
+
+			// restart the window if the last one has expired
+			if (prev.lock_window_us == 0 || now_us - prev.lock_window_us > LOCK_FLAP_WINDOW_US) {
+				prev.lock_window_us = now_us;
+				prev.lock_flaps = 0;
+				prev.lock_flap_warned = false;
+			}
+
+			prev.lock_flaps++;
+
+			if (prev.lock_flaps >= LOCK_FLAP_LIMIT && !prev.lock_flap_warned) {
+				prev.lock_flap_warned = true;
+				cerr << "[flightaxis_bridge] NOTE: RealFlight m-isLocked is FLAPPING ("
+				     << prev.lock_flaps << "+ changes in "
+				     << (unsigned)(LOCK_FLAP_WINDOW_US / 1000) << " ms)"
+				     << " - suppressing per-change lines; this flag is advisory only"
+				     << " and no control path uses it" << endl;
+			}
 		}
 
-		prev.locked = state.m_isLocked;
+		// report only a value that has settled
+		if (prev.lock_raw != prev.locked && now_us - prev.lock_raw_since_us >= LOCK_DEBOUNCE_US) {
+			if (prev.lock_raw) {
+				cerr << "[flightaxis_bridge] *** RealFlight model is LOCKED - it will not respond to controls ***" << endl;
+
+			} else {
+				cerr << "[flightaxis_bridge] RealFlight model unlocked" << endl;
+			}
+
+			prev.locked = prev.lock_raw;
+		}
 	}
 
 	if (state.m_anEngineIsRunning != prev.engine_running) {
