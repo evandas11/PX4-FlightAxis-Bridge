@@ -274,6 +274,35 @@ RealFlight back to your transmitter on the way out. If a previous session left s
 parameters behind, delete `build/px4_sitl_nolockstep/rootfs/eeprom/parameters.bson` first —
 saved values silently outrank the airframe's defaults, including the channel assignments.
 
+If PX4 refuses to start with `PX4 server already running for instance 0`, a previous run
+died without cleaning up. Remove `/tmp/px4_lock-0` and `/tmp/px4-sock-0`, and check for a
+stray `bin/px4` still holding TCP 4560.
+
+### Finding which RealFlight channel a surface is on
+
+`PX4_FA_DUMP_CHANNELS=<hz>` prints every channel's current value and its travel since the
+dump began:
+
+```bash
+PX4_FA_DUMP_CHANNELS=1 PX4_FLIGHTAXIS_IP=192.168.10.1 make px4_sitl_nolockstep flightaxis_quadplane
+```
+
+```
+[flightaxis_bridge] channels (RF ch1-12), ARMED:
+    ch1  rf0  = 0.512  travel 0.240
+    ch2  rf1  = 0.500  travel 0.000  <- not moving
+```
+
+This answers the one question the bridge cannot answer from its own configuration: the JSON
+map, the `PWM_MAIN_FUNC*` assignments and `actuator_outputs` in the ulog can all be correct
+while a surface sits motionless, because the RealFlight **model** decides what channel N
+drives. Arm, move one surface at a time, and the row whose travel grows is the channel it is
+on. A channel with travel while the surface is still means the bridge is sending to a channel
+the model does not use — fix that in RealFlight, or repoint `PWM_MAIN_FUNC<N>`.
+
+Note that **while disarmed every mapped channel is pinned to its `disarm` value and ignores
+the sticks**, so surfaces not moving on the ground is expected, not a fault. Arm first.
+
 ## RealFlight setup
 
 Once per RealFlight installation:
@@ -289,7 +318,26 @@ Once per RealFlight installation:
   RealFlight stops feeding the bridge the moment it loses focus.
 - Restart RealFlight after changing these.
 - Wired network or same-host only — WiFi cannot hold the ~250 Hz SOAP rate.
-- Leave the physics speed multiplier at 1.0; the bridge warns if it is not.
+- Leave the physics speed multiplier at 1.0; the bridge warns if it is not. Take that warning
+  as the diagnosis and stop reading the rest of the log, because a stalled physics clock
+  cascades into failures that all look like something else:
+
+  ```
+  WARNING: RealFlight physics speed multiplier is 0.00 (set it to 1.0)
+  WARNING: realtime factor 0.04 (physics s per wall s)
+  Preflight Fail: vertical velocity unstable / heading estimate not stable
+  ERROR [vehicle_magnetometer] MAG #0 failed:  TIMEOUT!
+  ERROR [vehicle_air_data]     BARO #0 failed:  TIMEOUT!
+  [flightaxis_bridge] ExchangeData failed, retrying ... / exiting
+  WARN  [simulator_mavlink] Failed sending mavlink message: Broken pipe   (x hundreds)
+  ```
+
+  Only the first line is a cause. PX4 timestamps the sensor stream with its own clock on
+  arrival, so a stopped physics clock means it integrates real time over a simulation that
+  is not advancing — hence the unstable-estimate failures. The sensors then time out, the
+  bridge gives up on RealFlight and exits, and every `Broken pipe` after that is just PX4
+  writing to a socket nobody holds. Fix the multiplier, un-pause the sim, and release the
+  model if it reports `*** RealFlight model is LOCKED ***`.
 
 Once per aircraft:
 
