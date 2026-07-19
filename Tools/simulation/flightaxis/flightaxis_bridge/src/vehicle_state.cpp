@@ -70,6 +70,82 @@ static double constrain(double v, double lo, double hi)
 	return (v < lo) ? lo : ((v > hi) ? hi : v);
 }
 
+/*
+ * SOUTHERN-HEMISPHERE / WESTERN-LONGITUDE CORRECTION FOR THE WMM LOOKUP.
+ *
+ * geo_mag_declination.cpp is a byte-identical copy of an old PX4 file and
+ * carries that file's rounding bug: get_table_data() finds the south-west grid
+ * corner with
+ *
+ *     float min_lat = int(lat / SAMPLING_RES) * SAMPLING_RES;
+ *
+ * int() truncates TOWARDS ZERO, not down. For lat = -37.73 that yields -30,
+ * which is NORTH of the query point, so the interpolation weight
+ * (lat - min_lat)/10 = -0.773 comes out negative and is then clamped to 0 by
+ * the constrain() on lat_scale. The result is that every latitude in
+ * (-40, -30] silently returns the value AT -30, and likewise for every other
+ * southern band and for all negative longitudes. Measured against the current
+ * PX4 world_magnetic_model at the user's field (-37.7304, 175.7438):
+ *
+ *     bridge   decl 16.57 deg   incl -55.85 deg   |B| 0.4985 G
+ *     PX4 WMM  decl 21.00 deg   incl -63.14 deg   |B| 0.5374 G
+ *
+ * i.e. 4.4 deg of declination, 7.3 deg of inclination and 7.2% of strength.
+ * The same comparison at Zurich agrees to 0.84 deg / 0.10 deg / 0.3% - the
+ * error is invisible at the default home and appears only south of the equator,
+ * which is why it survived this long.
+ *
+ * This matters because EKF2 does NOT use this table. Ekf::updateWorldMagneticModel()
+ * calls the modern get_mag_declination_degrees()/..._inclination_degrees()/
+ * ..._strength_gauss() at the live GPS position, and Ekf::getMagDeclination()
+ * feeds that declination into mag fusion. So the synthetic field we hand PX4
+ * encodes one declination while the estimator is simultaneously told the true
+ * one, leaving a constant heading disagreement that no amount of fusion can
+ * null out.
+ *
+ * The fix cannot live in geo_mag_declination.cpp - that file is a verbatim
+ * third-party copy and is owned elsewhere - so it is applied at the call site
+ * instead. Note that get_table_data() is EXACT when queried at a grid point:
+ * for any multiple of SAMPLING_RES, int() and floor() agree, both scales come
+ * out 0 or 1, and the raw table entry is returned. That makes it safe to use
+ * the existing accessors as a plain table read at the four surrounding corners
+ * and do the bilinear interpolation here, with a floor() that rounds the right
+ * way for both signs.
+ */
+static constexpr double MAG_SAMPLING_RES = 10.0;
+static constexpr double MAG_MIN_LAT = -60.0;
+static constexpr double MAG_MAX_LAT = 60.0;
+static constexpr double MAG_MIN_LON = -180.0;
+static constexpr double MAG_MAX_LON = 180.0;
+
+static double magTableLookup(float (*table_get)(float, float), double lat, double lon)
+{
+	// Outside the table's latitude span there is nothing to interpolate between;
+	// clamp to the edge rather than let the corner sampling straddle it.
+	lat = constrain(lat, MAG_MIN_LAT, MAG_MAX_LAT);
+	lon = constrain(lon, MAG_MIN_LON, MAG_MAX_LON);
+
+	// South-west corner, rounded DOWN (this is the actual fix), then held back
+	// one cell from the north/east edge so corner + SAMPLING_RES stays in range.
+	double lat0 = constrain(std::floor(lat / MAG_SAMPLING_RES) * MAG_SAMPLING_RES,
+				MAG_MIN_LAT, MAG_MAX_LAT - MAG_SAMPLING_RES);
+	double lon0 = constrain(std::floor(lon / MAG_SAMPLING_RES) * MAG_SAMPLING_RES,
+				MAG_MIN_LON, MAG_MAX_LON - MAG_SAMPLING_RES);
+
+	const double sw = table_get((float)lat0, (float)lon0);
+	const double se = table_get((float)lat0, (float)(lon0 + MAG_SAMPLING_RES));
+	const double nw = table_get((float)(lat0 + MAG_SAMPLING_RES), (float)lon0);
+	const double ne = table_get((float)(lat0 + MAG_SAMPLING_RES), (float)(lon0 + MAG_SAMPLING_RES));
+
+	const double lat_scale = constrain((lat - lat0) / MAG_SAMPLING_RES, 0.0, 1.0);
+	const double lon_scale = constrain((lon - lon0) / MAG_SAMPLING_RES, 0.0, 1.0);
+
+	const double south = sw + lon_scale * (se - sw);
+	const double north = nw + lon_scale * (ne - nw);
+
+	return south + lat_scale * (north - south);
+}
+
 // ISA pressure in hPa at geodetic altitude h. Used both for the running baro
 // in setFAData() and for the constructor's initial value, which MUST use the
 // same datum - see the note in the constructor.
@@ -127,15 +203,25 @@ VehicleState::VehicleState(double home_lat_deg, double home_lon_deg, double home
 	abs_pressure_nois = 0.05;
 	diff_pressure_nois = 0.01;
 
-	// WMM earth field at home (gauss), NED - same synthesis as FG bridge
-	float strength_ga = 0.01f * get_mag_strength(home_lat, home_lon);
-	float declination_rad = get_mag_declination(home_lat, home_lon) * (float)DEG2RAD;
-	float inclination_rad = get_mag_inclination(home_lat, home_lon) * (float)DEG2RAD;
+	// WMM earth field at home (gauss), NED - same synthesis as FG bridge, but
+	// through magTableLookup() rather than the accessors directly; see the note
+	// on that function for why the raw accessors are wrong south of the equator.
+	// The 0.01 is the table's own unit: it stores strength in centi-gauss
+	// (~50 at mid latitudes), so 0.01 * 50 = 0.5 G. The declaration comment in
+	// geo_mag_declination.h calling this "centi-Tesla" is simply wrong.
+	double strength_ga = 0.01 * magTableLookup(get_mag_strength, home_lat, home_lon);
+	double declination_rad = magTableLookup(get_mag_declination, home_lat, home_lon) * DEG2RAD;
+	double inclination_rad = magTableLookup(get_mag_inclination, home_lat, home_lon) * DEG2RAD;
 
-	float H = strength_ga * cosf(inclination_rad);
-	float Z = H * tanf(inclination_rad);
-	float X = H * cosf(declination_rad);
-	float Y = H * sinf(declination_rad);
+	// NED components. Z is positive DOWN, and tan(inclination) carries the sign:
+	// in the northern hemisphere inclination is positive and the field points
+	// into the ground (Z > 0); in the southern hemisphere it is negative and the
+	// field points up out of the ground (Z < 0). Nothing here needs a hemisphere
+	// special case - the sign falls out of the inclination.
+	double H = strength_ga * std::cos(inclination_rad);
+	double Z = H * std::tan(inclination_rad);
+	double X = H * std::cos(declination_rad);
+	double Y = H * std::sin(declination_rad);
 
 	mag_ned = Vector3d(X, Y, Z);
 	mag_body = mag_ned;
