@@ -100,6 +100,50 @@ param set-default COM_RC_IN_MODE 4
 # preferences, so they are not left to whatever is in parameters.bson.
 param set COM_FLTT_LOW_ACT 0
 
+# ...but COM_FLTT_LOW_ACT 0 is NOT sufficient on its own, and the reason is a
+# firmware bug rather than anything about this integration. Measured in SITL:
+# the aircraft lifted off, was forced into AUTO_LOITER 1.4 s later, sank back
+# from 0.62 m to 0.09 m, hovered there for exactly 5.00 s, and only then climbed
+# away. Reproduced a second time in the same flight, 5.01 s.
+#
+# batteryCheck.cpp:305-315 (rtlEstimateCheck) raises the
+# battery_low_remaining_time flag from "time-to-RTL >= battery time left". With
+# time_remaining_s stuck at 0.0 the comparison is true for ANY valid RTL
+# estimate, so the flag latches the instant rtl_time_estimate.valid goes high
+# while armed - 1 ms after, in the log. COM_FLTT_LOW_ACT does select the ACTION
+# for that flag, and 0 correctly selects Action::None. The action is then
+# promoted anyway:
+#
+#   framework.cpp:349-352  arms the pre-action delay for any action except
+#                          Action::Warn - Action::None is NOT excluded
+#   framework.cpp:484-489  promotes the pending action to Action::Hold while
+#                          that delay runs - Action::None is NOT excluded here
+#                          either
+#
+# So a failsafe configured to do nothing still holds the aircraft for
+# COM_FAIL_ACT_T seconds. Both guards list their exclusions explicitly and
+# simply omit None; upstream should exclude it in both places.
+#
+# COM_FAIL_ACT_T 0 takes the else branch at framework.cpp:357 and leaves
+# _current_delay at 0, so the Hold promotion never fires. THE TRADE, stated
+# plainly: this also removes the 5 s pilot-takeover grace period before every
+# OTHER failsafe acts, so a genuine failsafe now acts at once. That is the
+# lesser harm here - the grace period is being spent holding the aircraft for a
+# condition that does not exist - but it is a real change in behaviour and is
+# the first thing to put back if a genuine failsafe starts acting too eagerly.
+param set COM_FAIL_ACT_T 0
+
+# QGC reports the battery source as unset. BAT1_SOURCE defaults to 0 ("Power
+# Module"), which claims hardware that does not exist in SITL while the battery
+# actually arrives over MAVLink from the bridge. 1 = External is what the
+# parameter's own documentation describes for this case ("the system expects to
+# receive mavlink battery status messages", src/lib/battery/module.yaml:104-121).
+#
+# This is cosmetic and nothing more: MavlinkReceiver::handle_message_battery_status
+# publishes unconditionally and never reads BAT1_SOURCE, so the battery already
+# worked. It silences the QGC warning and makes the configuration honest.
+param set-default BAT1_SOURCE 1
+
 # Negative disables the pre-takeoff auto-disarm. rc.vtol_defaults does not set
 # it, so this would inherit the 10 s firmware default (commander_params.c:225)
 # and auto-disarm 10 s after arming if the aircraft has not left the ground -
