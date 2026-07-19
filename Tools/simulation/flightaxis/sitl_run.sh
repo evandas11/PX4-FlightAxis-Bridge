@@ -61,7 +61,24 @@ if [ -z "$fa_bridge_params" ]; then
 	exit 1
 fi
 
-"${build_path}/build_flightaxis_bridge/flightaxis_bridge" 0 "${FA_IP}" \
+bridge_bin="${build_path}/build_flightaxis_bridge/flightaxis_bridge"
+
+# Checked before backgrounding, for the same reason the argv is captured above:
+# a missing binary would otherwise produce one "No such file" line from the
+# subshell and then PX4 would block forever on TCP 4560, which reads as a
+# simulator hang rather than a missing build target.
+if [ ! -x "$bridge_bin" ]; then
+	echo "ERROR: bridge binary not found at $bridge_bin" >&2
+	echo "  Build it with:  ninja -C $build_path flightaxis_bridge" >&2
+	exit 1
+fi
+
+# A PX4_HITL_TRANSPORT left exported by a previous hitl_run.sh session would put
+# the bridge on a serial port / UDP socket while PX4 SITL waits on TCP 4560 -
+# again an unexplained hang. SITL is always the bridge's tcp-server default.
+export PX4_HITL_TRANSPORT=tcp-server
+
+"$bridge_bin" 0 "${FA_IP}" \
 	$fa_bridge_params &
 FA_BRIDGE_PID=$!
 

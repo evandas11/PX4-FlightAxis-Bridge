@@ -149,9 +149,14 @@ fi
 
 echo "FlightAxis setup"
 cd "${src_path}/Tools/simulation/flightaxis/flightaxis_bridge/"
-./FA_check.py "${FA_IP}" || { echo "RealFlight FlightAxis not reachable at ${FA_IP}:18083"; exit 1; }
+# Invoked via python3 rather than ./FA_check.py, matching sitl_run.sh: relying on
+# the exec bit and the shebang means a zip round-trip, a noexec mount or a
+# filesystem without permission bits produces "Permission denied" / "bad
+# interpreter", and the || branch would then misreport a working network as
+# unreachable.
+python3 ./FA_check.py "${FA_IP}" || { echo "RealFlight FlightAxis not reachable at ${FA_IP}:18083"; exit 1; }
 
-if ! fa_bridge_params=`./get_FAbridge_params.py "models/${model}.json"`; then
+if ! fa_bridge_params=`python3 ./get_FAbridge_params.py "models/${model}.json"`; then
 	echo "get_FAbridge_params.py failed for models/${model}.json" >&2
 	exit 1
 fi
@@ -175,6 +180,12 @@ export PX4_HITL_TRANSPORT="$TRANSPORT"
 export PX4_HITL_SERIAL_DEV="$SERIAL_DEV"
 export PX4_HITL_SERIAL_BAUD="$SERIAL_BAUD"
 export PX4_HITL_SENSOR_HZ="$SENSOR_HZ"
+# Exported with the default already applied so the bridge uses exactly the port
+# printed in the banner above, rather than re-deriving its own default.
+if [ "$TRANSPORT" = "udp" ]; then
+	export PX4_HITL_UDP_HOST
+	export PX4_HITL_UDP_PORT="${PX4_HITL_UDP_PORT:-14550}"
+fi
 
 echo "starting bridge (Ctrl-C to stop)"
 exec "$bridge_bin" 0 "${FA_IP}" $fa_bridge_params
