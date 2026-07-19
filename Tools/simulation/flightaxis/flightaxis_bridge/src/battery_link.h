@@ -154,6 +154,12 @@ private:
 	// model swap mid-session cannot carry a stale cell count or tank size over.
 	void adopt(Source s);
 
+	// Recursive least squares over (current, voltage) for this pack's open
+	// circuit voltage and internal resistance. Ported from PX4's Battery class
+	// so a simulated pack ages the same way a real one behind a power module
+	// does - see the comment on the definition.
+	void updateInternalResistance(double voltage_v, double current_a);
+
 	void send(double voltage_v, double current_a, double remaining,
 		  double discharged_mah, int cells, uint8_t batt_type,
 		  uint64_t now_us);
@@ -177,6 +183,20 @@ private:
 	// Low-passed open-circuit per-cell voltage driving `remaining`. Negative
 	// means "not seeded yet" - see the sag block in BatteryLink::update().
 	double _per_cell_filt{-1.0};
+
+	// Estimated per-cell internal resistance, and the RLS state behind it.
+	// Seeded from PX4's own initial guess and then driven by the data: holding
+	// it fixed is what pinned `remaining` at 1.0, because a fixed 5 mOhm/cell
+	// becomes a 1.35 V/cell correction at the 270 A this airframe draws, far
+	// wider than the 0.90 V/cell window the SoC map spans.
+	// 0.005 is PX4's own initial per-cell guess (battery.h:195, R_DEFAULT), kept
+	// literal here because the .cpp constant is not visible from this header.
+	double _cell_r_internal{0.005};
+	bool   _rls_init{false};
+	double _rls_ocv{0.0};		// pack open-circuit voltage estimate
+	double _rls_r{0.0};		// pack internal resistance estimate
+	double _rls_p00{0.0}, _rls_p01{0.0}, _rls_p10{0.0}, _rls_p11{0.0};
+	double _rls_p_norm{0.0};
 
 	// fuel: largest reading seen, taken as "full tank". Re-armed upwards on
 	// refuel / aircraft reset rather than latched, so a mid-session reset

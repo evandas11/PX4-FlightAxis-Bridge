@@ -62,17 +62,39 @@ constexpr uint64_t SEND_INTERVAL_US = 500000;
 constexpr double CELL_EMPTY_V = 3.30;
 constexpr double CELL_FULL_V  = 4.20;
 
-// Per-cell internal resistance used to undo load sag before the map above is
-// applied. See the sag block in update() for why this is not optional.
-//
-// PX4's own Battery class does exactly this (src/lib/battery/battery.cpp:213-236,
-// `_voltage_v + _current_a * _internal_resistance`), and defaults BAT1_R_INTERNAL
-// to -1 = estimate it online with RLS. There is no equivalent estimator here and
-// nothing to seed it from, so this is a fixed, deliberately CONSERVATIVE value:
-// 5 mOhm/cell is mid-range for the LiPo packs RealFlight models, and erring low
-// only means we under-correct - i.e. we stay closer to the old behaviour - rather
-// than inventing charge the pack does not have.
-constexpr double CELL_R_INTERNAL = 0.005;
+/*
+ * PER-CELL INTERNAL RESISTANCE, ESTIMATED ONLINE.
+ *
+ * The sag correction is `per_cell + I * R_cell`, which is exactly what PX4's
+ * own Battery class does (battery.cpp:220-231), and BAT_R_INTERNAL is likewise
+ * documented as a PER-CELL value (module.yaml:42-51). What PX4 does NOT do is
+ * leave that number fixed: BAT_R_INTERNAL defaults to -1, meaning "estimate it
+ * online", and battery.cpp:238-265 runs a recursive least-squares filter over
+ * (current, voltage) pairs to do so.
+ *
+ * A fixed guess was the original defect here. Held at 5 mOhm/cell it produced a
+ * 1.35 V/cell correction at the 270 A this quadplane actually draws - 10.8 V
+ * across an 8S pack - which is far larger than the 0.90 V/cell window the SoC
+ * map spans, so `remaining` pinned at 1.0 and the gauge stopped meaning
+ * anything. The failure is not the formula, it is asserting R for a pack nobody
+ * has measured.
+ *
+ * So estimate it, with the same algorithm and the same constants PX4 uses. The
+ * seed below is only a starting point now, not an answer.
+ */
+constexpr double CELL_R_DEFAULT = 0.005;	// battery.h:195, initial per-cell estimate
+constexpr double RLS_LAMBDA     = 0.95;		// battery.h:194, forgetting factor
+constexpr double RLS_R_COV      = 0.1;		// battery.h:197, per-cell R covariance
+constexpr double RLS_OCV_COV    = 1.5;		// battery.h:198, per-cell OCV covariance
+
+// Ceiling on the estimate, from BAT_R_INTERNAL's own declared max (module.yaml:51).
+// The estimator is fed simulator data and can be driven somewhere silly by a
+// pathological frame; this bounds the damage.
+constexpr double CELL_R_MAX = 0.2;
+
+// Below this the sag correction is meaningless and the regressor is degenerate
+// (current is the only excitation the estimator gets), so hold the estimate.
+constexpr double RLS_MIN_CURRENT_A = 1.0;
 
 // Time constant of the low-pass on the compensated per-cell voltage. The sag
 // correction handles the sustained component; this handles the spikes that
@@ -314,10 +336,14 @@ void BatteryLink::update(const FAState &fa, uint64_t now_us)
 		 * nearly full.
 		 *
 		 * Estimating open-circuit voltage costs one multiply and removes the
-		 * sustained component; the filter below removes what is left.
+		 * sustained component; the filter below removes what is left. The
+		 * resistance it multiplies is estimated from this pack's own behaviour
+		 * (see updateInternalResistance) rather than asserted.
 		 */
+		updateInternalResistance(voltage_v, current_a);
+
 		const double per_cell_raw = voltage_v / (double)_cell_count;
-		const double per_cell_ocv = per_cell_raw + current_a * CELL_R_INTERNAL;
+		const double per_cell_ocv = per_cell_raw + current_a * _cell_r_internal;
 
 		if (_per_cell_filt < 0.0 || dt_s <= 0.0) {
 			// first sample: seed rather than filter, so the reported SoC starts
@@ -459,6 +485,100 @@ void BatteryLink::update(const FAState &fa, uint64_t now_us)
 	send(voltage_v, current_a, remaining, _discharged_mah, cells, batt_type, now_us);
 }
 
+/*
+ * RECURSIVE LEAST SQUARES ON (CURRENT, VOLTAGE) -> (OCV, INTERNAL RESISTANCE).
+ *
+ * Ported from PX4's Battery::updateInternalResistanceEstimation
+ * (battery.cpp:238-265) with the same constants, so that a pack behaves the
+ * same way here as it would behind a real power module. Written out in scalars
+ * because the state is 2x1 and the covariance 2x2; pulling in a matrix library
+ * for that would obscure rather than clarify.
+ *
+ * Model: V = OCV - I*R, regressor x = [1, -I], state est = [OCV, R_pack].
+ *
+ * Two details are load-bearing and both are PX4's, not inventions:
+ *
+ *  - The covariance-norm gate. An update is accepted ONLY if it shrinks the
+ *    covariance. Without it a long hover at constant current - which is most of
+ *    a quadplane flight - is a degenerate regressor: every sample carries the
+ *    same information, and the filter happily drifts along the one direction
+ *    the data cannot constrain. When the update is rejected the OCV term is
+ *    still re-centred on the current reading, so the estimate keeps tracking
+ *    the pack draining without touching R.
+ *
+ *  - The forgetting factor 0.95, which lets R follow a pack warming up.
+ *
+ * Held below RLS_MIN_CURRENT_A because current is the only excitation there is:
+ * at zero current the regressor is [1, 0], which says nothing about R at all.
+ */
+void BatteryLink::updateInternalResistance(double voltage_v, double current_a)
+{
+	if (_cell_count < 1 || current_a < RLS_MIN_CURRENT_A) {
+		return;
+	}
+
+	if (!_rls_init) {
+		_rls_init  = true;
+		_rls_ocv   = voltage_v;
+		_rls_r     = CELL_R_DEFAULT * _cell_count;
+		_rls_p00   = RLS_OCV_COV * _cell_count;
+		_rls_p01   = 0.0;
+		_rls_p10   = 0.0;
+		_rls_p11   = RLS_R_COV * _cell_count;
+		_rls_p_norm = std::sqrt(_rls_p00 * _rls_p00 + 2.0 * _rls_p10 * _rls_p10 + _rls_p11 * _rls_p11);
+		return;
+	}
+
+	// x = [1, -I]
+	const double x1 = -current_a;
+
+	// P*x
+	const double px0 = _rls_p00 + _rls_p01 * x1;
+	const double px1 = _rls_p10 + _rls_p11 * x1;
+
+	// x'*P*x
+	const double xpx = px0 + x1 * px1;
+
+	const double denom = RLS_LAMBDA + xpx;
+
+	if (!(std::fabs(denom) > 1e-12)) {
+		return;
+	}
+
+	const double g0 = px0 / denom;
+	const double g1 = px1 / denom;
+
+	const double err = voltage_v - (_rls_ocv + x1 * _rls_r);
+
+	// x'*P (row)
+	const double xtp0 = _rls_p00 + x1 * _rls_p10;
+	const double xtp1 = _rls_p01 + x1 * _rls_p11;
+
+	const double p00 = (_rls_p00 - g0 * xtp0) / RLS_LAMBDA;
+	const double p01 = (_rls_p01 - g0 * xtp1) / RLS_LAMBDA;
+	const double p10 = (_rls_p10 - g1 * xtp0) / RLS_LAMBDA;
+	const double p11 = (_rls_p11 - g1 * xtp1) / RLS_LAMBDA;
+
+	const double p_norm = std::sqrt(p00 * p00 + 2.0 * p10 * p10 + p11 * p11);
+
+	if (std::isfinite(p_norm) && p_norm < _rls_p_norm) {
+		_rls_ocv    = _rls_ocv + g0 * err;
+		_rls_r      = _rls_r   + g1 * err;
+		_rls_p00    = p00;
+		_rls_p01    = p01;
+		_rls_p10    = p10;
+		_rls_p11    = p11;
+		_rls_p_norm = p_norm;
+
+		const double r_cell = _rls_r / (double)_cell_count;
+		_cell_r_internal = clamp(std::isfinite(r_cell) ? r_cell : 0.0, 0.0, CELL_R_MAX);
+
+	} else {
+		// Covariance did not improve: keep R, re-centre OCV on this sample.
+		_rls_ocv = voltage_v + _rls_r * current_a;
+	}
+}
+
 void BatteryLink::adopt(Source s)
 {
 	_source       = s;
@@ -469,6 +589,11 @@ void BatteryLink::adopt(Source s)
 	// pack, and a stale tank size mis-scales the new tank.
 	_cell_count     = 0;
 	_per_cell_filt  = -1.0;
+
+	// The resistance estimate belongs to the pack that was measured, not to
+	// whatever is loaded next. Re-seed rather than carry it over.
+	_cell_r_internal = CELL_R_DEFAULT;
+	_rls_init        = false;
 	_fuel_full_oz   = 0.0;
 	_discharged_mah = 0.0;
 	_last_voltage_v = 0.0;
