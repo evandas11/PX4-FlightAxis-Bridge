@@ -293,9 +293,48 @@ void VehicleState::setFAData(const FAState &fa, double dt_true)
 			      fa.m_accelerationBodyAY_MPS2,
 			      fa.m_accelerationBodyAZ_MPS2);
 
+	/*
+	 * A CRASHED MODEL REPORTS EXACTLY ZERO, AND ZERO IS NOT "NO READING".
+	 *
+	 * An accelerometer measures SPECIFIC FORCE, so (0,0,0) is not a neutral
+	 * value - it is the reading of an instrument in perfect free fall. A real
+	 * one never produces it: at rest it reads (0,0,-g). But RealFlight zeroes
+	 * m_accelerationBodyA{X,Y,Z} once the model breaks up, and reports
+	 * m_isTouchingGround = false for the wreck, so the ground override below
+	 * never ran and the zeros went to PX4 verbatim.
+	 *
+	 * Measured in log 09_57_12: for the 150 s the model sat crashed, every
+	 * sensor_accel sample was exactly (0.0047884, 0, 0) - one LSB - while the
+	 * gyro showed normal noise and ground truth vz was exactly 0. PX4 was being
+	 * told the aircraft had been falling at 1 g for two and a half minutes.
+	 * EKF2 integrated that against a static GPS and baro, which cost 317 vz
+	 * resets and swung the estimated vertical velocity +-12 m/s on an airframe
+	 * that was not moving. The land detector never fired either - its
+	 * vertical-movement test is defeated by the phantom velocity - so PX4 kept
+	 * the motors armed and saturated the whole time.
+	 *
+	 * That divergence is what makes a respawn violent. On the reset edge the
+	 * position re-anchor teleports GPS by up to 350 m and baro by ~20 m in a
+	 * single sample; EKF2 declares a velocity reset with delta_vz over 20 m/s,
+	 * and FlightTask::_checkEkfResetCounters (FlightTask.cpp:83-86) hands that
+	 * to _ekfResetHandlerVelocityZ, whose _smoothing.setCurrentVelocity() IS
+	 * the output setpoint. The climb-rate command is therefore overwritten with
+	 * the diverged estimate and the throttle stick is discarded entirely -
+	 * measured, -2.56 m/s commanded climb with the stick at -1.00.
+	 *
+	 * So: treat an exactly-zero triad as a missing reading rather than a
+	 * measurement, and fall through to the finite-difference path, which yields
+	 * (0,0,-g) for a stationary wreck. Testing all three against exact zero is
+	 * deliberate - it is RealFlight's sentinel, and a genuine sample is never
+	 * bit-exact zero on all three axes.
+	 */
+	const bool accel_absent = (fa.m_accelerationBodyAX_MPS2 == 0.0 &&
+				   fa.m_accelerationBodyAY_MPS2 == 0.0 &&
+				   fa.m_accelerationBodyAZ_MPS2 == 0.0);
+
 	// ... but on the ground RF accel is garbage - finite-difference override
 	// (yields exactly (0,0,-g) at rest)
-	if (fa.m_isTouchingGround) {
+	if (fa.m_isTouchingGround || accel_absent) {
 		// use the TRUE elapsed time: during a swallowed glitch dt is capped and
 		// would overstate the synthesised ground acceleration
 		Vector3d accel_ef = (velocity_ef - last_velocity_ef) / dt_true;
