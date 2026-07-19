@@ -36,6 +36,15 @@ param set EKF2_MULTI_IMU 1
 # suggested for it is outside the parameter's declared range (@min 1).
 param set-default COM_RC_IN_MODE 4
 
+# Negative disables the pre-takeoff auto-disarm. rc.vtol_defaults does not set
+# it, so this would inherit the 10 s firmware default (commander_params.c:225)
+# and auto-disarm 10 s after arming if the aircraft has not left the ground -
+# which a bench test of the lift/pusher ordering always hits, and which reads
+# like a bug rather than a timer. rc.fw_defaults and rc.sc_defaults already ship
+# -1 upstream for the same reason, so the plane gets this for free and only the
+# two multirotor-based airframes need it.
+param set-default COM_DISARM_PRFLT -1
+
 # NOTE: the motor failure detector cannot fire in v1.16 SITL, for any vehicle.
 # The inherited comment here (copied with the values from
 # 1040_gazebo-classic_standard_vtol) claimed SITL reports 0 A for every ESC.
@@ -46,8 +55,14 @@ param set-default COM_RC_IN_MODE 4
 # trip. FD_ACT_EN 0 and FD_ACT_MOT_TOUT 500 were therefore suppressing nothing
 # and have been removed: they are left at firmware defaults so that if upstream
 # ever fixes the SITL ESC current model, detection starts working here rather
-# than staying silently masked. Corollary: we currently get no motor-failure
-# detection in SITL at all.
+# than staying silently masked.
+# Corollary, with one exception: no ORGANIC motor failure can be detected in
+# SITL. Deliberate injection still can - "failure esc <n> wrong" routes through
+# FailureInjector::manipulateEscStatus (FailureDetector.cpp:151-154), which
+# scales the reported current by 0.1, and 0.1*(1 + 15c) < 2c does have solutions
+# (c > 0.2) - which is also exactly where the FD_ACT_MOT_THR 0.2 arming gate on
+# the same test opens. So leaving FD_ACT_EN at its default is not merely
+# harmless: it is what keeps that injection path usable to exercise the failsafe.
 
 # Actuator geometry (QGC Actuators tab) MUST match the "px4" output indices
 # in Tools/simulation/flightaxis/flightaxis_bridge/models/quadplane.json.

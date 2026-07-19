@@ -7,14 +7,34 @@
 
 . ${R}etc/init.d/rc.heli_defaults
 
-# RealFlight free-runs (no lockstep), GPS samples arrive fresh
+# RealFlight free-runs (no lockstep), GPS samples arrive fresh.
 # Forced with "param set": px4-rc.mavlinksim runs after this file and would
 # otherwise override the default back to 10 ms.
 param set EKF2_GPS_DELAY 0
 
-# rcS sets SDLOG_MODE 1 ("from boot until disarm"), so logging would stop at the
-# first disarm and never restart. 4 = "from first arm until last disarm".
+# rcS sets SDLOG_MODE 1 ("from boot until disarm"), which closes the log at the
+# FIRST disarm; the spec section 11 validation checklist spans several arm/disarm
+# cycles, so most of it -- including the groundtruth-vs-estimate check -- would
+# never reach a log. Mode 4 is "from 1st armed until shutdown". SDLOG_MODE is
+# @reboot_required, so this has to be a startup default, not a pxh> command.
 param set-default SDLOG_MODE 4
+
+# Only IMU instance 0 is ever supplied: the bridge sends HIL_SENSOR with id = 0,
+# so SimulatorMavlink only ever fills _px4_accel[0]/_px4_gyro[0]. px4-rc.mavlinksim
+# asks for 3, which leaves two EKF instances running on dead sensors.
+# Forced with "param set": px4-rc.mavlinksim runs after this file and would
+# otherwise override the default back to 3. Note 0 is not an alternative --
+# EKF2.cpp clamps EKF2_MULTI_IMU to a minimum of 1 whenever SENS_IMU_MODE is 0.
+param set EKF2_MULTI_IMU 1
+
+# Headless runs (QGC optional) have no manual control source at all. Value 4
+# ("ignore any stick input") is the only value that skips the RC-loss failsafe;
+# rcS's default of 1 does not. Without this, RC-loss failsafe is avoided only by
+# the _manual_control_lost_at_arming fallback, which stops applying if manual
+# control is ever briefly present. NAV_RCL_ACT is deliberately left at its
+# firmware default: it is unreachable once COM_RC_IN_MODE is 4, and the value 0
+# suggested for it is outside the parameter's declared range (@min 1).
+param set-default COM_RC_IN_MODE 4
 
 # Negative disables the pre-takeoff auto-disarm. rc.heli_defaults sets 60 s,
 # which cuts a bench test of the swash/tail response short and reads like a bug.
@@ -193,6 +213,9 @@ param set-default CA_HELI_YAW_CCW 0
 # ArduPilot's shipped helicopter tuning (AC_AttitudeControl_Heli.h:10-22),
 # which uses the same normalised convention as PX4 (torque in -1..1 per rad/s):
 # roll/pitch P 0.024 I 0.15 D 0.001 FF 0.15, yaw P 0.18 I 0.12 D 0.003 FF 0.024.
+# The values below are those rounded to two significant figures (P 0.024 -> 0.025,
+# yaw FF 0.024 -> 0.02); the difference is far inside the retuning these need
+# anyway, so do not read the exact digits as meaningful.
 # That also satisfies the PX4 helicopter guidance that P stays well below FF -
 # a heli's swash gives a large, fast, near-linear torque response, so the loop
 # is feed-forward dominant and a big P term just chases rotor phase lag.
@@ -209,5 +232,9 @@ param set-default MC_YAWRATE_P 0.18
 param set-default MC_YAWRATE_I 0.12
 param set-default MC_YAWRATE_D 0.003
 param set-default MC_YAWRATE_FF 0.02
+# Raised from the 0.30 firmware default: the I gains above (0.15 roll/pitch,
+# 0.12 yaw) are large next to the multirotor defaults because a heli's trim
+# offsets are, and 0.30 would clip the integrator before it has taken up the
+# steady tail torque and swash trim.
 param set-default MC_RR_INT_LIM 0.4
 param set-default MC_YR_INT_LIM 0.4

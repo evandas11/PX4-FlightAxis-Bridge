@@ -18,15 +18,7 @@ if(ENABLE_LOCKSTEP_SCHEDULER STREQUAL "no")
 		BUILD_ALWAYS 1
 	)
 
-	# flightaxis targets
-	set(models
-		plane
-		quad
-		quadplane
-		heli
-	)
-
-	# find corresponding airframes
+	# find the airframes
 	file(GLOB flightaxis_airframes
 		RELATIVE ${PX4_SOURCE_DIR}/ROMFS/px4fmu_common/init.d-posix/airframes
 		${PX4_SOURCE_DIR}/ROMFS/px4fmu_common/init.d-posix/airframes/*_flightaxis_*
@@ -40,7 +32,37 @@ if(ENABLE_LOCKSTEP_SCHEDULER STREQUAL "no")
 	endforeach()
 	list(REMOVE_DUPLICATES flightaxis_airframes)
 
-	# default flightaxis target
+	# Derive the model list from the airframes rather than maintaining it by
+	# hand alongside them, the way gz_bridge/CMakeLists.txt derives its own.
+	# The hand-written list could disagree with the glob in both directions:
+	# an airframe with no list entry silently got no target at all (no warning,
+	# because the old loop only ever iterated the list), and a list entry with
+	# no airframe warned but still produced a target that could not launch.
+	# Deriving removes the first failure mode outright and makes the second
+	# unrepresentable. The remaining consistency check that is NOT implied by
+	# the glob is the model JSON, so that one is still checked explicitly below.
+	set(models)
+
+	foreach(flightaxis_airframe IN LISTS flightaxis_airframes)
+		string(REGEX REPLACE ".*_flightaxis_" "" airframe_model_only ${flightaxis_airframe})
+		list(APPEND models ${airframe_model_only})
+	endforeach()
+
+	list(REMOVE_DUPLICATES models)
+
+	if(NOT models)
+		message(WARNING "flightaxis: no *_flightaxis_* airframes found, no targets generated")
+	endif()
+
+	# Default flightaxis target. The model is hardcoded rather than derived,
+	# because "the default aircraft" is a policy choice, not whatever sorts
+	# first. Deriving ${models} from the glob means the plane airframe is no
+	# longer guaranteed to exist, so say so at configure time instead of
+	# failing at launch with an unresolvable PX4_SIM_MODEL.
+	if(NOT "plane" IN_LIST models)
+		message(WARNING "flightaxis: default target references model 'plane' but no *_flightaxis_plane airframe exists")
+	endif()
+
 	add_custom_target(flightaxis
 		COMMAND ${PX4_SOURCE_DIR}/Tools/simulation/flightaxis/sitl_run.sh $<TARGET_FILE:px4> "plane" ${PX4_SOURCE_DIR} ${PX4_BINARY_DIR}
 		WORKING_DIRECTORY ${SITL_WORKING_DIR}
@@ -57,26 +79,12 @@ if(ENABLE_LOCKSTEP_SCHEDULER STREQUAL "no")
 			message(WARNING "flightaxis missing model JSON: ${PX4_SOURCE_DIR}/Tools/simulation/flightaxis/flightaxis_bridge/models/${model}.json")
 		endif()
 
-		# match model to airframe
-		set(airframe_model_only)
-		set(airframe_sys_autostart)
-		set(flightaxis_airframe_found)
-		foreach(flightaxis_airframe IN LISTS flightaxis_airframes)
-
-			string(REGEX REPLACE ".*_flightaxis_" "" airframe_model_only ${flightaxis_airframe})
-			string(REGEX REPLACE "_flightaxis_.*" "" airframe_sys_autostart ${flightaxis_airframe})
-
-			if(model STREQUAL ${airframe_model_only})
-				set(flightaxis_airframe_found ${flightaxis_airframe})
-				break()
-			endif()
-		endforeach()
-
-		if(flightaxis_airframe_found)
-			#message(STATUS "flightaxis model: ${model} (${airframe_model_only}), airframe: ${flightaxis_airframe_found}, SYS_AUTOSTART: ${airframe_sys_autostart}")
-		else()
-			message(WARNING "flightaxis missing model: ${model} (${airframe_model_only}), airframe: ${flightaxis_airframe_found}, SYS_AUTOSTART: ${airframe_sys_autostart}")
-		endif()
+		# No "does this model have an airframe" search any more: ${models} is
+		# built from the airframe glob above, so the answer is yes by
+		# construction. The SYS_AUTOSTART id is not needed here either:
+		# sitl_run.sh only exports PX4_SIM_MODEL=flightaxis_${model}, and rcS
+		# recovers the id from the airframe filename at boot by matching
+		# ^[0-9]+_${PX4_SIM_MODEL}$ against the installed airframes (rcS:56).
 
 		add_custom_target(flightaxis_${model}
 			COMMAND ${PX4_SOURCE_DIR}/Tools/simulation/flightaxis/sitl_run.sh $<TARGET_FILE:px4> ${model} ${PX4_SOURCE_DIR} ${PX4_BINARY_DIR}
