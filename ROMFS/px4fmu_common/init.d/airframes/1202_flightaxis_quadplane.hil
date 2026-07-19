@@ -225,10 +225,82 @@ param set-default MC_ROLLRATE_P 0.3
 param set-default MC_YAW_P 1.6
 param set-default MC_YAWRATE_P 0.3
 
-param set-default MIS_TAKEOFF_ALT 10
+# Was 10, copied from 1040_gazebo-classic_standard_vtol. 10 m is below
+# VT_QC_T_ALT_LOSS (20 m, see below): a quad-chute for "loss of altitude during
+# transition" cannot fire before the aircraft has already descended through the
+# ground, so the protection that is supposed to save the airframe is
+# unreachable at the altitude this parameter picks to transition from.
+# rc.vtol_defaults ships 20, which is exactly VT_QC_T_ALT_LOSS and leaves zero
+# recovery room. 30 puts the whole quad-chute band plus a margin above terrain.
+param set-default MIS_TAKEOFF_ALT 30
 param set-default NAV_ACC_RAD 5
 
+param set-default VT_TYPE 2
+
+# Forward thrust in hover to counter wind-induced pitch-down. Kept from the
+# reference airframe: it is a hover-mode behaviour and is not implicated in
+# either transition failure (it is gated on the demanded pitch being below
+# VT_PITCH_MIN and only runs in MC mode).
 param set-default VT_FWD_THRUST_EN 4
 param set-default VT_FWD_THRUST_SC 1
-param set-default VT_F_TRANS_THR 0.75
-param set-default VT_TYPE 2
+
+# ---------------------------------------------------------------------------
+# FRONT TRANSITION. The values below replace the block copied verbatim from
+# 1040_gazebo-classic_standard_vtol. That airframe describes one specific
+# simulated aircraft with a deliberately over-powered pusher; a RealFlight
+# model is a different aircraft, and the copied values produced two distinct
+# quad-chutes in real flight ("loss of altitude during transition", and
+# "transition timeout").
+#
+# 1. LIFT-MOTOR HANDOFF WINDOW (VT_ARSP_BLEND -> VT_ARSP_TRANS).
+#    standard.cpp:222-228 computes the multirotor weight as
+#        mc_weight = 1 - |CAS - VT_ARSP_BLEND| / (VT_ARSP_TRANS - VT_ARSP_BLEND)
+#    and standard.cpp:339 applies it straight to the lift-motor thrust
+#    setpoint. With the inherited defaults 8 and 10 that denominator is 2 m/s:
+#    the four lift motors go from FULL to ZERO across two metres per second of
+#    acceleration - well under a second - and the handoff completes at 10 m/s,
+#    which is exactly FW_AIRSPD_MIN (performance_model_params.c:201) and only
+#    1.4x FW_AIRSPD_STALL (7 m/s, :182). The wing is therefore handed the whole
+#    aircraft at minimum flying speed with no margin, and any model heavier
+#    than the Gazebo reference sinks. That is the "loss of altitude during
+#    transition" quad-chute, and it is a parameter defect rather than a
+#    consequence of the battery/compass faults.
+#    13 m/s sits between FW_AIRSPD_MIN 10 and FW_AIRSPD_TRIM 15
+#    (performance_model_params.c:167), i.e. a real flying speed rather than a
+#    stall-margin speed, and widens the handoff window from 2 m/s to 5 m/s.
+param set-default VT_ARSP_BLEND 8
+param set-default VT_ARSP_TRANS 13
+
+# 2. TRANSITION THRUST. The reference value 0.75 throws away a quarter of the
+#    pusher on an aircraft whose thrust-to-weight is unknown. 1.0 is the
+#    firmware default (vtol_att_control_params.c:102). Nothing is gained by
+#    accelerating slowly here - the transition is the one phase where full
+#    forward thrust is unambiguously wanted - and the timeout below is scored
+#    on how fast airspeed builds.
+param set-default VT_F_TRANS_THR 1.0
+
+# 3. PUSHER RAMP. Not set by the reference airframe, so it inherited the 0.33/s
+#    firmware default (standard_params.c:107). At 0.33/s reaching
+#    VT_F_TRANS_THR 1.0 takes 3.0 s - half of the VT_F_TR_OL_TM budget below is
+#    spent before the pusher is even at full throttle. 1.0/s reaches full in
+#    1 s, still a ramp rather than a step, and returns that time to the budget.
+param set-default VT_PSHER_SLEW 1.0
+
+# 4. TIMEOUT BUDGET. vtol_type.cpp:331-341 declares a transition timeout by two
+#    independent tests: airspeed below VT_ARSP_BLEND after VT_F_TR_OL_TM, or
+#    total time past VT_TRANS_TIMEOUT. The first (6 s default) is the one the
+#    real flight tripped. 8 s and 20 s keep the same structure with room for a
+#    heavier model and for the higher VT_ARSP_TRANS above; VT_TRANS_TIMEOUT
+#    must stay comfortably greater than VT_F_TR_OL_TM for the airspeed test to
+#    remain the meaningful one.
+param set-default VT_F_TR_OL_TM 8
+param set-default VT_TRANS_TIMEOUT 20
+
+# NOT CHANGED, deliberately, having been checked:
+#  - VT_ELEV_MC_LOCK: only ever read in MC_MODE (standard.cpp:323). Control
+#    surfaces are fully live throughout TRANSITION_TO_FW (standard.cpp:342-344),
+#    so this cannot contribute to altitude loss during a front transition.
+#  - VT_B_DEC_MSS / VT_B_TRANS_DUR / VT_B_TRANS_RAMP: back-transition only.
+#    Both logged failures were front transitions.
+#  - VT_QC_T_ALT_LOSS: left at the 20 m firmware default. It is the detector,
+#    not the fault; MIS_TAKEOFF_ALT above is what makes it usable.
