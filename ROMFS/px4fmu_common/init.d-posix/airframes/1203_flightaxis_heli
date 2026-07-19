@@ -41,25 +41,34 @@ param set-default COM_RC_IN_MODE 4
 param set-default COM_DISARM_PRFLT -1
 
 #
-# KNOWN SCALING DEFECT IN THE BRIDGE (not fixable from this file).
+# SWASH DEMIX NORMALISATION (handled in the bridge - nothing to do here).
 #
 # flightaxis_bridge.cpp buildChannels() converts each bipolar swash servo with
 # out = (v+1)/2 and only THEN runs HeliDemix on those already-remapped values.
-# Substituting ch_i = (s_i+1)/2 into roll=s1-s2, pitch=(s1+s2)/2-s3 halves both:
-# a full-scale command should reach RealFlight 1.0 (gain 0.5 about the 0.5
-# centre), but roll arrives at gain 0.866 and pitch at 0.750. So relative to a
-# 1:1 mapping the demix OVER-drives roll by 1.732x and pitch by 1.500x;
-# collective is exactly right at 0.5. Consequence: RealFlight cyclic saturates
-# at only +-0.577 of commanded roll torque and +-0.667 of pitch.
-# Confirmed empirically, not just by derivation - commanding 3 rad/s with
-# FF 0.1 (torque 0.3) measured rf0 = 0.7600 and rf1 = 0.7250, exactly
-# 0.866*0.3+0.5 and 0.75*0.3+0.5.
-# The fix belongs in the bridge, as roll_rate/1.732 and pitch_rate/1.500
-# (NOT /0.866 and /0.75 - that recovers raw torque and clips at half command).
-# The rate gains below are deliberately NOT detuned to hide this: compensating
-# a scaling bug with control gains would leave them wrong once it is fixed.
-# Until it is, expect roll to feel ~1.7x and pitch ~1.5x hotter than the gains
-# suggest, and roll hotter than pitch.
+# Substituting ch_i = (s_i+1)/2 into roll=s1-s2 and pitch=(s1+s2)/2-s3 halves
+# both, so the raw demix arrives at gain 0.866 on roll and 0.750 on pitch where
+# RealFlight wants 0.5 about the 0.5 centre. Left alone that would over-drive
+# roll by 1.732x and pitch by 1.500x, saturating the RealFlight cyclic at only
+# +-0.577 of commanded roll torque and +-0.667 of pitch.
+#
+# The bridge now divides both back out - flightaxis_bridge.cpp:314-318 defines
+# HELI_ROLL_GAIN 1.732 and HELI_PITCH_GAIN 1.500 and applies them as divisors,
+# giving 0.866/1.732 = 0.750/1.500 = exactly 0.5 on both axes. So the cyclic is
+# 1:1: a full-scale roll or pitch command reaches RealFlight 1.0, and the
+# constrain() on lines 321-322 clips a saturating command cleanly rather than
+# wrapping. Collective is (s1+s2+s3)/3, already exactly 0.5, and is deliberately
+# left undivided.
+#
+# CONSEQUENCES FOR THIS FILE:
+#  - Do NOT detune the rate gains below to compensate for cyclic scaling. There
+#    is nothing left to compensate; the axes are 1:1 and roll is no longer hot
+#    relative to pitch. (This is why they were never detuned in the first place:
+#    hiding a scaling error in control gains would have left them wrong exactly
+#    now, when the scaling was fixed.)
+#  - The 1.732 and 1.500 constants are NOT universal - they are derived from the
+#    CA_SP0_ANG* geometry set below being 300/60/180. Changing those angles
+#    changes the raw demix gains and silently invalidates the bridge constants,
+#    breaking the decoupling in both files at once. Change neither alone.
 #
 
 # Actuator geometry (QGC Actuators tab) MUST match the "px4" output indices
@@ -209,7 +218,11 @@ param set-default CA_HELI_YAW_CCW 0
 # Rate controller. 16001_helicopter ships P=I=D=0 with FF only, but its own
 # comment says that is a bring-up state to be tuned afterwards - it leaves the
 # rate loops open, so any trim offset or disturbance integrates uncorrected and
-# the model diverges shortly after liftoff. These gains instead follow
+# the AIRCRAFT'S ATTITUDE diverges shortly after liftoff. (Everywhere else in
+# this file "the model" means the RealFlight aircraft definition, so it is
+# spelled out here; this is a flight-dynamics divergence, and unrelated to the
+# demix divergence heli.json warns about on a held swash channel.)
+# These gains instead follow
 # ArduPilot's shipped helicopter tuning (AC_AttitudeControl_Heli.h:10-22),
 # which uses the same normalised convention as PX4 (torque in -1..1 per rad/s):
 # roll/pitch P 0.024 I 0.15 D 0.001 FF 0.15, yaw P 0.18 I 0.12 D 0.003 FF 0.024.

@@ -972,7 +972,20 @@ int main(int argc, char **argv)
 		// Fix it the way the restart branch already does: rebase the epoch onto
 		// the clock we have ALREADY exported, so the next frame resumes at
 		// exactly time_now_us, and skip glitch compensation for this frame.
-		if (keepalive_active) {
+		//
+		// The physics-time test is what makes "leaving" mean leaving. Branch 0
+		// runs before branch 2, so a keep-alive driven FROM branch 2 (a stalled
+		// physics clock) would otherwise be unwound by this rebase on the very
+		// next loop iteration - and since the rebase also clears stall_since_us,
+		// the stall would have to be re-detected from scratch each time. That
+		// throttles the keep-alive from ~1 kHz to one sample per
+		// STALL_TIMEOUT_US: measured against `freeze 12`, HIL_SENSOR arrived
+		// every ~0.2 s, leaving sensor_baro up to 0.80 s stale against a 1 s
+		// arming-check timeout, and PX4 still logged MAG/BARO TIMEOUT.
+		//
+		// A keep-alive is only over once RealFlight produces a physics frame we
+		// have not already consumed. Until then there is nothing to rebase onto.
+		if (keepalive_active && state.m_currentPhysicsTime_SEC > last_time_s) {
 			keepalive_active = false;
 			// the paused window is not a realtime-factor problem; don't warn
 			rtf_skip_sample = true;
