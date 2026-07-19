@@ -349,6 +349,45 @@ static void reportModelHealth(ModelHealth &prev, const FAState &state)
 }
 
 /*
+ * Seed the persistent channels[] with the state a DISARMED aircraft should be
+ * in: each mapped slot at its own "disarm" value, everything else at
+ * UnmappedDefault. A hold-last row (disarm == -1) has no value of its own, so
+ * it gets 0.5 - neutral for a bipolar surface, and the only defensible guess
+ * for a slot whose whole configuration is "keep whatever was there".
+ *
+ * Called twice, and the second call is the one that matters. At startup this is
+ * just initialisation. It is called AGAIN on the RealFlight reset edge
+ * (spacebar respawn), because otherwise nothing in the pipeline ever clears
+ * channels[] and a hold-last slot carries its PRE-CRASH value across the
+ * respawn and holds it indefinitely: measured against the mock, a plane reset
+ * after a nose-up divergence came back with rf1 (elevator) pinned at 0.0 - full
+ * deflection - on an aircraft the pilot was looking at sitting still on the
+ * runway, and it stayed there through the disarm. The respawn is precisely the
+ * moment the previous flight's state stops being a description of anything, so
+ * that is where it has to go.
+ *
+ * This CANNOT disarm anything and deliberately does not try. It only rewrites
+ * the values the bridge sends to RealFlight. If PX4 is still armed and still
+ * commanding, the very next buildChannels() overwrites every mapped slot with
+ * live output on the first frame after the reset flag clears - the seed is what
+ * is on the wire during the reset, not a new policy about arming. Whether the
+ * aircraft is armed stays where it belongs, with the pilot.
+ */
+static void seedDisarmChannels(const ChannelMap *maps, int nmaps, double unmapped_default,
+			       double channels[RF_CHANNELS])
+{
+	for (int i = 0; i < RF_CHANNELS; i++) {
+		channels[i] = constrain(unmapped_default, 0.0, 1.0);
+	}
+
+	for (int i = 0; i < nmaps; i++) {
+		if (maps[i].rf >= 0 && maps[i].rf < RF_CHANNELS) {
+			channels[maps[i].rf] = (maps[i].disarm >= 0.0) ? constrain(maps[i].disarm, 0.0, 1.0) : 0.5;
+		}
+	}
+}
+
+/*
  * Build the 12 RealFlight channel values (0..1) from the latest
  * HIL_ACTUATOR_CONTROLS through the JSON channel map, then apply the
  * Rev4Servos / HeliDemix options, in that order.
@@ -755,15 +794,7 @@ int main(int argc, char **argv)
 	double channels[RF_CHANNELS];
 	double tx_channels[RF_CHANNELS];
 
-	for (int i = 0; i < RF_CHANNELS; i++) {
-		channels[i] = constrain(unmapped_default, 0.0, 1.0);
-	}
-
-	for (int i = 0; i < nmaps; i++) {
-		if (maps[i].rf >= 0 && maps[i].rf < RF_CHANNELS) {
-			channels[maps[i].rf] = (maps[i].disarm >= 0.0) ? constrain(maps[i].disarm, 0.0, 1.0) : 0.5;
-		}
-	}
+	seedDisarmChannels(maps, nmaps, unmapped_default, channels);
 
 	// timing state
 	double initial_time_s = 0.0;		// physics-time epoch capture
@@ -1116,6 +1147,28 @@ int main(int argc, char **argv)
 			// re-anchors via VehicleState's offset_captured flag.
 			if (state.m_resetButtonHasBeenPressed) {
 				vehicle.invalidatePositionOffset();
+
+				// Drop the PREVIOUS FLIGHT's channel state for the same
+				// reason the position anchor is dropped: after a respawn it
+				// describes an aircraft that no longer exists. Without this,
+				// hold-last slots keep whatever the crash left them at -
+				// measured, a fully deflected elevator - on an aircraft the
+				// pilot is watching sit still on the runway.
+				//
+				// Alongside invalidatePositionOffset() rather than inside the
+				// reinject throttle below, and for the same reason: the SOAP
+				// storm is what needs rate limiting, re-seeding an array does
+				// not. It is idempotent, so running it on every iteration
+				// while the flag is high is free and keeps the state clean for
+				// however long RealFlight holds the flag.
+				//
+				// Not a disarm, and not a substitute for one. buildChannels()
+				// overwrites every mapped slot from live PX4 output on the
+				// first frame after the flag clears, so if PX4 is still armed
+				// and still commanding throttle, throttle comes straight back.
+				// Disarming remains the pilot's action - see the report in
+				// RUNNING.md on why PX4 may refuse it for several seconds.
+				seedDisarmChannels(maps, nmaps, unmapped_default, channels);
 			}
 
 			if (last_reinject_us == 0 || now_us - last_reinject_us >= REINJECT_INTERVAL_US) {
