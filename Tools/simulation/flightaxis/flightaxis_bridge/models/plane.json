@@ -2,7 +2,7 @@
     "Comment":        "Standard fixed-wing on a RealFlight plane model (conventional RealFlight fixed-wing channel order: rf0=aileron, rf1=elevator, rf2=throttle, rf3=rudder). The \"px4\" values are HIL_ACTUATOR_CONTROLS.controls[] indices and MUST match PWM_MAIN_FUNC* in ROMFS/px4fmu_common/init.d-posix/airframes/1200_flightaxis_plane: controls[0]=throttle motor [0,1], [1]=aileron left, [2]=aileron right, [3]=elevator, [4]=rudder (surfaces are [-1,1]).",
     "AileronComment": "The airframe declares split ailerons (CA_SV_CS0=left -> controls[1], CA_SV_CS1=right -> controls[2]) but RealFlight models normally expect a single mixed aileron channel, so only the left aileron is mapped here - the two allocator outputs carry equal magnitude and opposite sign, so one of them drives a mixed channel without loss. If your RF model drives the ailerons independently, add a row mapping the opposite aileron to whichever spare slot that model uses, e.g. {\"rf\": 5, \"px4\": 2, \"scale\": \"bipolar\", \"reverse\": true}.",
     "RfModel":        "informational only - aircraft is selected inside RealFlight",
-    "Options":        ["ResetPosition"],
+    "Options":        ["ResetPosition", "SilenceFPS"],
     "Channels": [
         {"rf": 0, "px4": 1, "scale": "bipolar",  "reverse": false, "comment": "aileron  <- controls[1] aileron left"},
         {"rf": 1, "px4": 3, "scale": "bipolar",  "reverse": true,  "comment": "elevator <- controls[3]"},

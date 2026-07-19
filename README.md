@@ -335,7 +335,7 @@ Other keys:
 | `ResetPosition` | issue `ResetAircraft` on startup, so every run begins from a known state. On by default in all four shipped models. |
 | `Rev4Servos` | swap RealFlight channels 1–4 with 5–8 wholesale, for RF models built that way. **Do not combine with an already-reordered map** such as `quadplane.json` — you would double-swap. |
 | `HeliDemix` | convert the three swash servo outputs back into the roll/pitch/collective triple RealFlight expects (`roll=(s1−s2)/1.732`, `pitch=((s1+s2)/2−s3)/1.5`, `col=(s1+s2+s3)/3`). The two divisors normalise the raw differences to unit gain — without them the cyclic saturates at 0.577 of commanded roll and 0.667 of pitch. They are exact only for the swash geometry `1203_flightaxis_heli` forces via `CA_SP0_ANG*` = 300/60/180, which is why that airframe pins the angles and the arm lengths. |
-| `SilenceFPS` | suppress the periodic `exchanges=… rtf=… glitches=…` line on stderr. Off in the shipped models: that line carries the exchange rate, the realtime factor and the glitch count, which are the first things to look at when a session misbehaves. Set it if you are logging a long run and the once-a-second line is in the way. |
+| `SilenceFPS` | suppress the periodic `exchanges=… rtf=… glitches=…` line on stderr. **On in all four shipped models** — it prints once a second forever and buries everything else in the terminal. The alarms still print: each swallowed glitch gets its own `glitch 0.62s` line and an out-of-range realtime factor still warns, both independently of this option. Drop it from `Options` if you want the running heartbeat back. |
 
 Full derivation, per-model tables, and the heli traps: spec §5.
 

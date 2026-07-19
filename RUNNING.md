@@ -640,11 +640,11 @@ Before this the model deliberately sees nothing.
 ```
 [flightaxis_bridge] exchanges=248.3/s loop=612.7/s avg=249.1 FPS rtf=1.00 glitches=0
 ```
-↑ Printed every 1000 bridge frames. This is the first line to read when a session
-misbehaves: it carries the exchange rate, the realtime factor and the glitch count together.
-If you are capturing a long run and want it out of the way, add `"SilenceFPS"` to `Options` in
-`models/<name>.json` — individual `glitch 0.62s` lines and the out-of-range `rtf` warning still
-print, so you keep the alarms and lose only the heartbeat.
+↑ Printed every 1000 bridge frames. **The shipped models set `SilenceFPS`, so you will not
+see this line** — once a second, forever, it buries everything else in the terminal. You lose
+only the heartbeat, not the alarms: each swallowed glitch still prints its own `glitch 0.62s`
+line and an out-of-range realtime factor still warns. To watch the rates live, drop
+`"SilenceFPS"` from `Options` in `models/<name>.json`.
 
 Read it as:
 
