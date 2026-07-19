@@ -443,8 +443,20 @@ int PX4Communicator::InitTcpServer(int portOffset)
         std::cerr<<"PX4 Communicator: listen failed: " << strerror(errno) << std::endl;
     }
 
-    sleep(5);
-
+    // No sleep here. listen() has already been called, so the kernel completes
+    // PX4's TCP handshake into the backlog the moment PX4 connects, whether or
+    // not this thread has reached accept() yet - and accept() blocks until a
+    // connection is there regardless. A sleep before it therefore synchronises
+    // nothing; it only guarantees that PX4 sits on an established socket with
+    // no data on it for that whole interval.
+    //
+    // That is not free: simulator_mavlink polls its socket with a 1000 ms
+    // timeout and logs "ERROR [simulator_mavlink] poll timeout 0, <errno>" on
+    // every expiry (SimulatorMavlink.cpp:1192-1198), so a 5 s sleep prints
+    // roughly five of those errors on every single startup. They are pure
+    // artefacts of this delay, but they are indistinguishable in the log from
+    // the same error raised by a genuine mid-flight frame stall, which is a
+    // real fault worth noticing. Inherited from PX4-FlightGear-Bridge.
     unsigned int px4_addr_len=sizeof(px4_mavlink_addr);
     while(true)
     {
