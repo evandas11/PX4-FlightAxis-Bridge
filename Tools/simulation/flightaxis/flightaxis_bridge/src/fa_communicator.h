@@ -77,6 +77,15 @@ public:
     // Startup sequence, exact order: RestoreOriginalControllerDevice -> (ResetAircraft if
     // resetPosition) -> InjectUAVControllerInterface. Returns true on success.
     bool startController(bool resetPosition);
+    // Shutdown counterpart of startController(): deselect our channels and send
+    // RestoreOriginalControllerDevice, so RealFlight hands the model back to the
+    // physical transmitter instead of leaving our injected controller attached
+    // with nobody driving it.
+    //
+    // Idempotent (a second call is a no-op) and time-bounded: every step uses a
+    // short timeout and failures are ignored, because a bridge that refuses to
+    // exit is worse than one that leaves RealFlight injected. Main thread only.
+    void releaseController();
     bool controllerStarted() const;
     void markNeedsRestart();                   // next exchange/start must re-run startup
 
@@ -88,8 +97,12 @@ private:
     void socketCreator();
     // take the parked socket (blocks up to timeout_ms for the creator thread); -1 on timeout
     int takeSocket(uint32_t timeout_ms);
-    // send one SOAP request on a fresh socket; returns the socket fd or -1 on failure
-    int soapRequestStart(const char *action, const char *body);
+    // send one SOAP request on a fresh socket; returns the socket fd or -1 on failure.
+    // socket_timeout_ms bounds the wait for the creator thread's parked socket;
+    // quiet suppresses the "no connection to RealFlight" line (used on the
+    // shutdown path, where an absent RealFlight is expected and not an error).
+    int soapRequestStart(const char *action, const char *body,
+                         uint32_t socket_timeout_ms = 3000, bool quiet = false);
     // read the full HTTP reply (headers + Content-Length body) and close the socket.
     // Returns pointer to _replybuf (NUL terminated, full reply) or nullptr on failure.
     char *soapRequestEnd(int fd, uint32_t timeout_ms);
@@ -105,6 +118,12 @@ private:
     uint16_t _controller_port;
 
     bool _controller_started;
+    // _controller_started is cleared by markNeedsRestart() on every failed
+    // exchange, so it cannot answer "does RealFlight still have our controller?".
+    // _ever_injected latches the moment an InjectUAVControllerInterface leaves
+    // the bridge and is what the shutdown release keys off.
+    bool _ever_injected;
+    bool _released;
 
     // parked-socket handoff (sockcond1 / sockcond2 / sockmtx below)
     std::thread _creator_thread;

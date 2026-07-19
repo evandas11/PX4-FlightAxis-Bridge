@@ -671,6 +671,8 @@ int main(int argc, char **argv)
 
 	if (px4.LinkLost()) {
 		cerr << "[flightaxis_bridge] PX4 link died while waiting for RealFlight - exiting" << endl;
+		// the injection may already have gone through on the last retry
+		fa.releaseController();
 		px4.Clean();
 		delete [] maps;
 		return -1;
@@ -1329,6 +1331,14 @@ int main(int argc, char **argv)
 	}
 
 	cerr << "[flightaxis_bridge] exiting" << endl;
+
+	// Hand RealFlight back to the physical transmitter. Every way out of the
+	// loop above ends here: SIGINT/SIGTERM (the handlers only set `stop`, the
+	// SOAP work happens here on the main path, never in the handler), the
+	// PX4 dead-link break, and a normal fall-through. Time-bounded and
+	// idempotent - see FACommunicator::releaseController().
+	fa.releaseController();
+
 	battery.close();
 	px4.Clean();
 	delete [] maps;

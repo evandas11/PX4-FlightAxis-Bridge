@@ -305,6 +305,8 @@ static ssize_t recv_timeout(int fd, char *buf, size_t len, uint32_t timeout_ms)
 FACommunicator::FACommunicator(const char *ip) :
     _controller_port(18083),
     _controller_started(false),
+    _ever_injected(false),
+    _released(false),
     _socknext(-1),
     _stop(false),
     _connect_fail_count(0),
@@ -317,6 +319,15 @@ FACommunicator::FACommunicator(const char *ip) :
 
 FACommunicator::~FACommunicator()
 {
+    /*
+      Backstop only. The shutdown paths in main() call releaseController()
+      explicitly (see flightaxis_bridge.cpp) so the "handed back" line lands in
+      the operator's log next to the other shutdown output; this catches the
+      early `return -1` paths that bypass them. It must run BEFORE the creator
+      thread is stopped below, because the release needs a parked socket.
+     */
+    releaseController();
+
     {
         std::lock_guard<std::mutex> lk(_sockmtx);
         _stop = true;
@@ -426,12 +437,15 @@ int FACommunicator::takeSocket(uint32_t timeout_ms)
 /*
   send one SOAP request on a fresh parked socket.
  */
-int FACommunicator::soapRequestStart(const char *action, const char *body)
+int FACommunicator::soapRequestStart(const char *action, const char *body,
+                                     uint32_t socket_timeout_ms, bool quiet)
 {
-    int fd = takeSocket(3000);
+    int fd = takeSocket(socket_timeout_ms);
     if (fd < 0) {
-        printf("[flightaxis_bridge] no connection to RealFlight at %s:%u\n",
-               _controller_ip, (unsigned)_controller_port);
+        if (!quiet) {
+            printf("[flightaxis_bridge] no connection to RealFlight at %s:%u\n",
+                   _controller_ip, (unsigned)_controller_port);
+        }
         return -1;
     }
 
@@ -451,7 +465,9 @@ int FACommunicator::soapRequestStart(const char *action, const char *body)
         return -1;
     }
     if (!send_all(fd, req, (size_t)len)) {
-        printf("[flightaxis_bridge] send failed: %s\n", strerror(errno));
+        if (!quiet) {
+            printf("[flightaxis_bridge] send failed: %s\n", strerror(errno));
+        }
         close(fd);
         return -1;
     }
@@ -649,6 +665,12 @@ bool FACommunicator::startController(bool resetPosition)
         reportStartupReply("ResetAircraft", soapRequestEnd(fd, 1000));
     }
 
+    // latch BEFORE the send: once the request is on the wire RealFlight may have
+    // acted on it even if the reply never comes back, so the shutdown release
+    // must assume the controller is attached from this point on
+    _ever_injected = true;
+    _released = false;
+
     fd = soapRequestStart("InjectUAVControllerInterface", soap_body_inject);
     if (fd < 0) {
         return false;
@@ -657,6 +679,79 @@ bool FACommunicator::startController(bool resetPosition)
 
     _controller_started = true;
     return true;
+}
+
+/*
+  Shutdown counterpart of startController().
+
+  Two steps, mirroring startup in reverse:
+
+   1. one ExchangeData with <m-selectedChannels>0</m-selectedChannels>. That is
+      the exact mirror of what the main loop does before PX4 is up ("send
+      selectedChannels=0 until PX4 is up (RealFlight holds neutral)"): the mask
+      says which of the 12 slots the injected controller overrides, so 0 means
+      RealFlight stops applying OUR values and falls back to the transmitter,
+      while the controller is still attached. The channel values sent alongside
+      are therefore ignored - zeros are fine. Without this, whatever the last
+      exchange commanded (throttle, surface deflections) stays applied for the
+      whole gap until the Restore below lands, and if the Restore is the request
+      that gets lost, it stays applied indefinitely. This step costs one
+      round-trip and makes that failure mode strictly better.
+   2. RestoreOriginalControllerDevice - the same request startController() sends
+      as its first step - which detaches the controller for good.
+
+  Everything here is best-effort. Timeouts are short (RELEASE_TIMEOUT_MS per
+  step, for both the parked-socket wait and the reply), replies are not
+  inspected, and a failure gets exactly one brief line. Worst case when
+  RealFlight has already gone is two socket timeouts, i.e. ~2 x
+  RELEASE_TIMEOUT_MS added to the exit.
+ */
+void FACommunicator::releaseController()
+{
+    // safe to call twice: main() calls it on the shutdown path, ~FACommunicator()
+    // calls it again as a backstop
+    if (_released) {
+        return;
+    }
+    _released = true;
+
+    // never injected anything -> nothing for RealFlight to hand back
+    if (!_ever_injected) {
+        return;
+    }
+
+    const uint32_t RELEASE_TIMEOUT_MS = 300;
+
+    // step 1: deselect our channels (best effort; failure just means we go
+    // straight to the detach below)
+    char body[4096];
+    int blen = snprintf(body, sizeof(body), soap_body_exchange_fmt, 0u,
+                        0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
+
+    if (blen > 0 && blen < (int)sizeof(body)) {
+        int fd = soapRequestStart("ExchangeData", body, RELEASE_TIMEOUT_MS, true);
+        if (fd >= 0) {
+            soapRequestEnd(fd, RELEASE_TIMEOUT_MS);
+        }
+    }
+
+    // step 2: detach the injected controller
+    int fd = soapRequestStart("RestoreOriginalControllerDevice", soap_body_restore,
+                              RELEASE_TIMEOUT_MS, true);
+    if (fd < 0) {
+        printf("[flightaxis_bridge] could not reach RealFlight at %s:%u to release the "
+               "controller - exiting anyway\n",
+               _controller_ip, (unsigned)_controller_port);
+        fflush(stdout);
+        _controller_started = false;
+        return;
+    }
+    soapRequestEnd(fd, RELEASE_TIMEOUT_MS);
+
+    printf("[flightaxis_bridge] controller released - RealFlight is back on the original "
+           "transmitter\n");
+    fflush(stdout);
+    _controller_started = false;
 }
 
 bool FACommunicator::controllerStarted() const
