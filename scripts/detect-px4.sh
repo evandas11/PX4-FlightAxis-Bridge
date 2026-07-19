@@ -86,10 +86,18 @@ fa_payload_files() {
 	if [ -n "${REPO_DIR:-}" ] && [ -d "$REPO_DIR/Tools/simulation/flightaxis" ]; then
 		# Same exclusions install.sh copies with, so the manifest lists exactly
 		# what lands in the tree. LC_ALL=C for a stable, locale-independent order.
+		# The prefix is stripped with ${#} rather than sed: REPO_DIR is an
+		# arbitrary user path, and a '|', '.', '[' or '*' in it would either
+		# break the s||| expression or make it match the wrong thing. These
+		# paths are load-bearing - uninstall.sh deletes "$PX4_DIR/$rel" - so a
+		# mangled prefix must not be possible.
 		find "$REPO_DIR/Tools/simulation/flightaxis" \
 			-name __pycache__ -prune -o \
 			-type f ! -name '*.pyc' -print 2>/dev/null \
-			| sed "s|^$REPO_DIR/||" | LC_ALL=C sort
+			| while IFS= read -r _fa_f; do
+				printf '%s\n' "${_fa_f#"$REPO_DIR"/}"
+			done \
+			| LC_ALL=C sort
 	fi
 	printf 'src/modules/simulation/simulator_mavlink/sitl_targets_flightaxis.cmake\n'
 	for _fa_a in $FA_AIRFRAMES; do

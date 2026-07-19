@@ -230,7 +230,10 @@ if [ -d "$PAYLOAD_DIR" ] && [ "$DRY_RUN" -eq 0 ]; then
 fi
 
 if [ -d "$PAYLOAD_DIR" ]; then
-	SURVIVORS="$(find "$PAYLOAD_DIR" -mindepth 1 \( -type f -o -type l \) 2>/dev/null | sed "s|^$PAYLOAD_DIR/||" | sort || true)"
+	# ${#} rather than sed: PX4_DIR is an arbitrary user path and a '|' or a
+	# regex metacharacter in it would mangle the listing.
+	SURVIVORS="$(find "$PAYLOAD_DIR" -mindepth 1 \( -type f -o -type l \) 2>/dev/null \
+		| while IFS= read -r s; do printf '%s\n' "${s#"$PAYLOAD_DIR"/}"; done | sort || true)"
 	if [ -n "$SURVIVORS" ]; then
 		warn "Tools/simulation/flightaxis/ still contains files this installer did not
          create, so the directory has been left in place:"

@@ -72,6 +72,15 @@ die() {
 	exit 1
 }
 
+# Not every way out of the 5a/5b window goes through die(): under `set -e` a
+# failing mv, a full disk or a Ctrl-C at the wrong moment would otherwise leave
+# the include() spliced in with no airframes registered and no message. Rolling
+# back from the trap covers every abort point, and it is a no-op once 5b has
+# committed (ROLLBACK_SIM is cleared there) or before 5a has run.
+trap '_rollback' EXIT
+trap '_rollback; exit 130' INT
+trap '_rollback; exit 143' TERM
+
 # ------------------------------------------------------------------ args ----
 usage() {
 	cat <<'EOF'
@@ -184,11 +193,34 @@ MODELS="$FA_MODELS"
 INCLUDE_LINE='include(sitl_targets_flightaxis.cmake)'
 ANCHOR_LINE='include(sitl_targets_flightgear.cmake)'
 
+# fa_strip_include takes the line to remove as its second argument; the callers
+# below (the step-2 "is this modification ours?" test and the step-3 backup
+# helper) pass only a file, so bind INCLUDE_LINE once here.
+fa_strip_include_of() { fa_strip_include "$1" "$INCLUDE_LINE"; }
+
 run() {
 	if [ "$DRY_RUN" -eq 1 ]; then
 		printf '    %s[dry-run]%s %s\n' "$C_YEL" "$C_OFF" "$*"
 	else
 		"$@"
+	fi
+}
+
+# tmp_for PREFERRED_PATH -> a path to write a scratch file to.
+#
+# --dry-run is documented as "change nothing", and it was not: the backup
+# comparison and both splices wrote their scratch file *inside the PX4 tree*
+# (<file>.flightaxis.pristine.$$ / .tmp.$$) and deleted it again. A dry run
+# therefore created files in someone else's checkout, left them behind if it was
+# interrupted, and failed outright on a read-only tree - which is exactly where
+# a dry run is most useful. In a dry run every scratch file now goes to $TMPDIR.
+# Outside a dry run it stays next to its target, so the committing mv is a
+# same-filesystem rename. (uninstall.sh's undo_file already did this.)
+tmp_for() {
+	if [ "$DRY_RUN" -eq 1 ]; then
+		mktemp "${TMPDIR:-/tmp}/flightaxis-install.XXXXXX"
+	else
+		printf '%s\n' "$1"
 	fi
 }
 
@@ -293,6 +325,43 @@ if px4_is_git "$PX4_DIR"; then
 		# Modifications to PX4-owned files are the dangerous ones; our own payload
 		# showing up as untracked (??) is normal and expected on a re-install.
 		DIRTY="$(printf '%s\n' "$STATUS" | grep -v '^??' | grep -E "($SIM_CMAKE_REL|$AF_CMAKE_REL)" || true)"
+
+		# A previous run of this installer also shows up as a modification, and
+		# it is not a reason to stop: re-running install.sh is the documented
+		# upgrade path. Telling the user to answer that with --force trained them
+		# to pass --force routinely - and --force ALSO silences the
+		# SYS_AUTOSTART collision check and the untested-PX4-version check just
+		# above, so the advice quietly disarmed two unrelated guards on every
+		# upgrade. A file whose only modification is our own splice is therefore
+		# not "dirty": strip our lines and compare against the committed blob.
+		# Anything else (a real user edit, an unborn HEAD, an untracked file)
+		# fails the comparison and is still reported.
+		if [ -n "$DIRTY" ]; then
+			_head_tmp="$(mktemp "${TMPDIR:-/tmp}/flightaxis-head.XXXXXX")"
+			only_our_edit() {
+				# only_our_edit REL_PATH STRIPPER...  ("./" so the path is read
+				# relative to PX4_DIR, not to the git top level, which differs
+				# when the checkout sits inside a larger repository)
+				_oe_rel="$1"; shift
+				git -C "$PX4_DIR" show "HEAD:./$_oe_rel" > "$_head_tmp" 2>/dev/null || return 1
+				"$@" "$PX4_DIR/$_oe_rel" | cmp -s - "$_head_tmp"
+			}
+			_kept=""
+			case "$DIRTY" in *"$SIM_CMAKE_REL"*)
+				only_our_edit "$SIM_CMAKE_REL" fa_strip_include_of \
+					|| _kept="$_kept$(printf '%s\n' "$DIRTY" | grep -F "$SIM_CMAKE_REL")
+" ;;
+			esac
+			case "$DIRTY" in *"$AF_CMAKE_REL"*)
+				only_our_edit "$AF_CMAKE_REL" fa_strip_airframes \
+					|| _kept="$_kept$(printf '%s\n' "$DIRTY" | grep -F "$AF_CMAKE_REL")
+" ;;
+			esac
+			rm -f "$_head_tmp"
+			[ -n "$_kept" ] || info "those modifications are this integration's own lines, from a previous install."
+			DIRTY="$(printf '%s' "$_kept" | grep . || true)"
+		fi
+
 		if [ -n "$DIRTY" ]; then
 			if [ "$FORCE" -eq 1 ] || [ "$DRY_RUN" -eq 1 ]; then
 				warn "PX4-owned CMakeLists.txt files have uncommitted local changes; continuing (--force/--dry-run)."
@@ -301,8 +370,8 @@ if px4_is_git "$PX4_DIR"; then
 				printf '       uncommitted local modifications:\n' >&2
 				printf '%s\n' "$DIRTY" | sed 's/^/         /' >&2
 				printf '       Commit or stash them first, or re-run with --force.\n' >&2
-				printf '       (A previous run of this installer also shows up here - that is\n' >&2
-				printf '        harmless, the splices below are idempotent; use --force.)\n' >&2
+				printf '       (Edits from a previous run of this installer are recognised as\n' >&2
+				printf '        ours and filtered out above, so these are changes of your own.)\n' >&2
 				exit 1
 			fi
 		else
@@ -332,14 +401,21 @@ backup() {
 	rel="${src#"$PX4_DIR"/}"
 
 	if [ ! -f "$bak" ]; then
-		run cp -p "$src" "$bak"
-		ok "backed up $rel -> ${bak#"$PX4_DIR"/}"
-		[ "$DRY_RUN" -eq 1 ] || record "created  ${bak#"$PX4_DIR"/}"
+		# Through die(), not bare: on a read-only tree this failed with a raw
+		# "cp: Permission denied" and `set -e` stopped the script without saying
+		# that the first backup had already been written.
+		run cp -p "$src" "$bak" \
+			|| die "could not write the backup $rel.flightaxis.bak
+       (is the PX4 tree writable?)"
+		if [ "$DRY_RUN" -eq 0 ]; then
+			ok "backed up $rel -> ${bak#"$PX4_DIR"/}"
+			record "created  ${bak#"$PX4_DIR"/}"
+		fi
 		return 0
 	fi
 
 	# What the backup *should* contain: the current file without our lines.
-	pristine="$src.flightaxis.pristine.$$"
+	pristine="$(tmp_for "$src.flightaxis.pristine.$$")"
 	"$@" "$src" > "$pristine" 2>/dev/null || { rm -f "$pristine"; }
 	if [ -f "$pristine" ] && cmp -s "$pristine" "$bak"; then
 		rm -f "$pristine"
@@ -356,17 +432,14 @@ backup() {
 		return 0
 	fi
 	if [ -f "$pristine" ]; then
-		cat "$pristine" > "$bak"
+		cat "$pristine" > "$bak" || { rm -f "$pristine"; die "could not refresh the backup $rel.flightaxis.bak"; }
 		rm -f "$pristine"
 	else
-		cp -p "$src" "$bak"
+		cp -p "$src" "$bak" || die "could not refresh the backup $rel.flightaxis.bak"
 	fi
 	ok "refreshed backup ${bak#"$PX4_DIR"/}"
 	record "refreshed ${bak#"$PX4_DIR"/}"
 }
-# fa_strip_include takes the line to remove as its second argument; the backup
-# helper passes only the file, so bind INCLUDE_LINE here.
-fa_strip_include_of() { fa_strip_include "$1" "$INCLUDE_LINE"; }
 
 backup "$SIM_CMAKE" fa_strip_include_of
 backup "$AF_CMAKE"  fa_strip_airframes
@@ -475,7 +548,7 @@ else
 	# matched trimmed - the same test fa_has_include just passed, so we can
 	# never "find" an anchor here that the awk then fails to match - and our
 	# line copies the anchor's own indentation and line ending.
-	TMP="$SIM_CMAKE.flightaxis.tmp.$$"
+	TMP="$(tmp_for "$SIM_CMAKE.flightaxis.tmp.$$")"
 	awk -v ins="$INCLUDE_LINE" -v anchor="$ANCHOR_LINE" '
 		{
 			line = $0; cr = ""
@@ -506,8 +579,10 @@ else
 		# include() pointing at a cmake file whose airframes were never
 		# registered is worse than no include() at all.
 		ROLLBACK_SIM="$SIM_CMAKE.flightaxis.pre.$$"
-		cp -p "$SIM_CMAKE" "$ROLLBACK_SIM"
-		mv "$TMP" "$SIM_CMAKE"
+		cp -p "$SIM_CMAKE" "$ROLLBACK_SIM" \
+			|| { rm -f "$TMP"; ROLLBACK_SIM=""; die "could not create the rollback copy $SIM_CMAKE_REL.flightaxis.pre.$$"; }
+		mv "$TMP" "$SIM_CMAKE" \
+			|| { rm -f "$TMP"; die "could not write $SIM_CMAKE_REL"; }
 		ok "added $INCLUDE_LINE to $SIM_CMAKE_REL"
 		SIM_RECORD="edited   $SIM_CMAKE_REL  (+1 line: $INCLUDE_LINE)"
 	fi
@@ -519,9 +594,28 @@ fi
 # then re-inserts $AIRFRAMES as one block in sorted position. It lives next to
 # the matching removal filter so install and uninstall cannot drift apart - that
 # drift is what let a CRLF tree end up with duplicated entries.
+# "Already registered" has to mean registered *inside* the px4_add_romfs_files()
+# list. A plain whole-file grep also matched an entry that an older, broken
+# splice had left at top level - a cmake syntax error - and reported "no change",
+# so the tree could never repair itself. Checking inside the list means such a
+# tree goes down the splice path instead, where the existing count checks stop it
+# loudly before anything is written.
+fa_lists_airframe() {
+	awk -v want="$2" '
+		/^px4_add_romfs_files\(/ { inlist = 1; next }
+		inlist && /^[ \t]*\)/    { inlist = 0; next }
+		inlist {
+			line = $0; sub(/\r$/, "", line)
+			sub(/^[[:space:]]+/, "", line); sub(/[[:space:]]+$/, "", line)
+			if (line == want) { found = 1; exit }
+		}
+		END { exit (found ? 0 : 1) }
+	' "$1"
+}
+
 MISSING_AF=""
 for a in $AIRFRAMES; do
-	grep -qE "^[[:space:]]*${a}[[:space:]]*$" "$AF_CMAKE" || MISSING_AF="$MISSING_AF $a"
+	fa_lists_airframe "$AF_CMAKE" "$a" || MISSING_AF="$MISSING_AF $a"
 done
 
 if [ -z "$MISSING_AF" ]; then
@@ -534,7 +628,7 @@ else
        in sorted position inside that list:
 $(for a in $AIRFRAMES; do printf '         %s\n' "$a"; done)"
 
-	TMP="$AF_CMAKE.flightaxis.tmp.$$"
+	TMP="$(tmp_for "$AF_CMAKE.flightaxis.tmp.$$")"
 	if ! fa_splice_airframes "$AF_CMAKE" "$AIRFRAMES" > "$TMP"; then
 		rm -f "$TMP"
 		die "could not find a sorted insertion point (no airframe id above 1219) inside the
@@ -576,7 +670,12 @@ $(for a in $AIRFRAMES; do printf '         %s\n' "$a"; done)"
 		diff -u "$AF_CMAKE" "$TMP" | sed 's/^/      /' || true
 		rm -f "$TMP"
 	else
-		mv "$TMP" "$AF_CMAKE"
+		# A bare mv here was the last unguarded abort point between the two
+		# splices: if it failed, `set -e` exited with 5a applied, no rollback and
+		# no message. die() rolls 5a back (and the EXIT trap catches anything
+		# else that unwinds through this window).
+		mv "$TMP" "$AF_CMAKE" \
+			|| { rm -f "$TMP"; die "could not write $AF_CMAKE_REL"; }
 		ok "registered$MISSING_AF in $AF_CMAKE_REL"
 		record "edited   $AF_CMAKE_REL  (+ airframe entries:$MISSING_AF)"
 	fi

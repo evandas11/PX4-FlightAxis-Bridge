@@ -66,6 +66,30 @@ if [ "$PX4_RESOLVED_EXPLICIT" -eq 0 ] && [ ! -t 0 ] && [ "$DRY_RUN" -eq 0 ]; the
 	exit 1
 fi
 
+# --- source completeness gate -------------------------------------------------
+# The mirror image of sync-from-px4.sh's gate. This writes into somebody's PX4
+# checkout, and it used to write the payload, then the cmake file, then the
+# airframes one by one - so a repo missing an airframe rsync'd the payload in,
+# copied two of the four airframes, and then died on a raw
+# "cp: cannot stat ...", leaving the PX4 tree holding a half-updated mixture of
+# two versions. Check the whole manifest exists here before writing anything.
+MISSING=""
+while IFS= read -r rel; do
+	[ -n "$rel" ] || continue
+	[ -f "$REPO_DIR/$rel" ] || MISSING="$MISSING$rel
+"
+done <<EOF
+$(fa_payload_files)
+EOF
+
+if [ -n "$MISSING" ]; then
+	echo >&2
+	echo "error: this repository's flightaxis payload is incomplete:" >&2
+	printf '%s' "$MISSING" | sed 's/^/         /' >&2
+	echo "       Refusing to write a partial payload into $PX4_DIR." >&2
+	exit 1
+fi
+
 # Always show the diff first: this overwrites files in a live PX4 tree and used
 # to do it with no preview, no prompt and no --dry-run at all.
 echo
