@@ -2,8 +2,8 @@
 
 Copyright © 2026 Evangels Brilliant Dasmasela.
 
-This project is released under the **GNU General Public License v3 or later**
-(see [LICENSE](LICENSE)).
+Released under the **GNU General Public License v3 or later** (see [LICENSE](LICENSE)),
+so that anyone who finds it useful can take it further.
 
 ## What you may do with it
 
@@ -20,26 +20,20 @@ separate executable that talks to PX4 over a MAVLink socket, built as an
 ExternalProject rather than linked into the PX4 binary — the same arrangement the
 FlightGear and JSBSim bridges use.
 
-## Work by Evangels Brilliant Dasmasela
+## What this project adds
 
-Original to this project, with no upstream counterpart:
+Written for this project, with no upstream counterpart: `hitl_run.sh` (PX4 ships no
+HITL runner), the model JSONs and the channel-map schema they define, `FA_check.py`
+and `get_FAbridge_params.py`, the installer and its supporting scripts, and the
+documentation.
 
-- `Tools/simulation/flightaxis/hitl_run.sh` — PX4 ships no HITL runner at all
-- `flightaxis_bridge/models/*.json` and the channel-map schema they define
-- `flightaxis_bridge/FA_check.py`, `flightaxis_bridge/get_FAbridge_params.py`
-- `install.sh`, `uninstall.sh`, `scripts/*` — target detection, the idempotent
-  CMakeLists splices, and the payload manifest
-- Every document in this repository
-
-Substantial original work inside files that began from an upstream source (see the
-provenance table for what each started as):
-
-- the transports, per-message decimation, `fields_updated` sub-rating, non-blocking
-  receive drain, HITL message profile and dead-link policy in `px4_communicator.*`
-- the absolute-clock design, realtime-factor monitor, reconnect and glitch handling
-  in `flightaxis_bridge.cpp`
-- the rangefinder path, sensor synthesis and datum handling in `vehicle_state.*`
-- the four airframes and their control-allocation and parameter configuration
+Reworked substantially inside files that started from an upstream source — see the
+provenance table for what each began as: the transports, per-message decimation,
+`fields_updated` sub-rating and dead-link policy in `px4_communicator.*`; the
+absolute-clock design, realtime-factor monitor and reconnect handling in
+`flightaxis_bridge.cpp`; the rangefinder path and sensor synthesis in
+`vehicle_state.*`; and the four airframes with their control-allocation and
+parameter configuration.
 
 ## Third-party notices — required, do not remove
 
