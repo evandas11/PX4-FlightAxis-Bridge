@@ -263,9 +263,9 @@ map hangs off it:
 cd ~/PX4-Autopilot
 
 PX4_FLIGHTAXIS_IP=192.168.10.1 \
-PX4_HOME_LAT=-37.7304361 \
-PX4_HOME_LON=175.7437528 \
-PX4_HOME_ALT=50.6 \
+PX4_HOME_LAT=-37.7304917 \
+PX4_HOME_LON=175.7433944 \
+PX4_HOME_ALT=48.0 \
 make px4_sitl_nolockstep flightaxis_quadplane
 ```
 
@@ -347,7 +347,7 @@ Once per aircraft:
   which is where the ordering is set; the `models/<name>.json` map is identity and stays that
   way — see [Model JSON](#model-json-channel-maps) below.
 
-## Home position
+## Home position and heading
 
 The bridge anchors the RealFlight world to a geodetic home position, overridable by environment
 variable:
@@ -357,14 +357,30 @@ variable:
 | `PX4_HOME_LAT` | `47.397742` |
 | `PX4_HOME_LON` | `8.545594` |
 | `PX4_HOME_ALT` | `488.0` (metres) |
+| `PX4_HOME_YAW` | unset — RealFlight's world used as-is |
 
 ```bash
-PX4_HOME_LAT=-37.7304361 PX4_HOME_LON=175.7437528 PX4_HOME_ALT=50.6 \
+PX4_HOME_LAT=-37.7304917 PX4_HOME_LON=175.7433944 PX4_HOME_ALT=48.0 PX4_HOME_YAW=205 \
 PX4_FLIGHTAXIS_IP=192.168.10.1 make px4_sitl_nolockstep flightaxis_plane
 ```
 
 The barometer is derived from this same altitude datum rather than from RealFlight's scenery
 elevation, deliberately — see spec §6.
+
+`PX4_HOME_YAW` is the true heading (degrees) the aircraft should **start** on. RealFlight's world
+north is arbitrary, so the bridge reads the model's actual attitude on the first frame and rotates
+the whole RF→NED mapping by the difference — exactly the way `PX4_HOME_ALT` shifts the altitude
+datum without RealFlight knowing about it. The rotation it derives is logged at startup.
+
+The rotation is applied to *every* world-frame quantity — attitude, position, velocity and wind —
+so heading and direction of travel stay consistent and EKF2 sees no contradiction. Body-frame
+sensors (accelerometer, gyro) and all Down components are untouched. Leaving the variable unset
+rotates nothing, which is also what ArduPilot's FlightAxis backend does: it accepts a heading in
+`--custom-location` but its `SIM_FlightAxis` overwrites the attitude from RealFlight on the first
+frame, so the value has no effect there.
+
+The heading datum is re-derived whenever the position anchor is, so pressing reset in RealFlight
+keeps the requested start heading.
 
 ## Model JSON: channel maps
 

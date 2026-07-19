@@ -55,7 +55,11 @@ public:
 	mavlink_hil_gps_t hil_gps_msg;
 	double rpm;
 
-	VehicleState(double home_lat_deg, double home_lon_deg, double home_alt_m);
+	// home_yaw_deg: the true heading (deg) the aircraft should START on. NAN
+	// disables the feature and leaves the RF world mapped straight onto NED,
+	// which is the historical behaviour and what ArduPilot does.
+	VehicleState(double home_lat_deg, double home_lon_deg, double home_alt_m,
+		     double home_yaw_deg);
 
 	// Full RF->NED conversion pipeline for a NORMAL physics frame.
 	// dt_true = the real elapsed physics time for this frame (NOT glitch-capped).
@@ -71,6 +75,13 @@ public:
 
 	// Capture position_offset from the current FA position fields (call on
 	// first frame and after every reset) so home anchors the RF world.
+	// This is also where the heading datum is latched: PX4_HOME_YAW is a
+	// heading the aircraft should START on, so the rotation it implies can
+	// only be known once RealFlight has reported where the model actually
+	// sits. Position and heading are two halves of the same anchor and are
+	// captured together - and dropped together by invalidatePositionOffset(),
+	// so a RealFlight reset re-derives the rotation against the post-reset
+	// attitude instead of keeping one measured before the teleport.
 	void resetPositionOffset(const FAState &fa);
 
 	// Drop the captured offset so the NEXT real frame re-anchors from a
@@ -162,10 +173,26 @@ private:
 	void updateGPSMsg();
 	void nedToLLA(const Eigen::Vector3d &pos_ned, double &lat_deg, double &lon_deg, double &alt_m) const;
 
+	// Rotate a WORLD-frame vector about the down axis by yaw_rot_rad. Applied
+	// to every world-frame quantity taken from RealFlight so the rotation is a
+	// property of the RF->NED mapping rather than of any one signal. Body-frame
+	// quantities (accel_body, gyro) and all Down components are untouched:
+	// spinning the world does not change what a strapdown sensor measures, nor
+	// which way is down.
+	Eigen::Vector3d rotateWorld(const Eigen::Vector3d &v) const;
+
 	// home / geodetic anchor
 	double home_lat;	// deg
 	double home_lon;	// deg
 	double home_alt;	// m ASL
+
+	// Heading anchor. home_yaw is the configured start heading (deg true), NAN
+	// when the feature is off. yaw_rot_rad is the rotation actually applied to
+	// the RF world, derived once per anchor in resetPositionOffset() and valid
+	// only while offset_captured is true; it is 0 whenever home_yaw is NAN, so
+	// the unconfigured path costs nothing and changes nothing.
+	double home_yaw;	// deg true, NAN = disabled
+	double yaw_rot_rad;	// applied RF-world -> true-north rotation
 
 	// physics time since epoch capture (us), mirrored from the main loop;
 	// getSensorMsg() / getDistanceSensorMsg() add offset_us on top

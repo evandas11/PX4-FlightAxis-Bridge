@@ -88,6 +88,7 @@
 #include <cstdio>
 #include <cstdint>
 #include <cmath>
+#include <limits>
 
 #include <time.h>
 #include <signal.h>
@@ -599,9 +600,15 @@ int main(int argc, char **argv)
 	const double home_lat = envOrDefault("PX4_HOME_LAT", 47.397742);
 	const double home_lon = envOrDefault("PX4_HOME_LON", 8.545594);
 	const double home_alt = envOrDefault("PX4_HOME_ALT", 488.0);
+	// ... and the heading it starts on. Unset means "leave the RF world where
+	// it is", which is the historical behaviour, so the default is NAN rather
+	// than 0 - 0 is a legitimate request for due north and must not be what an
+	// absent variable looks like.
+	const double home_yaw = envOrDefault("PX4_HOME_YAW",
+					     std::numeric_limits<double>::quiet_NaN());
 
 	FACommunicator fa(fa_ip);
-	VehicleState vehicle(home_lat, home_lon, home_alt);
+	VehicleState vehicle(home_lat, home_lon, home_alt, home_yaw);
 	PX4Communicator px4(&vehicle);
 
 	// ---- transport selection (see the header comment) -------------------

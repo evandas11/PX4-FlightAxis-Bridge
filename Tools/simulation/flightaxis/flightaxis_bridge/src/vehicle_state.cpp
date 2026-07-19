@@ -43,6 +43,7 @@
 
 #include <cmath>
 #include <cstring>
+#include <iostream>
 #include <limits>
 
 using namespace Eigen;
@@ -154,11 +155,33 @@ static double isaPressureHpa(double h_m)
 	return 101325.0 * std::pow(1.0 - 2.25577e-5 * h_m, 5.25588) / 100.0;
 }
 
-VehicleState::VehicleState(double home_lat_deg, double home_lon_deg, double home_alt_m) :
+// Yaw of a body->NED quaternion (ZYX / aerospace convention). Used only to ask
+// RealFlight "which way is the model pointing right now" when the heading datum
+// is latched; taken from the CONVERTED quaternion rather than m_azimuth_DEG so
+// it cannot disagree with the attitude the rest of the pipeline uses.
+static double yawFromQuat(const Quaterniond &q)
+{
+	return std::atan2(2.0 * (q.w() * q.z() + q.x() * q.y()),
+			  1.0 - 2.0 * (q.y() * q.y() + q.z() * q.z()));
+}
+
+static double wrapPi(double a)
+{
+	while (a > M_PI) { a -= 2.0 * M_PI; }
+
+	while (a < -M_PI) { a += 2.0 * M_PI; }
+
+	return a;
+}
+
+VehicleState::VehicleState(double home_lat_deg, double home_lon_deg, double home_alt_m,
+			   double home_yaw_deg) :
 	rpm(0.0),
 	home_lat(home_lat_deg),
 	home_lon(home_lon_deg),
 	home_alt(home_alt_m),
+	home_yaw(home_yaw_deg),
+	yaw_rot_rad(0.0),
 	time_usec(0),
 	q_ned(Quaterniond::Identity()),
 	gyro(Vector3d::Zero()),
@@ -229,12 +252,48 @@ VehicleState::VehicleState(double home_lat_deg, double home_lon_deg, double home
 	updateGPSMsg();
 }
 
+Vector3d VehicleState::rotateWorld(const Vector3d &v) const
+{
+	if (yaw_rot_rad == 0.0) {
+		return v;
+	}
+
+	const double c = std::cos(yaw_rot_rad);
+	const double s = std::sin(yaw_rot_rad);
+	return Vector3d(c * v.x() - s * v.y(),
+			s * v.x() + c * v.y(),
+			v.z());
+}
+
 void VehicleState::resetPositionOffset(const FAState &fa)
 {
 	// position NED: (N = RF_Y, E = RF_X, D = -altASL)
 	position_offset = Vector3d(fa.m_aircraftPositionY_MTR,
 				   fa.m_aircraftPositionX_MTR,
 				   -fa.m_altitudeASL_MTR);
+
+	// Heading datum. home_yaw is where the model should point; RealFlight has
+	// just told us where it does point, and the difference is the rotation the
+	// RF world needs. Deriving it here rather than from a fixed number is what
+	// makes PX4_HOME_YAW mean the same thing whatever the RF runway happens to
+	// be aligned to.
+	if (std::isnan(home_yaw)) {
+		yaw_rot_rad = 0.0;
+
+	} else {
+		Quaterniond q_rf(fa.m_orientationQuaternionW,
+				 fa.m_orientationQuaternionY,
+				 fa.m_orientationQuaternionX,
+				 -fa.m_orientationQuaternionZ);
+		q_rf.normalize();
+		yaw_rot_rad = wrapPi(home_yaw * DEG2RAD - yawFromQuat(q_rf));
+
+		std::cerr << "[flightaxis_bridge] heading datum: RealFlight reports "
+			  << (RAD2DEG * yawFromQuat(q_rf)) << " deg, PX4_HOME_YAW asks for "
+			  << home_yaw << " deg -> rotating the RF world by "
+			  << (RAD2DEG * yaw_rot_rad) << " deg" << std::endl;
+	}
+
 	offset_captured = true;
 }
 
@@ -244,22 +303,46 @@ void VehicleState::setFAData(const FAState &fa, double dt_true)
 		dt_true = 0.001;
 	}
 
-	// Quaternion RF -> NED: q_ned = (w=W, x=RF_Y, y=RF_X, z=-RF_Z)
+	// Re-anchor whenever there is no valid anchor. This is deliberately the
+	// ONLY condition: m_resetButtonHasBeenPressed is NOT checked here, because
+	// this function is unreachable while that flag is set - the bridge's main
+	// loop catches the flag and continue()s long before setFAData() is called
+	// (flightaxis_bridge.cpp, the reinject branch). A `|| resetButtonPressed`
+	// clause here would read as a safety net while being dead code. The bridge
+	// instead calls invalidatePositionOffset() unconditionally on the flag,
+	// which clears offset_captured and lands us here on the next real frame.
+	//
+	// This runs FIRST because it establishes yaw_rot_rad, and every conversion
+	// below is expressed in the rotated world. It depends on nothing but `fa`.
+	if (!offset_captured) {
+		resetPositionOffset(fa);
+	}
+
+	// Quaternion RF -> NED: q_ned = (w=W, x=RF_Y, y=RF_X, z=-RF_Z), then turned
+	// onto the true-north datum by the latched rotation (a no-op at 0).
 	q_ned = Quaterniond(fa.m_orientationQuaternionW,
 			    fa.m_orientationQuaternionY,
 			    fa.m_orientationQuaternionX,
 			    -fa.m_orientationQuaternionZ);
 	q_ned.normalize();
 
+	if (yaw_rot_rad != 0.0) {
+		q_ned = Quaterniond(AngleAxisd(yaw_rot_rad, Vector3d::UnitZ())) * q_ned;
+		q_ned.normalize();
+	}
+
 	// Gyro: p=+roll, q=+pitch, r=-yaw (deg->rad, constrain +/-2000 deg/s)
 	gyro = Vector3d(DEG2RAD * constrain(fa.m_rollRate_DEGpSEC, -2000.0, 2000.0),
 			DEG2RAD * constrain(fa.m_pitchRate_DEGpSEC, -2000.0, 2000.0),
 			-DEG2RAD * constrain(fa.m_yawRate_DEGpSEC, -2000.0, 2000.0));
 
-	// World velocity used DIRECTLY: (vN=U, vE=V, vD=W) - no swap (intentional)
-	velocity_ef = Vector3d(fa.m_velocityWorldU_MPS,
-			       fa.m_velocityWorldV_MPS,
-			       fa.m_velocityWorldW_MPS);
+	// World velocity used DIRECTLY: (vN=U, vE=V, vD=W) - no swap (intentional).
+	// Rotated BEFORE last_velocity_ef is seeded, so the on-ground accel
+	// override differences two velocities from the same frame and cannot
+	// manufacture a step out of the rotation itself.
+	velocity_ef = rotateWorld(Vector3d(fa.m_velocityWorldU_MPS,
+					   fa.m_velocityWorldV_MPS,
+					   fa.m_velocityWorldW_MPS));
 
 	if (!have_last_velocity) {
 		last_velocity_ef = velocity_ef;
@@ -271,22 +354,13 @@ void VehicleState::setFAData(const FAState &fa, double dt_true)
 			      fa.m_aircraftPositionX_MTR,
 			      -fa.m_altitudeASL_MTR);
 
-	// Re-anchor whenever there is no valid anchor. This is deliberately the
-	// ONLY condition: m_resetButtonHasBeenPressed is NOT checked here, because
-	// this function is unreachable while that flag is set - the bridge's main
-	// loop catches the flag and continue()s long before setFAData() is called
-	// (flightaxis_bridge.cpp, the reinject branch). A `|| resetButtonPressed`
-	// clause here would read as a safety net while being dead code. The bridge
-	// instead calls invalidatePositionOffset() unconditionally on the flag,
-	// which clears offset_captured and lands us here on the next real frame.
-	if (!offset_captured) {
-		resetPositionOffset(fa);
-	}
-
-	position_ned = position_raw - position_offset;
+	// The offset is captured in the SAME unrotated RF frame as position_raw,
+	// so the difference is taken first and the rotation applied to the result:
+	// rotating about home, not about RealFlight's world origin.
+	position_ned = rotateWorld(position_raw - position_offset);
 
 	// Wind swapped like position: (windY, windX, windZ)
-	wind_ef = Vector3d(fa.m_windY_MPS, fa.m_windX_MPS, fa.m_windZ_MPS);
+	wind_ef = rotateWorld(Vector3d(fa.m_windY_MPS, fa.m_windX_MPS, fa.m_windZ_MPS));
 
 	// Accelerometer (specific force): body values in flight ...
 	accel_body = Vector3d(fa.m_accelerationBodyAX_MPS2,
