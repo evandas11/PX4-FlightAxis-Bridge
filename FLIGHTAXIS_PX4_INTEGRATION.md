@@ -339,18 +339,22 @@ are identical, and that is deliberate — see the rule that follows.
 
 ```json
 {
-  "Comment":   "reference-class quadplane on a RealFlight custom model",
+  "Comment":   "Quadplane -- four lift motors, a pusher and four control surfaces -- on a RealFlight custom model",
   "RfModel":   "informational only - aircraft is selected inside RealFlight",
   "Options":   ["ResetPosition", "SilenceFPS"],
   "Channels": [
-    {"rf": 0, "px4": 0, "scale": "bipolar",  "reverse": false, "comment": "aileron      <- controls[0] aileron left"},
-    {"rf": 1, "px4": 1, "scale": "bipolar",  "reverse": true,  "comment": "elevator     <- controls[1]"},
-    {"rf": 2, "px4": 2, "scale": "unipolar", "disarm": 0.0,    "comment": "fwd throttle <- controls[2] pusher motor"},
-    {"rf": 3, "px4": 3, "scale": "bipolar",  "reverse": false, "comment": "rudder       <- controls[3]"},
-    {"rf": 4, "px4": 4, "scale": "unipolar", "disarm": 0.0,    "comment": "lift motor 1 <- controls[4]"},
-    {"rf": 5, "px4": 5, "scale": "unipolar", "disarm": 0.0,    "comment": "lift motor 2 <- controls[5]"},
-    {"rf": 6, "px4": 6, "scale": "unipolar", "disarm": 0.0,    "comment": "lift motor 3 <- controls[6]"},
-    {"rf": 7, "px4": 7, "scale": "unipolar", "disarm": 0.0,    "comment": "lift motor 4 <- controls[7]"}
+    {"rf": 0,  "px4": 0,  "scale": "bipolar",                 "comment": "aileron left   <- controls[0]"},
+    {"rf": 1,  "px4": 1,  "scale": "bipolar",                 "comment": "elevator       <- controls[1]"},
+    {"rf": 2,  "px4": 2,  "scale": "unipolar", "disarm": 0.0, "comment": "fwd throttle   <- controls[2] pusher motor"},
+    {"rf": 3,  "px4": 3,  "scale": "bipolar",                 "comment": "rudder         <- controls[3]"},
+    {"rf": 4,  "px4": 4,  "scale": "unipolar", "disarm": 0.0, "comment": "lift motor 1   <- controls[4]"},
+    {"rf": 5,  "px4": 5,  "scale": "unipolar", "disarm": 0.0, "comment": "lift motor 2   <- controls[5]"},
+    {"rf": 6,  "px4": 6,  "scale": "unipolar", "disarm": 0.0, "comment": "lift motor 3   <- controls[6]"},
+    {"rf": 7,  "px4": 7,  "scale": "unipolar", "disarm": 0.0, "comment": "lift motor 4   <- controls[7]"},
+    {"rf": 8,  "px4": 8,  "scale": "bipolar",                 "comment": "aileron right  <- controls[8]"},
+    {"rf": 9,  "px4": 9,  "scale": "bipolar",  "disarm": 0.5, "comment": "unassigned     <- controls[9]"},
+    {"rf": 10, "px4": 10, "scale": "bipolar",  "disarm": 0.5, "comment": "unassigned     <- controls[10]"},
+    {"rf": 11, "px4": 11, "scale": "bipolar",  "disarm": 0.5, "comment": "unassigned     <- controls[11]"}
   ],
   "UnmappedDefault": 0.5
 }
@@ -746,7 +750,7 @@ more. No aircraft has ever flown.
 - `FA_check.py` fails correctly, with its diagnostic, against an unreachable host.
 - **End to end:** PX4 connects on TCP 4560, EKF2 converges, and the synthesised sensors are
   sane — in particular baro and GPS altitudes agree, confirming the shared-datum choice in §6.
-- Channel maps correct end to end for **plane and quad**, including bipolar/reverse/unipolar
+- Channel maps correct end to end for **plane and quad**, including bipolar/unipolar
   scaling and the disarm values.
 - The resilience cases (item 6): reconnect, aircraft reset, glitch swallow, and sim death all
   behave as §7 and §8.1 describe.

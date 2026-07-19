@@ -18,7 +18,7 @@ need to read the others. Everything below assumes the **`px4_sitl_nolockstep`** 
 |---|---|---|---|---|
 | `flightaxis_plane` | `1200_flightaxis_plane` (1200) | Fixed-wing (`CA_AIRFRAME 1`) | Conventional plane: aileron / elevator / throttle / rudder | **Working** — channel map verified end to end |
 | `flightaxis_quad` | `1201_flightaxis_quad` (1201) | Multirotor quad-X (`CA_AIRFRAME 0`) | Four motors, direct from PX4 motor outputs | **Working** — channel map verified end to end |
-| `flightaxis_quadplane` | `1202_flightaxis_quadplane` (1202) | Standard VTOL (`CA_AIRFRAME 2`) | reference-class: 4 lift motors + pusher + 4 surfaces | **Partial** — map verified by reasoning only, not flown (§9) |
+| `flightaxis_quadplane` | `1202_flightaxis_quadplane` (1202) | Standard VTOL (`CA_AIRFRAME 2`) | 4 lift motors + pusher + 4 control surfaces | **Partial** — map verified by reasoning only, not flown (§9) |
 | `flightaxis_heli` | `1203_flightaxis_heli` (1203) | Helicopter, tail servo (`CA_AIRFRAME 11`) | Collective-pitch heli; PX4 does the CCPM mix, bridge passes swash servos through untouched | **Partial** — swash geometry never checked against a real model, gains never flown (§9) |
 
 `flightaxis` on its own is an alias for `flightaxis_plane`.
@@ -151,15 +151,25 @@ Sections are HITL-agnostic — they describe SITL. For hardware-in-the-loop, see
   in the airframe script.
 - **Scale** — `unipolar` = the PX4 value is already `0..1` (motors), sent through unchanged;
   `bipolar` = the PX4 value is `-1..1` (surfaces), sent as `(v+1)/2`.
-- **Reverse** — applied *after* scaling, as `v → 1-v`.
 - **Disarm** — value sent while PX4 is disarmed or the control is NaN. `hold` means "keep the
   last output" (neutral 0.5 before the first one).
-- Every RealFlight channel not in the table is driven at **0.5** (`UnmappedDefault`).
 
-**One numbering, end to end: RealFlight channel N is driven by PX4 output channel N.** Every
-shipped `models/*.json` is a pure identity map — the `rf` and `px4` columns are equal on every
-row — so the `PX4` column in the tables below is always `controls[RF ch]`. It is spelled out
-anyway, because it is the thing that must agree with the airframe.
+> ### One numbering, end to end
+>
+> **RealFlight channel N is driven by PX4 output channel N — for all twelve channels.**
+>
+> Every shipped `models/*.json` is a pure identity map covering **ch1–ch12**: the `rf` and `px4`
+> columns are equal on every row, and every row is present. There are **no exceptions** and no
+> renumbering anywhere in the JSON.
+>
+> `PWM_MAIN_FUNC<N>` (SITL) / `HIL_ACT_FUNC<N>` (HITL) alone decides *what* channel N carries.
+> To change what comes out on a RealFlight channel, change that parameter — never the JSON.
+
+(The tables below are 0-based, as the bridge counts: `rf` 0 is RealFlight "Channel 1". So
+`rf` 11 is RealFlight Channel 12, the last one FlightAxis accepts.)
+
+**Reversal is not done in the JSON.** No shipped model contains `"reverse": true`; direction
+belongs to whoever sets up the aircraft. See [Reversing a channel](#reversing-a-channel).
 
 The ordering decision lives in the airframe, in `PWM_MAIN_FUNC<N>` (SITL) or `HIL_ACT_FUNC<N>`
 (HITL) — the same place ArduPilot puts it (`SERVOn_FUNCTION`) and the same place PX4's own Gazebo
@@ -178,11 +188,97 @@ If your RealFlight model uses a different channel order, **change `PWM_MAIN_FUNC
 and leave the JSON as an identity map.** Do not re-scramble the JSON — that splits the ordering
 across two files that then have to be read together.
 
-What stays in the JSON is everything that is *not* ordering and cannot be expressed as a FUNC
-value: `scale` (PX4 normalises motors to `[0,1]` but servos to `[-1,1]`, while RealFlight always
-wants `[0,1]`), `reverse`, `disarm`, and the `HeliDemix` / `Rev4Servos` option transforms. The
-JSON and the airframe params must still agree; if they drift, the bridge silently drives the
-wrong actuator and the aircraft twitches or flies inverted on one axis.
+What stays in the JSON is only what *cannot* be expressed as a FUNC value: `scale`, `disarm`, and
+the `HeliDemix` / `Rev4Servos` option transforms.
+
+### `scale` is the one column you may still have to touch
+
+`scale` is a **signal-domain conversion, not a preference**, and it is the single thing the JSON
+cannot infer from your parameters. `PWMSim` emits non-reversible **Motor** functions as `[0,1]`
+and **everything else** as `[-1,1]` ([`PWMSim.cpp:77-88`](https://github.com/PX4/PX4-Autopilot/blob/main/src/modules/simulation/pwm_out_sim/PWMSim.cpp)),
+while RealFlight always wants `[0,1]`. So:
+
+| What you assigned to `PWM_MAIN_FUNC<N>` | Correct `scale` for that row | `disarm` |
+|---|---|---|
+| A **Motor** (`101…112`) | `unipolar` — passed through | `0.0` |
+| Anything else — servo, control surface, flaps, gear, gimbal, peripheral | `bipolar` — sent as `(v+1)/2` | `0.5` (or `hold`) |
+
+**Both failure modes are silent.** A motor read as `bipolar` idles at half throttle and never
+stops; a surface read as `unipolar` loses its entire negative half and only deflects one way.
+
+**Rule:** whenever you change a channel's FUNC *between a Motor and anything else*, flip that
+row's `scale` to match. Changing between two servo functions, or two motor functions, needs no
+JSON edit at all.
+
+### Using channels 9–12 (and any spare channel)
+
+All twelve channels are mapped in every shipped model, so adding flaps, retractable gear, a
+payload release or lights is a **parameter change only** — no JSON edit:
+
+```
+param set PWM_MAIN_FUNC9  406      # RC Flaps        -> RealFlight channel 9
+param set PWM_MAIN_FUNC10 400      # Landing Gear    -> RealFlight channel 10
+param set PWM_MAIN_FUNC11 430      # Gripper         -> RealFlight channel 11
+param set PWM_MAIN_FUNC12 301      # Peripheral via Actuator Set 1 -> channel 12
+```
+
+Make it permanent by adding `param set-default PWM_MAIN_FUNC9 406` to the airframe script. Then
+wire RealFlight channel 9 to the matching servo in the aircraft editor.
+
+A channel whose FUNC is unset emits `0.0`, which the `bipolar` conversion sends as a steady
+**0.5** — neutral, and exactly what these channels sent before they had rows. So mapping all
+twelve costs nothing on an aircraft that only uses four.
+
+**12 is a hard ceiling, and it is FlightAxis's, not ours** — the `ExchangeData` SOAP call carries
+exactly twelve `<item>` values. PX4 itself would go to 16. See
+[Channel limits](#channel-limits-what-actually-caps-you-at-12) for where each layer stops.
+
+### Reversing a channel
+
+No shipped model contains `"reverse": true`. There are two places to set direction, both outside
+the JSON:
+
+1. **PX4 side — `PWM_MAIN_REV`**, a bitmask over output channels; **bit `N-1` is channel `N`**.
+   It *does* work in SITL: it is applied in `MixingOutput::output_limit_calc_single`
+   (`mixer_module.cpp:531`), upstream of `PWMSim`, so it reaches RealFlight.
+
+   ```
+   param set PWM_MAIN_REV 2       # reverse channel 2 (elevator on plane/quadplane)
+   param set PWM_MAIN_REV 256     # reverse channel 9  (bit 8)
+   param set PWM_MAIN_REV 258     # both at once (2 | 256)
+   ```
+
+2. **RealFlight side** — each servo has its own direction in the model's servo setup.
+
+> ⚠️ `PWM_MAIN_MIN` / `PWM_MAIN_MAX` are a **different story and do not work in SITL**: `PWMSim`
+> overwrites them with `setAllMinValues` / `setAllMaxValues` (`PWMSim.cpp:49-50`), so per-channel
+> endpoint and trim adjustment has no effect. Only `PWM_MAIN_REV` survives.
+
+**Symptom of a wrong direction:** the surface moves the right amount the wrong way, so the
+aircraft diverges instead of correcting — a reversed elevator pitches *down* when PX4 commands
+nose-up. On a helicopter, do **not** reverse a single swash servo; the three are a coordinated
+triple and flipping one reads as roll/pitch cross-coupling. Fix swash direction in the RealFlight
+model or with `CA_SP0_ANG*`. The tail servo is the one heli channel a plain reversal suits.
+
+### Channel limits: what actually caps you at 12
+
+Every layer in the chain was checked. **The binding constraint is FlightAxis itself at 12** — and
+it is the only layer below 16:
+
+| Layer | Limit | Where |
+|---|---|---|
+| **RealFlight FlightAxis SOAP** | **12** ← *binding* | `ExchangeData` sends exactly 12 `<item>` values (`fa_communicator.cpp:204-217`). ArduPilot does the same: `float scaled_servos[12]` (`SIM_FlightAxis.cpp:329`). |
+| Bridge channel array | 12 | `RF_CHANNELS = 12` (`flightaxis_bridge.cpp:109`); `exchangeData` clamps to 12 (`fa_communicator.cpp:772-775`); `selectedChannels = 4095` = `0xFFF` = 12 bits (`flightaxis_bridge.cpp:932`). |
+| Model JSON validator | 12 | `RF_CHANNELS = 12`, `PX4_CONTROLS = 16` (`get_FAbridge_params.py:63-64`). |
+| MAVLink `HIL_ACTUATOR_CONTROLS` | 16 | `float controls[16]` — protocol-fixed. |
+| PX4 `actuator_outputs` | 16 | `NUM_ACTUATOR_OUTPUTS = 16` (`msg/ActuatorOutputs.msg:2`). |
+| `PWMSim` / `pwm_out_sim` | 16 | `MAX_ACTUATORS = PWM_OUTPUT_MAX_CHANNELS = 16` (`drv_pwm_output.h:51`); `module_sim.yaml` declares `num_channels: 16`. |
+| `PWM_MAIN_FUNC<N>` (SITL) | 16 | `PWM_MAIN_FUNC1…16` all exist. |
+| `HIL_ACT_FUNC<N>` (HITL) | 16 | `module_hil.yaml` also declares `num_channels: 16` — same limit, no SITL/HITL difference. |
+| Control allocation | 11 rotors + 8 surfaces = 19 | `CA_ROTOR_COUNT` max 11, `CA_SV_CS_COUNT` max 8 — more than enough to fill 12. |
+
+So PX4 could drive 16, but only the first 12 can reach RealFlight. Assigning `PWM_MAIN_FUNC13`
+and above is not an error — those outputs simply have nowhere to go.
 
 ### Preparing the RealFlight model (all vehicles)
 
@@ -213,34 +309,36 @@ Channel map: `models/plane.json`. Options: `ResetPosition` + `SilenceFPS` (bitma
 **RealFlight aircraft:** any conventional fixed-wing with aileron / elevator / throttle / rudder
 on channels 1–4, which is how RealFlight fixed-wing models are conventionally wired.
 
-| RF ch | PX4 | Drives | Scale | Reverse | Disarm |
+| RF ch | PX4 | Drives | `PWM_MAIN_FUNC` | Scale | Disarm |
 |---|---|---|---|---|---|
-| 0 | `controls[0]` | aileron (PX4 **aileron left**) | bipolar | no | hold |
-| 1 | `controls[1]` | elevator | bipolar | **yes** | hold |
-| 2 | `controls[2]` | throttle (Motor 1) | unipolar | no | **0.0** |
-| 3 | `controls[3]` | rudder | bipolar | no | hold |
+| 0 | `controls[0]` | aileron (PX4 **aileron left**) | 1 = 201 Servo 1 | bipolar | hold |
+| 1 | `controls[1]` | elevator | 2 = 203 Servo 3 | bipolar | hold |
+| 2 | `controls[2]` | throttle (Motor 1) | 3 = 101 Motor 1 | unipolar | **0.0** |
+| 3 | `controls[3]` | rudder | 4 = 204 Servo 4 | bipolar | hold |
+| 4 | `controls[4]` | aileron **right** — see below | 5 = 202 Servo 2 | bipolar | hold |
+| 5–11 | `controls[5..11]` | *unassigned* — steady 0.5 | 6–12 unset | bipolar | 0.5 |
 
-Airframe side: `PWM_MAIN_FUNC1..5 = 201, 203, 101, 204, 202` →
-`controls[0]`=Servo 1 aileron left, `[1]`=Servo 3 elevator, `[2]`=Motor 1 throttle,
-`[3]`=Servo 4 rudder, `[4]`=Servo 2 aileron right. The FUNC values are non-sequential precisely
-because the allocator's own numbering is not the RealFlight order — see
-[Reading the channel tables](#reading-the-channel-tables).
+The FUNC values are non-sequential precisely because the allocator's own numbering is not the
+RealFlight order — see [Reading the channel tables](#reading-the-channel-tables).
 
-**Gotcha — split ailerons.** PX4 declares two ailerons (`CA_SV_CS0` left → `controls[0]` = rf0,
-`CA_SV_CS1` right → `controls[4]` = rf4) but RealFlight models normally drive both ailerons from
-one mixed channel. Only the **left** aileron is mapped; `controls[4]` is deliberately unmapped —
-it is parked on the spare rf4 slot so that mapping it later stays an identity row. The two
-allocator outputs carry the same magnitude with opposite sign, so driving a single mixed
-RealFlight channel from one of them loses nothing. If your RF model drives the ailerons
-independently, add the identity row for the other one:
+**Gotcha — split ailerons on RF ch5.** PX4 declares two ailerons (`CA_SV_CS0` left →
+`controls[0]`, `CA_SV_CS1` right → `controls[4]`), and the airframe puts the right one on
+`PWM_MAIN_FUNC5`, so **RealFlight channel 5 now carries a full-amplitude roll signal**. The two
+allocator outputs are exact mirrors and `controls[0]` already swings the full ±1 range, so a
+RealFlight model with one mixed aileron channel needs nothing on ch5.
 
-```json
-{"rf": 4, "px4": 4, "scale": "bipolar", "reverse": true}
+⚠️ **RealFlight models commonly use ch5 for flaps, spoilers or gear.** If yours does, a
+roll-correlated signal would drive that instead. Disable it:
+
+```
+param set PWM_MAIN_FUNC5 0     # ch5 returns to a steady neutral 0.5
 ```
 
+If your model really is split-aileron, check the two surfaces move in **opposite** directions and
+reverse ch5 with `param set PWM_MAIN_REV 16` (bit 4) if they do not.
+
 **QGC check:** Vehicle Setup → Actuators should show Motor 1 plus four servos in the order
-aileron-left, aileron-right, elevator, rudder. Moving the "Aileron left" slider must move the
-RealFlight ailerons; "Aileron right" must move nothing.
+aileron-left, aileron-right, elevator, rudder.
 
 **First flight.** Do the generic static/rates/taxi checks in §9 first, then: arm on the runway in
 **Position** mode and confirm the throttle idles at zero (disarm value 0.0, not half). Take off
@@ -263,12 +361,17 @@ Channel map: `models/quad.json`. Options: `ResetPosition` + `SilenceFPS` (bitmas
 **RealFlight aircraft:** any quad-X multirotor whose four motors sit on channels 1–4
 individually (no RealFlight-side mixing).
 
-| RF ch | PX4 | Drives | Scale | Reverse | Disarm |
+| RF ch | PX4 | Drives | `PWM_MAIN_FUNC` | Scale | Disarm |
 |---|---|---|---|---|---|
-| 0 | `controls[0]` | motor 1 | unipolar | no | **0.0** |
-| 1 | `controls[1]` | motor 2 | unipolar | no | **0.0** |
-| 2 | `controls[2]` | motor 3 | unipolar | no | **0.0** |
-| 3 | `controls[3]` | motor 4 | unipolar | no | **0.0** |
+| 0 | `controls[0]` | motor 1 | 1 = 101 Motor 1 | unipolar | **0.0** |
+| 1 | `controls[1]` | motor 2 | 2 = 102 Motor 2 | unipolar | **0.0** |
+| 2 | `controls[2]` | motor 3 | 3 = 103 Motor 3 | unipolar | **0.0** |
+| 3 | `controls[3]` | motor 4 | 4 = 104 Motor 4 | unipolar | **0.0** |
+| 4–11 | `controls[4..11]` | *unassigned* — steady 0.5 | 5–12 unset | bipolar | 0.5 |
+
+If you assign a **motor** to one of ch5–12 (a hex or octo on this frame), change that row's
+`scale` to `unipolar` and its `disarm` to `0.0` in `quad.json` — see
+[`scale` is the one column you may still have to touch](#scale-is-the-one-column-you-may-still-have-to-touch).
 
 Airframe side: `PWM_MAIN_FUNC1..4 = 101..104`. The one model where the allocator's own numbering
 is already the RealFlight order, so the FUNC list comes out sequential and nothing has to be
@@ -301,23 +404,30 @@ PX4_FLIGHTAXIS_IP=192.168.10.1 make px4_sitl_nolockstep flightaxis_quadplane
 Airframe: `1202_flightaxis_quadplane` (`SYS_AUTOSTART` 1202, `CA_AIRFRAME 2`, standard VTOL,
 `VT_TYPE 2`). Channel map: `models/quadplane.json`. Options: `ResetPosition` + `SilenceFPS` (bitmask **9** = 1 | 8).
 
-**RealFlight aircraft:** a reference-class quadplane — aileron / elevator / forward throttle /
+**RealFlight aircraft:** a quadplane with four lift motors, a pusher and four control surfaces — aileron / elevator / forward throttle /
 rudder on channels 1–4, four lift motors on channels 5–8.
 
-| RF ch | PX4 | Drives | Scale | Reverse | Disarm |
+| RF ch | PX4 | Drives | `PWM_MAIN_FUNC` | Scale | Disarm |
 |---|---|---|---|---|---|
-| 0 | `controls[0]` | aileron (PX4 **aileron left**) | bipolar | no | hold |
-| 1 | `controls[1]` | elevator | bipolar | **yes** | hold |
-| 2 | `controls[2]` | forward / pusher throttle (Motor 5) | unipolar | no | **0.0** |
-| 3 | `controls[3]` | rudder | bipolar | no | hold |
-| 4 | `controls[4]` | lift motor 1 | unipolar | no | **0.0** |
-| 5 | `controls[5]` | lift motor 2 | unipolar | no | **0.0** |
-| 6 | `controls[6]` | lift motor 3 | unipolar | no | **0.0** |
-| 7 | `controls[7]` | lift motor 4 | unipolar | no | **0.0** |
+| 0 | `controls[0]` | aileron (PX4 **aileron left**) | 1 = 201 Servo 1 | bipolar | hold |
+| 1 | `controls[1]` | elevator | 2 = 203 Servo 3 | bipolar | hold |
+| 2 | `controls[2]` | forward / pusher throttle (Motor 5) | 3 = 105 Motor 5 | unipolar | **0.0** |
+| 3 | `controls[3]` | rudder | 4 = 204 Servo 4 | bipolar | hold |
+| 4 | `controls[4]` | lift motor 1 | 5 = 101 Motor 1 | unipolar | **0.0** |
+| 5 | `controls[5]` | lift motor 2 | 6 = 102 Motor 2 | unipolar | **0.0** |
+| 6 | `controls[6]` | lift motor 3 | 7 = 103 Motor 3 | unipolar | **0.0** |
+| 7 | `controls[7]` | lift motor 4 | 8 = 104 Motor 4 | unipolar | **0.0** |
+| 8 | `controls[8]` | aileron **right** — see below | 9 = 202 Servo 2 | bipolar | hold |
+| 9–11 | `controls[9..11]` | *unassigned* — steady 0.5 | 10–12 unset | bipolar | 0.5 |
 
-Airframe side: `PWM_MAIN_FUNC1..9 = 201, 203, 105, 204, 101, 102, 103, 104, 202` →
-`controls[0]`=aileron left, `[1]`=elevator, `[2]`=Motor 5 forward/pusher, `[3]`=rudder,
-`[4..7]`=lift motors 1–4, `[8]`=aileron right (unmapped).
+This is the clearest illustration of the `scale` rule: rf2 and rf4–7 are motors (`unipolar`,
+disarm `0.0`) while rf0, rf1, rf3 and rf8 are surfaces (`bipolar`).
+
+⚠️ **RF ch9 now carries the right aileron.** As on the plane, the two allocator outputs are exact
+mirrors and `controls[0]` already swings the full ±1 range, so a model with one mixed aileron
+channel needs nothing there. If your RF model uses ch9 for something else, `param set
+PWM_MAIN_FUNC9 0` returns it to a steady neutral 0.5; if it really is split-aileron and the
+surfaces move the same way, reverse it with `param set PWM_MAIN_REV 256` (bit 8).
 
 This is the clearest case of the FUNC list absorbing the allocator's ordering. PX4's allocator
 always emits **motors before servos**, so its own numbering puts the four lift motors first
@@ -346,10 +456,11 @@ ping-pong between `rf i` and `rf i+4` at the loop rate — a full-amplitude serv
 Give those rows an explicit `disarm` (0.5 for a bipolar servo, 0.0 for a motor).
 
 **Gotcha — transition.** The airframe sets `VT_F_TRANS_THR 0.75`, `VT_FWD_THRUST_EN 4`,
-`FW_AIRSPD_MAX 25`. Transition needs the pusher to actually accelerate the model; if the
-RealFlight airframe is much draggier or lighter than a reference airframe, transition will stall or never
-complete. Tune `VT_F_TRANS_DUR` / `VT_ARSP_TRANS` for your model rather than assuming the
-defaults fit.
+`FW_AIRSPD_MAX 25`. Transition needs the pusher to actually accelerate the model. These values
+assume an airframe whose pusher can reach `VT_ARSP_TRANS` in level flight within
+`VT_F_TRANS_DUR`; if your RealFlight model is appreciably draggier, or light enough that the
+lift motors hold it below that airspeed, transition will stall or never complete. Tune
+`VT_F_TRANS_DUR` / `VT_ARSP_TRANS` for your model rather than assuming the defaults fit.
 
 **Gotcha — there is no motor-failure detection.** The airframe used to carry `FD_ACT_EN 0`,
 inherited from a stock PX4 standard-VTOL airframe along with a comment claiming SITL reports
@@ -391,14 +502,18 @@ controller on channel 8, each channel straight through to the matching servo. Th
 **ArduPilot's own heli channel order and its default (non-demixed) convention**, so a
 model already set up for an ArduPilot pilot needs no re-mapping.
 
-| RF ch | PX4 | Drives | Scale | Reverse | Disarm |
+| RF ch | PX4 | Drives | `PWM_MAIN_FUNC` | Scale | Disarm |
 |---|---|---|---|---|---|
-| 0 | `controls[0]` | swash plate servo 1 | bipolar | no | **0.5** |
-| 1 | `controls[1]` | swash plate servo 2 | bipolar | no | **0.5** |
-| 2 | `controls[2]` | swash plate servo 3 | bipolar | no | **0.5** |
-| 3 | `controls[3]` | tail rotor pitch / yaw (Servo 1) | bipolar | no | **0.5** |
-| 4–6 | — | unmapped, idle at `UnmappedDefault` 0.5 | — | — | — |
-| 7 | `controls[7]` | main rotor / RSC (Motor 1) | unipolar | no | **0.0** |
+| 0 | `controls[0]` | swash plate servo 1 | 1 = 202 Servo 2 | bipolar | **0.5** |
+| 1 | `controls[1]` | swash plate servo 2 | 2 = 203 Servo 3 | bipolar | **0.5** |
+| 2 | `controls[2]` | swash plate servo 3 | 3 = 204 Servo 4 | bipolar | **0.5** |
+| 3 | `controls[3]` | tail rotor pitch / yaw (Servo 1) | 4 = 201 Servo 1 | bipolar | **0.5** |
+| 4–6 | `controls[4..6]` | *unassigned* — steady 0.5 | 5–7 explicitly `0` | bipolar | 0.5 |
+| 7 | `controls[7]` | main rotor / RSC (Motor 1) | 8 = 101 Motor 1 | unipolar | **0.0** |
+| 8–11 | `controls[8..11]` | *unassigned* — steady 0.5 | 9–12 unset | bipolar | 0.5 |
+
+RF ch5–7 stay idle to keep ArduPilot parity (below); they are mapped rows now, but with their
+FUNC at `0` they emit a steady neutral 0.5 exactly as before.
 
 That layout is taken from ArduPilot: `AP_MotorsHeli_Swash.cpp:201-202` defaults the three
 swash servos to `SERVO1/2/3` (`k_motor1/2/3` = 33/34/35), `AP_MotorsHeli_Single.cpp:207`
@@ -586,9 +701,9 @@ Full copy-pasteable command with a worked set of coordinates:
 ```bash
 cd ~/PX4-Autopilot
 PX4_FLIGHTAXIS_IP=192.168.10.1 \
-PX4_HOME_LAT=50.400900 \
-PX4_HOME_LON=-111.010772 \
-PX4_HOME_ALT=795 \
+PX4_HOME_LAT=-37.7304361 \
+PX4_HOME_LON=175.7437528 \
+PX4_HOME_ALT=50.6 \
 make px4_sitl_nolockstep flightaxis_plane
 ```
 
@@ -661,7 +776,7 @@ pxh> mavlink status
 ```bash
 cd ~/PX4-Autopilot
 PX4_FLIGHTAXIS_IP=192.168.10.1 \
-PX4_HOME_LAT=50.400900 PX4_HOME_LON=-111.010772 PX4_HOME_ALT=795 \
+PX4_HOME_LAT=-37.7304361 PX4_HOME_LON=175.7437528 PX4_HOME_ALT=50.6 \
 make px4_sitl_nolockstep flightaxis_plane
 ```
 
@@ -716,12 +831,22 @@ FlightAxis check: RealFlight reachable at 192.168.10.1:18083
 
 ```
 [flightaxis_bridge] MAVLink to FlightAxis (RealFlight) bridge
-[flightaxis_bridge] options=0x9 unmapped_default=0.5 channels=4
+[flightaxis_bridge] options=0x9 unmapped_default=0.5 channels=12
   rf0 <- px4[0] bipolar disarm=-1
-  rf1 <- px4[1] bipolar reversed disarm=-1
+  rf1 <- px4[1] bipolar disarm=-1
   rf2 <- px4[2] unipolar disarm=0
   rf3 <- px4[3] bipolar disarm=-1
+  rf4 <- px4[4] bipolar disarm=-1
+  rf5 <- px4[5] bipolar disarm=0.5
+  rf6 <- px4[6] bipolar disarm=0.5
+  rf7 <- px4[7] bipolar disarm=0.5
+  rf8 <- px4[8] bipolar disarm=0.5
+  rf9 <- px4[9] bipolar disarm=0.5
+  rf10 <- px4[10] bipolar disarm=0.5
+  rf11 <- px4[11] bipolar disarm=0.5
 ```
+↑ `channels=12` on every shipped model, and **no row says `reversed`** — that is the identity
+pipe. A `reversed` here would mean someone added `"reverse": true` back to the JSON.
 ↑ The channel map the bridge actually parsed. **Check this against §2 for your vehicle** — it is
 the fastest way to catch an edited JSON. Every shipped model is an identity map, so each row
 should read `rf<N> <- px4[N]`; anything else means the JSON has been edited (§7).
@@ -839,7 +964,7 @@ itself:
 cd ~/PX4-Autopilot/Tools/simulation/flightaxis/flightaxis_bridge
 
 # instance 1 -> listens on TCP 4561
-PX4_HOME_LAT=50.400900 PX4_HOME_LON=-111.010772 PX4_HOME_ALT=795 \
+PX4_HOME_LAT=-37.7304361 PX4_HOME_LON=175.7437528 PX4_HOME_ALT=50.6 \
 ~/PX4-Autopilot/build/px4_sitl_nolockstep/build_flightaxis_bridge/flightaxis_bridge \
   1 192.168.10.2 $(./get_FAbridge_params.py models/plane.json) &
 
@@ -1013,7 +1138,9 @@ a time), then:
   wrong surface still moves, the mismatch is in the airframe: compare the `PWM_MAIN_FUNC*` block
   (and its comment) against §2 and against your RealFlight model's actual channel order, and fix
   it there.
-- **Right surface, wrong direction** → flip `"reverse"` on that row.
+- **Right surface, wrong direction** → set that channel's bit in `PWM_MAIN_REV` (bit `N-1` for
+  channel `N`), or flip the servo's direction in the RealFlight model. Not a JSON edit — see
+  [Reversing a channel](#reversing-a-channel).
 - **Surface only moves through half its travel, or sits off-centre** → wrong `scale`. Motors are
   `unipolar`, control surfaces are `bipolar`. Scaling a motor as bipolar folds `[0,1]` into
   `[0.5,1]`; scaling a servo as unipolar throws away its whole negative half.
@@ -1113,7 +1240,7 @@ aircraft has been flown, in RealFlight or anywhere.
 - `FA_check.py` fails correctly, with its diagnostics, against an unreachable host.
 - **End to end**: PX4 connects on TCP 4560, EKF2 converges, the synthesised sensors are sane,
   and baro and GPS altitudes agree.
-- Channel maps correct end to end for **plane and quad**, including bipolar/reverse/unipolar
+- Channel maps correct end to end for **plane and quad**, including bipolar/unipolar
   scaling and disarm values.
 - Resilience: reconnect, aircraft reset, glitch swallow, and bridge death all behave as designed.
 - The ROS 2 path, including an offboard node arming and driving the actuators — see

@@ -263,9 +263,9 @@ map hangs off it:
 cd ~/PX4-Autopilot
 
 PX4_FLIGHTAXIS_IP=192.168.10.1 \
-PX4_HOME_LAT=-37.7304667 \
-PX4_HOME_LON=175.7435583 \
-PX4_HOME_ALT=40 \
+PX4_HOME_LAT=-37.7304361 \
+PX4_HOME_LON=175.7437528 \
+PX4_HOME_ALT=50.6 \
 make px4_sitl_nolockstep flightaxis_quadplane
 ```
 
@@ -311,7 +311,7 @@ variable:
 | `PX4_HOME_ALT` | `488.0` (metres) |
 
 ```bash
-PX4_HOME_LAT=51.4769 PX4_HOME_LON=-0.0005 PX4_HOME_ALT=15 \
+PX4_HOME_LAT=-37.7304361 PX4_HOME_LON=175.7437528 PX4_HOME_ALT=50.6 \
 PX4_FLIGHTAXIS_IP=192.168.10.1 make px4_sitl_nolockstep flightaxis_plane
 ```
 
@@ -323,8 +323,27 @@ elevation, deliberately — see spec §6.
 Each `models/<name>.json` maps RealFlight transmitter channels (`rf`) to PX4 actuator outputs
 (`px4` = an index into `HIL_ACTUATOR_CONTROLS.controls[]`).
 
-**RealFlight channel N == PX4 output channel N.** Every shipped map is a pure identity map: `rf`
-and `px4` are equal on every row, e.g. `quadplane.json` maps `rf0..rf7` to `px4` `0..7`.
+> ### The one rule
+>
+> **RealFlight channel N is driven by PX4 output channel N — all twelve of them.**
+>
+> Every shipped map is a pure identity map covering **ch1–ch12**: `rf` and `px4` are equal on
+> every row, and every row from `rf0` to `rf11` is present. No exceptions, no renumbering, and no
+> `"reverse": true` anywhere.
+>
+> What each channel *carries* is decided solely by `PWM_MAIN_FUNC<N>` (SITL) / `HIL_ACT_FUNC<N>`
+> (HITL). To change what comes out on a RealFlight channel, change that parameter — not the JSON.
+
+**Twelve is the ceiling, and it is FlightAxis's.** RealFlight's `ExchangeData` SOAP call carries
+exactly twelve channel values, so ch12 is as far as anything can go. PX4 itself would reach 16.
+Channels with no FUNC assigned sit at a steady neutral `0.5`, so mapping all twelve costs nothing
+on an aircraft that uses four. To put flaps, gear, a gripper or lights on a spare channel it is a
+parameter change only:
+
+```
+param set PWM_MAIN_FUNC9  406      # RC Flaps     -> RealFlight channel 9
+param set PWM_MAIN_FUNC10 400      # Landing Gear -> RealFlight channel 10
+```
 
 The channel order is decided in the airframe instead, by `PWM_MAIN_FUNC<N>` (SITL) or
 `HIL_ACT_FUNC<N>` (HITL) — the same place ArduPilot puts it (`SERVOn_FUNCTION`) and PX4's own
@@ -345,9 +364,16 @@ HITL to the physical output pinout:
 
 What remains in the JSON is what is genuinely not ordering and cannot be expressed as a FUNC
 value — `scale` (PX4 normalises motors to `[0,1]` but servos to `[-1,1]`, while RealFlight always
-wants `[0,1]`), `reverse`, `disarm`, and the option transforms:
+wants `[0,1]`), `disarm`, and the option transforms:
 
-- `"reverse": true` is applied *after* scaling, as `v -> 1-v`.
+- **`scale` is the one column a FUNC change can force you to touch.** `unipolar` is correct if and
+  only if that channel's FUNC is a **Motor**; `bipolar` is correct for everything else. Both
+  mistakes are silent — a motor read as `bipolar` idles at half throttle and never stops, a
+  surface read as `unipolar` only ever deflects one way.
+- **Reversal is not in the JSON at all.** No shipped model contains `"reverse": true`. Use the
+  `PWM_MAIN_REV` bitmask (bit `N-1` = channel `N`), which *is* honoured in SITL, or flip the servo
+  in the RealFlight model. Note `PWM_MAIN_MIN`/`MAX` are **not** honoured in SITL — `PWMSim`
+  overwrites them — so endpoint trimming has no effect there.
 - `"disarm"` is the value sent while PX4 is disarmed. **`-1`, which is also the default when the
   key is omitted, means "hold the last output"** — correct for a plain surface, wrong for a
   motor, so every motor row sets `"disarm": 0.0` explicitly. On any slot `HeliDemix` or
@@ -431,7 +457,7 @@ configure time rather than failing at launch.
 | `WARNING: RealFlight physics speed multiplier is <x> (set it to 1.0)` | RealFlight is running fast or slow motion. All timing and sensor synthesis assume real time — reset the multiplier in RealFlight. |
 | `glitch 0.35s` lines appearing | The bridge absorbed a physics-time jump (network hiccup) so it does not reach EKF2 as a time jump. Occasional lines are benign; a steady stream means the link cannot keep up — go wired, or move the bridge closer to the RealFlight machine. |
 | **Hangs silently at `waiting for PX4 on TCP 4560`** | The bridge is up and waiting, but PX4 never connected. Usually PX4 exited at startup — scroll back for its error. The most common cause is the missing airframes `CMakeLists.txt` registration (see step 3 of [Adding a new aircraft](#adding-a-new-aircraft)): the airframe is absent from the ROMFS, so `SYS_AUTOSTART` matches nothing. Also check that nothing else already holds TCP 4560. |
-| Aircraft twitches or flies inverted on one axis | Channel order mismatch. First confirm the JSON is still an identity map (`rf` == `px4` on every row); if it is, the fix is in the `PWM_MAIN_FUNC*` block of the matching airframe script, which must put `controls[]` in your RealFlight model's channel order (see [Model JSON](#model-json-channel-maps)). Inverted on exactly one axis with the right surface moving is instead a `"reverse"` flag. |
+| Aircraft twitches or flies inverted on one axis | Channel order mismatch. First confirm the JSON is still an identity map (`rf` == `px4` on every row); if it is, the fix is in the `PWM_MAIN_FUNC*` block of the matching airframe script, which must put `controls[]` in your RealFlight model's channel order (see [Model JSON](#model-json-channel-maps)). Inverted on exactly one axis with the right surface moving is a direction problem, not an ordering one: set that channel's bit in `PWM_MAIN_REV` (bit `N-1` for channel `N`) or flip the servo in the RealFlight model. |
 | Heli has no left yaw at all; the tail sits on its lower stop | The tail row must be `"scale": "bipolar"` with `"disarm": 0.5`. `1203_flightaxis_heli` uses `CA_AIRFRAME 11` ("tail Servo"), so the tail is a servo on `[-1,1]`. Under `CA_AIRFRAME 10` it would be a motor clamped to `[0,1]` and the whole negative half of the yaw command would be clipped away. |
 | Bridge exits with `PX4 link lost - shutting down` | Expected, not a fault: a dead PX4 link is terminal by design. PX4 exited, the board rebooted, or the cable was pulled. Restart both sides — the bridge deliberately does not re-accept a fresh PX4 whose clock starts at zero. |
 
@@ -449,7 +475,7 @@ flight dynamics. It proves the software path; it proves nothing about how the ai
 - `FA_check.py` fails correctly against an unreachable host.
 - **SITL end to end:** PX4 connects on TCP 4560, EKF2 converges, the synthesised sensors are
   sane (baro and GPS altitudes agree), the plane and quad channel maps are correct end to end
-  including bipolar/reverse/unipolar scaling and disarm values, and the reconnect / reset /
+  including bipolar/unipolar scaling and disarm values, and the reconnect / reset /
   glitch / sim-death resilience cases all behave.
 - **ROS 2 end to end:** uXRCE-DDS topics populate, and an offboard node armed the vehicle and
   drove the actuators from ROS 2. Details and measured rates: [ROS2.md](ROS2.md).

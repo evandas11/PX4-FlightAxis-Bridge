@@ -124,7 +124,7 @@ param set-default COM_DISARM_PRFLT -1
 #
 # THE INVARIANT: that assignment is not arbitrary and is not merely "some
 # consistent order". It is chosen so that the controls[] order matches the
-# RealFlight model's own channel order 1:1 -- the reference-class quadplane
+# RealFlight model's own channel order 1:1 -- the four-lift-motor pusher quadplane
 # there is ch1 aileron, ch2 elevator, ch3 forward throttle, ch4 rudder,
 # ch5-ch8 the four lift motors. Because of that, models/quadplane.json is a
 # PURE IDENTITY MAP: every row has rf == px4, i.e. PX4 output channel N drives

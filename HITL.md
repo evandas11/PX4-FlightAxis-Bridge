@@ -388,10 +388,10 @@ Plus `CA_ROTOR_COUNT 4` and the `CA_ROTOR*_P[XY]`/`CA_ROTOR*_KM` values from
 | Param | Value | → `controls[]` | RealFlight ch |
 |---|---|---|---|
 | `HIL_ACT_FUNC1` | 201 (Servo 1, aileron L) | `[0]` | rf0 |
-| `HIL_ACT_FUNC2` | 203 (Servo 3, elevator) | `[1]` | rf1 (reversed) |
+| `HIL_ACT_FUNC2` | 203 (Servo 3, elevator) | `[1]` | rf1 |
 | `HIL_ACT_FUNC3` | 101 (Motor 1, throttle) | `[2]` | rf2 |
 | `HIL_ACT_FUNC4` | 204 (Servo 4, rudder) | `[3]` | rf3 |
-| `HIL_ACT_FUNC5` | 202 (Servo 2, aileron R) | `[4]` | unmapped |
+| `HIL_ACT_FUNC5` | 202 (Servo 2, aileron R) | `[4]` | rf4 |
 
 Plus the `CA_SV_CS*` surface definitions from `1200_flightaxis_plane`.
 
@@ -401,8 +401,9 @@ The FUNC list absorbs that mismatch, which is why the quad above needs no reorde
 motors) and the other three do.
 
 **Quadplane** (`CA_AIRFRAME 2`): `HIL_ACT_FUNC1..9` = 201, 203, 105, 204, 101, 102, 103, 104, 202
-— surfaces on `controls[0..3]`, the four lift motors on `[4..7]`, aileron right on `[8]` and
-unmapped — mirroring `1202_flightaxis_quadplane`.
+— surfaces on `controls[0..3]`, the four lift motors on `[4..7]`, aileron right on `[8]` = rf8 —
+mirroring `1202_flightaxis_quadplane`. `FUNC10..12` are unset, so RealFlight ch10–12 sit at a
+steady neutral 0.5 until you assign something to them.
 
 **Heli** (`CA_AIRFRAME 11`): `HIL_ACT_FUNC1..4` = 202, 203, 204, 201 and `HIL_ACT_FUNC8` = 101,
 with `FUNC5..7` explicitly 0 — swash servos 1–3 on `controls[0..2]`, yaw tail on `[3]`, main
