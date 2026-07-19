@@ -48,6 +48,21 @@ param set-default COM_RC_IN_MODE 4
 #   controls[3] = 104 Motor 4     [0,1] -> quad.json rf3
 param set-default CA_AIRFRAME 0
 
+# Rotor geometry: the SYMMETRY matters, the MAGNITUDES do not. PX4 normalises
+# the multirotor mixing matrix by a scale derived from the mix columns
+# themselves (ControlAllocationPseudoInverse.cpp:100-116), so the arm length
+# divides straight back out: a +-0.15 m square, a +-0.25 m square and a
+# +-0.50 m square all produce a bit-identical matrix, for any KM and CT. The
+# result is +-0.7071 per motor - literally ArduPilot's cos(45) frame table, by
+# a different route. So these values need no adjustment per RealFlight model.
+#
+# What is NOT free is asymmetry. Feeding asymmetric arms to a symmetric
+# aircraft leaves roll and pitch clean but makes YAW cross-couple: with the
+# Gazebo standard_vtol arms (PY 0.245 / -0.1875) a unit yaw command also
+# produces a 53%% roll disturbance, which is structural and no amount of rate
+# tuning removes it. The symmetric square below is therefore the deliberate
+# choice, not a placeholder - do not "correct" it towards a reference
+# airframe's measured arms.
 param set-default CA_ROTOR_COUNT 4
 param set-default CA_ROTOR0_PX 0.15
 param set-default CA_ROTOR0_PY 0.15
