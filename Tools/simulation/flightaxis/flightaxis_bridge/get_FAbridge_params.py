@@ -189,6 +189,24 @@ for i, c in enumerate(channels):
         fail("%s 'disarm' must be between 0 and 1, or exactly -1 for hold-last; "
              "got %g" % (where, disarm))
 
+    # Omitting "disarm" is legal and means -1, hold-last - but it is a REAL
+    # choice with a safety consequence, and it is the one the JSON syntax makes
+    # by default, so say so out loud. A hold-last surface freezes at whatever
+    # the last armed frame commanded and stays there through the disarm AND
+    # through a RealFlight respawn (the bridge re-seeds on the reset edge, so
+    # the respawn case is covered, but a plain disarm in flight is not): a
+    # fixed-wing that disarms mid-divergence leaves its elevator at full
+    # deflection on an aircraft the pilot sees standing still. Every shipped
+    # model therefore states 0.5 on a bipolar surface and 0.0 on a motor.
+    # A warning, not an error, because holding IS what some peripherals want -
+    # a latch or a gimbal has no meaningful neutral to snap to.
+    if 'disarm' not in c:
+        sys.stderr.write(
+            "get_FAbridge_params: %s (rf%d) has no \"disarm\" key, so it holds its "
+            "last armed value when disarmed. Add \"disarm\": 0.5 for a bipolar "
+            "surface or 0.0 for a motor unless holding is what you want.\n"
+            % (where, rf))
+
     rows.append((rf, px4, disarm, 'disarm' in c))
     out.append('%d %d %d %d %g' % (rf, px4, scale, reverse, disarm))
 
