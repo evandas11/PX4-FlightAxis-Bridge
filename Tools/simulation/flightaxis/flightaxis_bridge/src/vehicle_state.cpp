@@ -33,9 +33,8 @@
  *
  * RealFlight (FlightAxis) state -> PX4 HIL messages.
  *
- * Conversions ported literally from ArduPilot SIM_FlightAxis.cpp (verified
- * ground truth). Sensor-noise / mag / baro synthesis style follows the
- * FlightGear bridge's vehicle_state.cpp.
+ * Conversions ported literally from the upstream implementation named in the
+ * licence header above (verified ground truth).
  */
 
 #include "vehicle_state.h"
@@ -117,7 +116,7 @@ VehicleState::VehicleState(double home_lat_deg, double home_lon_deg, double home
 
 	standard_normal_distribution_ = std::normal_distribution<double>(0.0, 1.0);
 
-	// same magnitudes as the FlightGear bridge
+	// sensor noise magnitudes
 	acc_nois = 0.0001;
 	gyro_nois = 0.001;
 	mag_nois = 0.001;
@@ -244,7 +243,7 @@ void VehicleState::setFAData(const FAState &fa, double dt_true)
 	// Magnetometer: home earth field rotated to body (gauss)
 	mag_body = q_ned.inverse() * mag_ned;
 
-	// Rangefinder (ArduPilot SIM_FlightAxis): AGL projected onto the body-down
+	// Rangefinder: AGL projected onto the body-down
 	// axis; invalid when the body-down axis points up (vehicle inverted).
 	const double dcm_c_z = q_ned.toRotationMatrix()(2, 2);
 
@@ -255,7 +254,7 @@ void VehicleState::setFAData(const FAState &fa, double dt_true)
 		rangefinder_m = std::numeric_limits<double>::quiet_NaN();
 	}
 
-	// RPM (ArduPilot selection logic, single channel)
+	// RPM (single channel)
 	if (fa.m_propRPM > 0) {
 		rpm = fa.m_propRPM;
 
@@ -292,7 +291,7 @@ void VehicleState::extrapolate(double dt_step)
 
 void VehicleState::nedToLLA(const Vector3d &pos_ned, double &lat_deg, double &lon_deg, double &alt_m) const
 {
-	// spherical earth around home, like ArduPilot/jMAVSim
+	// spherical earth around home
 	lat_deg = home_lat + RAD2DEG * (pos_ned.x() / EARTH_RADIUS_M);
 	lon_deg = home_lon + RAD2DEG * (pos_ned.y() / (EARTH_RADIUS_M * std::cos(home_lat * DEG2RAD)));
 	alt_m = home_alt - pos_ned.z();

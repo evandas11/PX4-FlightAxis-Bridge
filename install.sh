@@ -191,7 +191,18 @@ AIRFRAMES="$FA_AIRFRAMES"
 MODELS="$FA_MODELS"
 
 INCLUDE_LINE='include(sitl_targets_flightaxis.cmake)'
-ANCHOR_LINE='include(sitl_targets_flightgear.cmake)'
+
+# Splice anchor: the first include(sitl_targets_*.cmake) line already in PX4's
+# own list, found by pattern rather than by a hard-coded filename - which set of
+# simulators a given PX4 release ships is not our business, and hard-coding one
+# of them made the splice fail on any tree that dropped it. Empty if the file
+# has no such block at all; 5a turns that into a refusal rather than a guess.
+ANCHOR_LINE="$(
+	sed -e 's/\r$//' -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' "$SIM_CMAKE" 2>/dev/null \
+		| grep -E '^include\(sitl_targets_[A-Za-z0-9._+-]+\.cmake\)$' \
+		| grep -vxF "$INCLUDE_LINE" \
+		| head -n 1 || true
+)"
 
 # fa_strip_include takes the line to remove as its second argument; the callers
 # below (the step-2 "is this modification ours?" test and the step-3 backup
@@ -239,8 +250,9 @@ ok "PX4 layout looks right (Makefile, Tools/simulation, both CMakeLists.txt)"
 
 # The v1.16 per-simulator sitl_targets_*.cmake pattern is what we splice into.
 SIM_DIR="$PX4_DIR/src/modules/simulation/simulator_mavlink"
-if [ ! -f "$SIM_DIR/sitl_targets_flightgear.cmake" ]; then
-	MSG="$SIM_CMAKE_REL exists but sitl_targets_flightgear.cmake does not.
+if [ -z "$(find "$SIM_DIR" -maxdepth 1 -name 'sitl_targets_*.cmake' \
+		! -name 'sitl_targets_flightaxis.cmake' -print -quit 2>/dev/null)" ]; then
+	MSG="$SIM_CMAKE_REL exists but holds no sitl_targets_*.cmake files of its own.
        This tree does not use the per-simulator sitl_targets_*.cmake pattern
        that this integration relies on. PX4 v1.13-v1.15 register SITL targets in
        platforms/posix/cmake/sitl_target.cmake instead, which needs a different
@@ -447,14 +459,15 @@ backup "$AF_CMAKE"  fa_strip_airframes
 # ================================================================= 4/7 ======
 step "4/7  Copying the FlightAxis payload"
 
-# Deliberately NO --delete here, and none in sync-to-px4.sh either.
+# Deliberately NO --delete here.
 #
 # The payload directory is where README's "Adding a new aircraft" tells users to
 # put models/<name>.json, so rsync'ing --delete into it would destroy their work
-# on every upgrade. The cost of that choice is that a file we drop in a later
-# version lingers in the tree; uninstall.sh removes exactly our manifest, so the
-# clean way to shed a stale file is uninstall + install. Writing INTO the PX4
-# tree never deletes; only sync-from-px4.sh (repo is the mirror) uses --delete.
+# on every upgrade. Writing into a PX4 tree therefore never deletes, full stop -
+# that directory holds the user's own files as well as ours. The cost of that
+# choice is that a file we drop in a later version lingers in the tree;
+# uninstall.sh removes exactly our manifest, so the clean way to shed a stale
+# file is uninstall + install.
 copy_tree() {
 	# copy_tree <src-dir>/ <dst-dir>/ ; preserves modes, excludes __pycache__
 	if command -v rsync >/dev/null 2>&1; then
@@ -535,16 +548,16 @@ step "5/7  Registering with the PX4 build system"
 if fa_has_include "$SIM_CMAKE" "$INCLUDE_LINE"; then
 	ok "$SIM_CMAKE_REL already includes sitl_targets_flightaxis.cmake (no change)"
 else
-	fa_has_include "$SIM_CMAKE" "$ANCHOR_LINE" || die \
-"could not find the anchor line
-         $ANCHOR_LINE
+	[ -n "$ANCHOR_LINE" ] && fa_has_include "$SIM_CMAKE" "$ANCHOR_LINE" || die \
+"could not find an include(sitl_targets_*.cmake) line to anchor to
        in $SIM_CMAKE_REL
        Refusing to guess where to insert our include(). Add this line manually
        next to the other include(sitl_targets_*.cmake) lines:
          $INCLUDE_LINE"
 
-	# Insert immediately before the flightgear include (keeps the list
-	# alphabetically sorted, which is how PX4 maintains it). The anchor is
+	# Insert immediately before the first existing include (keeps the list
+	# alphabetically sorted, which is how PX4 maintains it, since our name
+	# sorts to the front of that block). The anchor is
 	# matched trimmed - the same test fa_has_include just passed, so we can
 	# never "find" an anchor here that the awk then fails to match - and our
 	# line copies the anchor's own indentation and line ending.

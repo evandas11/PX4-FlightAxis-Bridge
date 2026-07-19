@@ -2,8 +2,8 @@ cmake_minimum_required(VERSION 3.10)
 
 project(flightaxis_bridge)
 
-# FindMAVLink lives in ./cmake (a copy of the FlightGear bridge's, kept in-tree
-# so this does not depend on that submodule being initialised)
+# FindMAVLink lives in ./cmake (a third-party copy, see COPYRIGHT.md, kept
+# in-tree so this does not depend on that submodule being initialised)
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_LIST_DIR}/cmake")
 
 # The ExternalProject registration passes -DCMAKE_BUILD_TYPE=RelWithDebInfo, but
@@ -19,8 +19,8 @@ endif()
 find_package(Eigen3 REQUIRED)
 find_package(MAVLink)
 
-# The siblings (flightgear, jsbsim) leave this un-REQUIRED, which is survivable
-# for them because they are only ever configured by the ExternalProject step.
+# PX4's other in-tree bridges leave this un-REQUIRED, which is survivable for
+# them because they are only ever configured by the ExternalProject step.
 # This bridge also documents a standalone "cmake .. && make" (above, and for
 # HITL), and on that path an un-REQUIRED miss is not a clean error: the include
 # directory becomes the literal string _MAVLINK_INCLUDE_DIR-NOTFOUND and cmake

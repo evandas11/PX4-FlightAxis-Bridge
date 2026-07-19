@@ -184,12 +184,10 @@ enum class PX4Profile {
  * resistance and can carry the full 1000 Hz stream if desired
  * (PX4_HITL_SENSOR_HZ=0 disables decimation).
  *
- * For comparison: jMAVSim and Gazebo do not decimate either - they emit
- * HIL_SENSOR at their physics rate (250 Hz and 250-1000 Hz respectively)
- * over UDP/TCP loopback, where bandwidth is free. Neither is designed for a
- * serial HITL link, which is exactly why this decimation had to be added.
- * (jMAVSim's documented HITL invocation is -b 921600 -r 250, which is where
- * the 250 Hz default comes from.)
+ * Decimation had to be added here at all because the loopback UDP/TCP path
+ * every other simulator bridge uses has free bandwidth and needs none. A
+ * serial HITL link is the case they do not cover. 250 Hz is the default
+ * because it matches RealFlight's own physics frame rate, so nothing is lost.
  *
  * RATE QUANTISATION - worth knowing when reading measured rates.
  *
@@ -321,9 +319,7 @@ private:
 	/*
 	 * HEARTBEAT. Required in HITL and not in SITL: PX4 will not bring a USB
 	 * MAVLink instance up until it hears from the other end, and without it
-	 * the CDC-ACM buffer simply fills. Gazebo Classic does the same thing for
-	 * the same reason (sitl_gazebo-classic mavlink_interface.cpp:215-228).
-	 * Sent quickly until the board answers with HIL_ACTUATOR_CONTROLS, then
+	 * the CDC-ACM buffer simply fills. Sent quickly until the board answers with HIL_ACTUATOR_CONTROLS, then
 	 * at 1 Hz to keep the link marked alive.
 	 *
 	 * IDENTITY. The HIL messages are addressed as sysid 1 / compid 200 because
@@ -430,8 +426,8 @@ public:
 	 * straight onto vehicle_attitude / vehicle_local_position /
 	 * vehicle_global_position, racing EKF2 on the estimator's own output
 	 * topics. The vehicle then flies well and proves nothing, because it is
-	 * flying on injected truth. This is the Gazebo hil_state_level=1
-	 * semantic and it exists only for deliberately bypassing the estimator.
+	 * flying on injected truth. This is the "HIL state level" semantic and it
+	 * exists only for deliberately bypassing the estimator.
 	 */
 	void EnableStateQuaternionBypass();
 

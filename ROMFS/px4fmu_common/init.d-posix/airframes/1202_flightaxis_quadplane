@@ -46,8 +46,8 @@ param set-default COM_RC_IN_MODE 4
 param set-default COM_DISARM_PRFLT -1
 
 # NOTE: the motor failure detector cannot fire in v1.16 SITL, for any vehicle.
-# The inherited comment here (copied with the values from
-# 1040_gazebo-classic_standard_vtol) claimed SITL reports 0 A for every ESC.
+# The inherited comment here (copied with the values from a stock PX4
+# standard-VTOL airframe) claimed SITL reports 0 A for every ESC.
 # It does not: SimulatorMavlink publishes esc_current = 1 + |control| * 15 while
 # armed, i.e. 1-16 A. The undercurrent test is
 #   esc_current < esc_throttle * FD_ACT_MOT_C2T   (FD_ACT_MOT_C2T default 2.0)
@@ -86,12 +86,13 @@ param set-default CA_AIRFRAME 2
 # themselves (ControlAllocationPseudoInverse.cpp:100-116), so the arm length
 # divides straight back out: a +-0.15 m square, a +-0.25 m square and a
 # +-0.50 m square all produce a bit-identical matrix, for any KM and CT. The
-# result is +-0.7071 per motor - literally ArduPilot's cos(45) frame table, by
-# a different route. So these values need no adjustment per RealFlight model.
+# result is +-0.7071 per motor - the cos(45) values a quad-X frame table gives
+# directly. So these values need no adjustment per RealFlight model.
 #
 # What is NOT free is asymmetry. Feeding asymmetric arms to a symmetric
 # aircraft leaves roll and pitch clean but makes YAW cross-couple: with the
-# Gazebo standard_vtol arms (PY 0.245 / -0.1875) a unit yaw command also
+# asymmetric arms of PX4's stock standard-VTOL airframe (PY 0.245 / -0.1875)
+# a unit yaw command also
 # produces a 53%% roll disturbance, which is structural and no amount of rate
 # tuning removes it. The symmetric square below is therefore the deliberate
 # choice, not a placeholder - do not "correct" it towards a reference
@@ -113,7 +114,7 @@ param set-default CA_ROTOR4_AX 1
 param set-default CA_ROTOR4_AZ 0
 param set-default CA_ROTOR4_PX 0.2
 
-# The gazebo-classic standard_vtol reference stops at 3 surfaces (no rudder).
+# The stock PX4 standard-VTOL reference stops at 3 surfaces (no rudder).
 # A rudder is added here because RealFlight quadplane models fly fixed-wing
 # with a real fin, and rf3 in quadplane.json needs an actuator to read.
 param set-default CA_SV_CS_COUNT 4
@@ -150,9 +151,10 @@ param set-default FW_THR_ASPD_MAX 0.4
 param set-default FW_PSP_OFF 2
 
 # KNOWN-FLYABLE, NOT KNOWN-CORRECT. These three, and the FW_*/MC_*/VT_* block
-# around them, are taken verbatim from 1040_gazebo-classic_standard_vtol. Unlike
-# the rotor geometry above, gains are dimensional - nothing normalises them - so
-# they describe that Gazebo aircraft, not whichever RealFlight model you load.
+# around them, are taken verbatim from a stock PX4 standard-VTOL airframe.
+# Unlike the rotor geometry above, gains are dimensional - nothing normalises
+# them - so they describe that reference aircraft, not whichever RealFlight
+# model you load.
 # The TECS climb/sink envelope is the first thing that will misbehave if your
 # aircraft is faster or slower, followed by the airspeed and throttle limits and
 # VT_F_TRANS_THR. Expect to retune rather than to trust these.

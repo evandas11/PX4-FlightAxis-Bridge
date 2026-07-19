@@ -222,9 +222,8 @@ param set-default CA_HELI_YAW_CCW 0
 # this file "the model" means the RealFlight aircraft definition, so it is
 # spelled out here; this is a flight-dynamics divergence, and unrelated to the
 # demix divergence heli.json warns about on a held swash channel.)
-# These gains instead follow
-# ArduPilot's shipped helicopter tuning (AC_AttitudeControl_Heli.h:10-22),
-# which uses the same normalised convention as PX4 (torque in -1..1 per rad/s):
+# These gains instead start from values typical of collective-pitch helicopters
+# in the same normalised convention PX4 uses (torque in -1..1 per rad/s):
 # roll/pitch P 0.024 I 0.15 D 0.001 FF 0.15, yaw P 0.18 I 0.12 D 0.003 FF 0.024.
 # The values below are those rounded to two significant figures (P 0.024 -> 0.025,
 # yaw FF 0.024 -> 0.02); the difference is far inside the retuning these need

@@ -17,8 +17,8 @@ carries no such requirement.
 
 Installing it does not affect the licence of your PX4 checkout. The bridge is a
 separate executable that talks to PX4 over a MAVLink socket, built as an
-ExternalProject rather than linked into the PX4 binary — the same arrangement the
-FlightGear and JSBSim bridges use.
+ExternalProject rather than linked into the PX4 binary — it is never part of the
+PX4 binary, so nothing in PX4 becomes a derivative of it.
 
 ## What this project adds
 
@@ -37,7 +37,8 @@ parameter configuration.
 
 ## Third-party notices — required, do not remove
 
-The section below is not a disclaimer of ownership; it is a licence obligation.
+The notices in the source headers, and the provenance table further down, are not a
+disclaimer of ownership; they are a licence obligation.
 BSD-3-Clause clause 1 requires that its copyright notices be retained in
 redistributions, and GPLv3 §5 requires preserving the notices on a derivative work.
 Removing them would make this repository non-compliant and would put its distributor
@@ -93,7 +94,7 @@ carries its own GPLv3 header. It mirrors `sitl_run.sh`'s structure but has no PX
 counterpart to follow: PX4 ships no HITL runner.
 
 Model JSONs, `FA_check.py`, `get_FAbridge_params.py`, `install.sh`, `uninstall.sh`,
-`scripts/*` and the documentation are original work for this project.
+`scripts/detect-px4.sh` and the documentation are original work for this project.
 
 ## Upstream projects
 

@@ -12,14 +12,17 @@ Output (space separated):
   reverse: 0/1 (applied after scaling: v -> 1-v)
   disarm:  0..1 value sent when disarmed/NaN, or -1 = hold last/neutral 0.5
 
-Prefer an explicit "disarm" on every row. -1 ("hold last") is unsafe on any
-channel covered by an in-place option: the bridge applies HeliDemix and
-Rev4Servos to the persistent channels[] at the end of every buildChannels(),
-so a held slot is re-transformed each frame rather than held. HeliDemix then
-diverges and rails within a few frames at ~250 Hz; Rev4Servos ping-pongs the
-value between rf i and rf i+4. See models/heli.json DisarmComment.
+Give every row an explicit "disarm". -1 ("hold last") is rejected on any slot
+HeliDemix or Rev4Servos rewrites. The bridge no longer breaks on it - it
+transforms out of a scratch copy and keeps the persistent channels[] raw, so
+holding is idempotent - but it used to apply both options in place, and then a
+held slot was re-transformed every frame instead of held: HeliDemix diverged
+and railed within a few frames at ~250 Hz, Rev4Servos ping-ponged the value
+between rf i and rf i+4. See models/heli.json DisarmComment. The check stays
+because that property lives in one function in the bridge and a model JSON
+cannot tell whether it still holds.
 
-That rule is ENFORCED here, not just documented: a row on a slot one of those
+The rule is ENFORCED here, not just documented: a row on a slot one of those
 options rewrites is rejected unless it carries an explicit 0..1 "disarm".
 Everything else this script validates is likewise a case the bridge itself
 accepts and then gets silently wrong - out-of-range rf/px4, a negative-but-not
@@ -204,9 +207,9 @@ for key, pos in (('rf', 0), ('px4', 1)):
         seen[row[pos]] = i
 
 # ---------------------------------------------------------------------------
-# Option/row interaction. HeliDemix and Rev4Servos are applied to the bridge's
-# channel array AFTER the per-row mapping, so they rewrite slots whether or not
-# a row wrote them this frame. See the module docstring.
+# Option/row interaction. HeliDemix and Rev4Servos run AFTER the per-row
+# mapping, so they rewrite their slots whether or not a row wrote them this
+# frame. See the module docstring.
 # ---------------------------------------------------------------------------
 mapped_rf = {row[0]: row for row in rows}
 
@@ -235,11 +238,9 @@ for n in sorted(covered):
     if disarm == -1.0:
         opt = 'HeliDemix' if n < 3 and (bitmask & OPTION_BITS['HeliDemix']) \
             else 'Rev4Servos'
-        fail("rf%d %s but %s rewrites that slot every frame, so \"hold last\" "
-             "is re-transformed rather than held (HeliDemix diverges and rails "
-             "within a few frames; Rev4Servos ping-pongs the value at frame "
-             "rate). Give it an explicit \"disarm\" - 0.5 for a bipolar servo, "
-             "0.0 for a motor."
+        fail("rf%d %s but %s rewrites that slot every frame. Give it an "
+             "explicit \"disarm\" - 0.5 for a bipolar servo, 0.0 for a motor - "
+             "rather than leaving the slot on \"hold last\"."
              % (rf, "has no \"disarm\" key" if not explicit
                 else "sets \"disarm\": -1 (hold last)", opt))
 

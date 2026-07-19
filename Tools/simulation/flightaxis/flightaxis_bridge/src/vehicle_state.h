@@ -33,8 +33,8 @@
  *
  * RealFlight (FlightAxis) state -> PX4 HIL messages.
  *
- * Frame conversions follow ArduPilot SIM_FlightAxis.cpp literally (they are
- * verified ground truth; RealFlight's conventions are internally
+ * Frame conversions follow the upstream implementation named in the licence
+ * header above literally (they are verified ground truth; RealFlight's conventions are internally
  * inconsistent - position swapped, velocity not, wind swapped).
  */
 
@@ -74,7 +74,7 @@ public:
 	void resetPositionOffset(const FAState &fa);
 
 	// Drop the captured offset so the NEXT real frame re-anchors from a
-	// post-reset position (ArduPilot SIM_FlightAxis position_offset.zero()).
+	// post-reset position (zeroing the position offset).
 	// Called on a RealFlight reset or restart. The velocity history has to go
 	// with the position anchor: the aircraft teleports to the runway, and the
 	// on-ground accelerometer override would otherwise difference the

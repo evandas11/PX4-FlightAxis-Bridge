@@ -1,7 +1,7 @@
 # PX4-FlightAxis-Bridge
 
-**RealFlight (FlightAxis Link) as a PX4 SITL simulator** — integrated the same way as the
-FlightGear bridge: files live in the PX4 tree, get compiled by the PX4 make system, and
+**RealFlight (FlightAxis Link) as a PX4 SITL simulator** — integrated the way PX4's in-tree
+simulator bridges are: files live in the PX4 tree, get compiled by the PX4 make system, and
 launch with one `make` command.
 
 ```bash
@@ -20,7 +20,8 @@ Driving a real flight-controller board instead of SITL: **[HITL.md](HITL.md)**.
 
 Full design rationale, frame conversions, and timing logic:
 [`FLIGHTAXIS_PX4_INTEGRATION.md`](FLIGHTAXIS_PX4_INTEGRATION.md) (the spec — §6/§7 are
-verified against ArduPilot `SIM_FlightAxis.cpp`).
+verified against the upstream FlightAxis implementation named in
+[COPYRIGHT.md](COPYRIGHT.md)).
 
 ---
 
@@ -61,7 +62,6 @@ RUNNING.md                               # day-to-day operation, channel maps, t
 ROS2.md                                  # uXRCE-DDS topics, offboard control, rates
 HITL.md                                  # hardware-in-the-loop against a real board
 FLIGHTAXIS_PX4_INTEGRATION.md            # the spec - design rationale, frame conversions, timing
-CONTRIBUTING.md                          # maintainer notes: keeping repo and PX4 tree in sync
 COPYRIGHT.md                             # per-file provenance and licensing
 LICENSE
 .gitignore
@@ -77,11 +77,11 @@ Tools/simulation/flightaxis/
     ├── cmake/FindMAVLink.cmake
     ├── models/{plane,quad,quadplane,heli}.json   # RealFlight channel maps
     └── src/
-        ├── flightaxis_bridge.cpp        # main loop + ArduPilot 3-branch timing (§7)
-        ├── fa_communicator.{h,cpp}      # SOAP client, port of ArduPilot socket logic (§8.1)
+        ├── flightaxis_bridge.cpp        # main loop + 3-branch physics-time handling (§7)
+        ├── fa_communicator.{h,cpp}      # SOAP client, socket and reconnect logic (§8.1)
         ├── vehicle_state.{h,cpp}        # RF→NED conversions (§6) + sensor synthesis
-        ├── px4_communicator.{h,cpp}     # TCP 4560 HIL link (adapted from PX4-FlightGear-Bridge)
-        └── geo_mag_declination.{h,cpp}  # WMM tables (verbatim from PX4-FlightGear-Bridge)
+        ├── px4_communicator.{h,cpp}     # HIL link: TCP 4560 for SITL, serial/UDP for HITL
+        └── geo_mag_declination.{h,cpp}  # WMM tables (third-party, see COPYRIGHT.md)
 
 src/modules/simulation/simulator_mavlink/
 └── sitl_targets_flightaxis.cmake        # make-target registration (PX4 v1.16 pattern)
@@ -89,9 +89,7 @@ src/modules/simulation/simulator_mavlink/
 
 install.sh / uninstall.sh                # one-command install and clean removal
 scripts/
-├── detect-px4.sh                        # shared PX4-checkout detection (all scripts)
-├── sync-to-px4.sh                       # repo -> PX4 tree (development)
-└── sync-from-px4.sh                     # PX4 tree -> repo (development)
+└── detect-px4.sh                        # shared PX4-checkout detection (all scripts)
 
 ROMFS/px4fmu_common/init.d-posix/airframes/
 ├── 1200_flightaxis_plane
@@ -196,17 +194,25 @@ rather than in per-simulator `sitl_targets_*.cmake` files, so the splice below d
 apply as written (see spec §3).
 
 1. Copy `Tools/`, `src/`, and `ROMFS/` from this repo over your `PX4-Autopilot/` checkout,
-   preserving the paths (they already mirror the PX4 layout). `./scripts/sync-to-px4.sh`
-   does exactly this.
+   preserving the paths — they already mirror the PX4 layout, so a recursive copy of those
+   three directories from the repo root lands every file where it belongs:
+
+   ```bash
+   cp -R Tools src ROMFS /path/to/PX4-Autopilot/
+   ```
+
+   Copy, do not mirror-with-delete: `Tools/simulation/flightaxis/models/` is also where your
+   own model JSONs live.
 
 2. In `PX4-Autopilot/src/modules/simulation/simulator_mavlink/CMakeLists.txt`, add one line
    to the `include(sitl_targets_*.cmake)` block, keeping it alphabetical:
 
    ```cmake
    include(sitl_targets_flightaxis.cmake)
-   include(sitl_targets_flightgear.cmake)
-   include(sitl_targets_gazebo-classic.cmake)
    ```
+
+   The block is a run of `include(sitl_targets_<name>.cmake)` lines, one per simulator PX4
+   ships; ours sorts to the top of it.
 
    Indent it however you like — leading and trailing whitespace are ignored — but keep it
    as a line of its own and do not comment it out. That is how `install.sh` recognises the
@@ -214,8 +220,8 @@ apply as written (see spec §3).
    commented-out or merged line will be treated as "not installed".
 
 3. In `PX4-Autopilot/ROMFS/px4fmu_common/init.d-posix/airframes/CMakeLists.txt`, register
-   the four airframes inside `px4_add_romfs_files(...)`, in sorted position (after the
-   `10xx` block, before `2507_gazebo-classic_cloudship`), tab-indented like its neighbours:
+   the four airframes inside `px4_add_romfs_files(...)`, in sorted numeric position — after
+   the `10xx` block and before the next id above `1203` — tab-indented like its neighbours:
 
    ```cmake
    	1200_flightaxis_plane
@@ -252,9 +258,12 @@ PX4_FLIGHTAXIS_IP=<windows-ip> make px4_sitl_nolockstep flightaxis_plane
 
 Once per RealFlight installation:
 
-- Enable the FlightAxis link. **RealFlight Evolution:** press ESC, then
-  **Settings -> Physics -> Quality**, and enable **"RealFlight Link"**. **RealFlight 8/9:** the
-  same option lives directly under **Settings -> Physics**. It listens on TCP 18083.
+- Enable **"FlightAxis Link Enabled"**, under **Simulation → Settings… → Physics → Quality**
+  (press ESC to reach the menu). On RealFlight 8/9 it sits directly under **Settings →
+  Physics**, and on some builds the Quality preset has to be **Custom** before the checkbox
+  unlocks. RealFlight then listens on TCP 18083. The in-tree strings quote shorter versions of
+  this path — [RUNNING.md §1.1](RUNNING.md#11-enable-flightaxis-link-in-realflight) reconciles
+  them.
 - In the same Physics settings, set **"Automatic Reset Delay(sec)"** to `2.0`, and set both
   **"Pause Sim When in Background"** and **"Pause Sim when in Menu"** to **No** — otherwise
   RealFlight stops feeding the bridge the moment it loses focus.
@@ -265,7 +274,7 @@ Once per RealFlight installation:
 Once per aircraft:
 
 - In the RealFlight aircraft editor: strip expo/mixes/gyros, max servo speed, one channel
-  per actuator. Tridge's ArduPilot RealFlight model collection is directly reusable.
+  per actuator.
 - The QGC **Actuators** geometry must match the `"px4"` indices in the corresponding
   `models/<name>.json` — see [Model JSON](#model-json-channel-maps) below.
 
@@ -306,10 +315,12 @@ Other keys:
 - `"reverse": true` is applied *after* scaling, as `v -> 1-v`.
 - `"disarm"` is the value sent while PX4 is disarmed. **`-1`, which is also the default when the
   key is omitted, means "hold the last output"** — correct for a plain surface, wrong for a
-  motor, so every motor row sets `"disarm": 0.0` explicitly. It is also wrong for any row a
-  post-pass option rewrites: `HeliDemix` and `Rev4Servos` transform the channel array after it
-  is built, so a held slot gets re-transformed every frame. Every row in `heli.json` therefore
-  carries an explicit `"disarm"` (`0.5` for the swash and tail servos, `0.0` for the rotor).
+  motor, so every motor row sets `"disarm": 0.0` explicitly. On any slot `HeliDemix` or
+  `Rev4Servos` rewrites, `get_FAbridge_params.py` rejects hold-last outright and demands a
+  value; the bridge applies those post-passes to a scratch copy, so holding is safe as the
+  code stands, but nothing in a model JSON can tell whether that is still true. Every row in
+  `heli.json` therefore carries an explicit `"disarm"` (`0.5` for the swash and tail servos,
+  `0.0` for the rotor).
 - `"UnmappedDefault"` is sent on every RealFlight channel the map does not mention.
 - **Duplicate `rf` or `px4` indices abort the bridge at startup** with a message naming both
   offending entries, rather than silently letting one win.
@@ -329,7 +340,7 @@ Full derivation, per-model tables, and the heli traps: spec §5.
 
 ## Adding a new aircraft
 
-Four steps (same workflow as the FlightGear bridge). **Number your airframe in the
+Four steps. **Number your airframe in the
 1204–1219 range** — those ids are reserved for exactly this and the installer and
 uninstaller leave them, and your model JSONs, strictly alone:
 
@@ -385,8 +396,8 @@ flight dynamics. It proves the software path; it proves nothing about how the ai
 - A flown circuit, so EKF innovation bounds in real flight are unknown. Since the mock has no
   dynamics, nothing here has ever flown.
 - The quadplane and heli channel maps beyond static reasoning, `HeliDemix` against a real swash,
-  and the heli rate gains, collective curve and yaw compensation, which are a starting point
-  taken from ArduPilot's helicopter tuning rather than a measured result.
+  and the heli rate gains, collective curve and yaw compensation, which are a generic
+  collective-pitch starting point rather than a measured result.
 
 **Not yet verified — needs a physical flight-controller board:** everything in HITL.md, which
 keeps its own list.
@@ -395,17 +406,9 @@ Spec §11 has the full checklist these correspond to.
 
 ## Credits / references
 
-- [ArduPilot](https://github.com/ArduPilot/ardupilot) `SIM_FlightAxis.{h,cpp}` — ground
-  truth for conversions, timing, and the SOAP socket/reconnect logic. `fa_communicator`,
-  the three-branch timing in `flightaxis_bridge.cpp`, and the conversions in
-  `vehicle_state.cpp` are ports of it, which is why this project is GPLv3. GPLv3,
-  © ArduPilot Dev Team.
-- [PX4-FlightGear-Bridge](https://github.com/PX4/PX4-FlightGear-Bridge) (ThunderFly
-  s.r.o.) — the integration template. `geo_mag_declination.{h,cpp}` and
-  `cmake/FindMAVLink.cmake` are reused verbatim; `px4_communicator.{h,cpp}` is adapted from
-  it: per-message decimation for RealFlight's ~250 Hz frame rate, the DISTANCE_SENSOR
-  path, the serial and UDP transports and message profile used for HITL, and the
-  dead-link policy. BSD-3-Clause.
+Parts of this bridge are ported or adapted from upstream projects, and parts are reused
+verbatim. Every file's provenance, the upstream project it came from, and its licence are
+recorded in [COPYRIGHT.md](COPYRIGHT.md).
 
 ## License
 
@@ -416,8 +419,8 @@ per-file provenance.
 
 The bridge's SOAP client, physics-time handling and RealFlight→NED conversions are
 literal ports of ArduPilot's GPLv3 `SIM_FlightAxis.{h,cpp}`, so the combined work is
-GPLv3. The files reused from PX4-FlightGear-Bridge keep their BSD-3-Clause notices,
-which is GPL-compatible.
+GPLv3. The files reused from BSD-3-Clause upstreams keep their own notices, which is
+GPL-compatible.
 
 This covers the files in this repository only. The bridge is a standalone executable
 that talks to PX4 over MAVLink — installing it does not relicense your PX4 checkout.

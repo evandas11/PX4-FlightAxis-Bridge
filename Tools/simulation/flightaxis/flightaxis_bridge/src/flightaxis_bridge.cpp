@@ -34,10 +34,9 @@
  *
  * FlightAxis (RealFlight) <-> PX4 SITL bridge, main loop.
  *
- * Structure follows the FlightGear bridge (flightgear_bridge.cpp); the
- * three-branch physics-time handling (restart / duplicate-frame
- * extrapolation / glitch compensation) is a literal port of ArduPilot's
- * libraries/SITL/SIM_FlightAxis.cpp update().
+ * The three-branch physics-time handling (restart / duplicate-frame
+ * extrapolation / glitch compensation) is a literal port of the upstream
+ * implementation named in the licence header above.
  *
  * argv protocol (produced by get_FAbridge_params.py from models/<m>.json):
  *   flightaxis_bridge <instance> <ip> <options_bitmask> <unmapped_default>
@@ -100,7 +99,7 @@
 
 using namespace std;
 
-// options bitmask (port of ArduPilot SIM_FLTAX_OPTS)
+// options bitmask
 static const uint32_t OPT_RESET_POSITION = 1;
 static const uint32_t OPT_REV4_SERVOS    = 2;
 static const uint32_t OPT_HELI_DEMIX     = 4;
@@ -181,7 +180,7 @@ static double envOrDefault(const char *name, double dflt)
 /*
  * Build the 12 RealFlight channel values (0..1) from the latest
  * HIL_ACTUATOR_CONTROLS through the JSON channel map, then apply the
- * Rev4Servos / HeliDemix options (ArduPilot exchange_data() order).
+ * Rev4Servos / HeliDemix options, in that order.
  *
  * channels[] is PERSISTENT and holds the UNTRANSFORMED per-channel state, so
  * that disarm=-1 ("hold last output") has something stable to hold. out[] is
@@ -280,8 +279,8 @@ static void buildChannels(const VehicleState &veh, const ChannelMap *maps, int n
 	if (options & OPT_HELI_DEMIX) {
 		// FlightAxis expects "roll/pitch/collective" input; PX4 outputs swash
 		// servos. Read the swash from out[] so that Rev4Servos, if also set,
-		// still composes in the ArduPilot order - but never from a previous
-		// frame's demixed result.
+		// still composes in the right order (Rev4Servos first, then the demix)
+		// - but never from a previous frame's demixed result.
 		double swash1 = out[0];
 		double swash2 = out[1];
 		double swash3 = out[2];
@@ -560,7 +559,7 @@ int main(int argc, char **argv)
 		}
 	}
 
-	// timing state (port of ArduPilot SIM_FlightAxis)
+	// timing state
 	double initial_time_s = 0.0;		// physics-time epoch capture
 	// Explicit "epoch captured" flag. This must NOT be inferred from
 	// initial_time_s <= 0.0: after a RealFlight restart the epoch is rebased to
@@ -580,7 +579,7 @@ int main(int argc, char **argv)
 	const uint64_t REINJECT_INTERVAL_US = 300000;	// 300 ms
 	uint64_t last_reinject_us = 0;
 
-	// FPS reporting (ArduPilot report_FPS)
+	// FPS reporting
 	uint64_t frame_counter = 0;
 	uint64_t socket_frame_counter = 0;
 	uint64_t last_socket_frame_counter = 0;
@@ -621,8 +620,8 @@ int main(int argc, char **argv)
 	// that window on purpose, which is not the fault this is looking for
 	bool rtf_skip_sample = true;
 
-	// ArduPilot report_FPS(): called from BOTH the extrapolation path and the
-	// normal-frame path, otherwise the printed rate drifts
+	// Must be called from BOTH the extrapolation path and the normal-frame
+	// path, otherwise the printed rate drifts
 	auto report_FPS = [&](const FAState &st) {
 		if (frame_counter++ % 1000 != 0) {
 			return;
@@ -1003,7 +1002,7 @@ int main(int argc, char **argv)
 			continue;
 		}
 
-		// EMA of the physics frame time (ArduPilot exchange_data())
+		// EMA of the physics frame time
 		double dt = state.m_currentPhysicsTime_SEC - last_time_s;
 
 		if (have_fa_data && dt > 0.0 && dt < 0.1) {
@@ -1119,7 +1118,7 @@ int main(int argc, char **argv)
 		last_alive_us = 0;
 		stall_since_us = 0;
 
-		// Time-epoch rebase only (ArduPilot SIM_FlightAxis.cpp update()). This
+		// Time-epoch rebase only. This
 		// condition stays true for every frame while RealFlight's physics clock
 		// is still near zero, so it must NOT re-capture the position offset -
 		// that is driven by VehicleState's offset_captured flag instead.
@@ -1180,7 +1179,7 @@ int main(int argc, char **argv)
 		// drain HIL_ACTUATOR_CONTROLS (non-blocking) for the next exchange
 		px4.Recieve(false);
 
-		// FPS report every 1000 frames (ArduPilot report_FPS)
+		// FPS report every 1000 frames
 		report_FPS(state);
 	}
 

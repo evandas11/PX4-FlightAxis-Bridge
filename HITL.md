@@ -123,7 +123,7 @@ the estimator. The vehicle then flies beautifully and proves nothing, because it
 injected truth rather than on its own state estimate.
 
 The bridge therefore disables it in the HITL profile. If you deliberately want that behaviour
-(the Gazebo `hil_state_level` semantic, useful for isolating a control problem from an
+(the "HIL state level" semantic — useful for isolating a control problem from an
 estimation problem), set `PX4_HITL_STATE_QUAT_BYPASS=1` and accept what it means. The bridge
 prints a loud warning when you do.
 
@@ -174,9 +174,9 @@ Return direction is independent (serial is full duplex): 200 Hz × 93 B = **18.6
 
 **Why 250 Hz is the default:** it matches RealFlight's own physics frame rate, so nothing is
 lost — the 1 ms extrapolation steps are interpolation between frames, not new information. It
-fits comfortably from 460800 up. jMAVSim's documented HITL invocation is likewise `-b 921600
--r 250`. Gazebo and jMAVSim do not decimate at all, because they were designed for loopback
-where bytes are free; that is precisely why this decimation had to be added here.
+fits comfortably from 460800 up. Decimation had to be added here at all because PX4's other
+simulator bridges run over loopback, where bytes are free and no decimation is needed; a
+serial link to a board is the case they do not cover.
 
 ### Rate quantisation (read before comparing measured rates)
 
@@ -222,8 +222,8 @@ backdates every `last_*_us` so message one always carries the full `0x1FFF`.
 ### `HEARTBEAT`
 
 The HITL profile sends a `HEARTBEAT` — 10 Hz until the board answers, then 1 Hz. PX4 will not
-bring a USB MAVLink instance up until it hears from the other end. Gazebo Classic does the same
-thing for the same reason. SITL does not need it and does not send it.
+bring a USB MAVLink instance up until it hears from the other end. SITL does not need it and
+does not send it.
 
 ---
 

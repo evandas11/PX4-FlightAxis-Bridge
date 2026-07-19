@@ -122,9 +122,8 @@ void PX4Communicator::Configure(PX4Transport t, PX4Profile p,
         state_quat_interval_us = INTERVAL_DISABLED;
         rpm_interval_us = INTERVAL_DISABLED;
 
-        // jMAVSim uses 5 Hz for HIL_GPS (SimpleSensors.java gpsInterval =
-        // 200 ms) and a real GPS module is 5-10 Hz, so there is nothing to
-        // gain from 10 Hz on a link where bytes are finite.
+        // A real GPS module is 5-10 Hz, so there is nothing to gain from
+        // 10 Hz on a link where bytes are finite.
         gps_interval_us = 200000;   // 5 Hz
 
         // Real mag/baro/airspeed run far slower than the IMU; see the
@@ -409,7 +408,7 @@ int PX4Communicator::InitTcpServer(int portOffset)
 
     // The socket reuse is necessary for reconnecting to the same address
     // if the socket does not close but gets stuck in TIME_WAIT. This can happen
-    // if the server is suddenly closed, for example, if the robot is deleted in gazebo.
+    // if the server is suddenly closed, for example if the simulated vehicle goes away.
     int socket_reuse = 1;
     result = setsockopt(listenMavlinkSock, SOL_SOCKET, SO_REUSEADDR, &socket_reuse, sizeof(socket_reuse));
     if (result != 0) 

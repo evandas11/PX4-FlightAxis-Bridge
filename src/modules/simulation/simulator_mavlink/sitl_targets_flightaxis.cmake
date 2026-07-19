@@ -6,9 +6,8 @@ if(ENABLE_LOCKSTEP_SCHEDULER STREQUAL "no")
 	include(ExternalProject)
 	ExternalProject_Add(flightaxis_bridge
 		SOURCE_DIR ${PX4_SOURCE_DIR}/Tools/simulation/flightaxis/flightaxis_bridge
-		# RelWithDebInfo: the bridge has to sustain 250+ Hz SOAP round-trips
-		# (ArduPilot builds its SITL at -O3); plain -g would leave Eigen and
-		# the MAVLink encoders unoptimised.
+		# RelWithDebInfo: the bridge has to sustain 250+ Hz SOAP round-trips;
+		# plain -g would leave Eigen and the MAVLink encoders unoptimised.
 		CMAKE_ARGS -DCMAKE_INSTALL_PREFIX=${CMAKE_INSTALL_PREFIX} -DCMAKE_BUILD_TYPE=RelWithDebInfo
 		BINARY_DIR ${PX4_BINARY_DIR}/build_flightaxis_bridge
 		INSTALL_COMMAND ""

@@ -106,7 +106,7 @@ private:
 
     bool _controller_started;
 
-    // parked-socket handoff (ArduPilot's sockcond1/sockcond2/sockmtx pattern)
+    // parked-socket handoff (sockcond1 / sockcond2 / sockmtx below)
     std::thread _creator_thread;
     std::mutex _sockmtx;
     std::condition_variable _sockcond1;        // signalled when a socket is parked

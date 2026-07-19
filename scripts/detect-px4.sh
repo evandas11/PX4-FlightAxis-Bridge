@@ -2,8 +2,8 @@
 #
 # detect-px4.sh — shared PX4-Autopilot checkout detection.
 #
-# Sourced by install.sh, uninstall.sh, scripts/sync-to-px4.sh and
-# scripts/sync-from-px4.sh so all four agree on which tree they target.
+# Sourced by install.sh and uninstall.sh so both agree on which tree they
+# target and on what this integration owns.
 # Nothing here is hardcoded to any particular machine or user: every path is
 # derived from the caller's $HOME, $PWD, or the location of this repository.
 #
@@ -80,7 +80,7 @@ unset _fa_alt _fa_a
 # hand. A hand-written list silently drifts the moment anyone adds a file - the
 # first version of this function omitted hitl_run.sh, and uninstall.sh duly left
 # it behind in the PX4 tree - and the list has to be right for uninstall to be
-# complete and for sync-from-px4.sh's completeness gate to mean anything.
+# complete.
 # REPO_DIR is set by every caller.
 fa_payload_files() {
 	if [ -n "${REPO_DIR:-}" ] && [ -d "$REPO_DIR/Tools/simulation/flightaxis" ]; then

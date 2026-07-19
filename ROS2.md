@@ -199,7 +199,8 @@ home position, `distance_sensor 0.1 m`, GPS `fix_type 3` with 10 satellites at 4
   uORB at 50 Hz, but `dds_topics.yaml` contains **zero** `groundtruth` entries — verified by
   `grep -c groundtruth` returning `0`, and by their absence from `ros2 topic list`. If you want
   ground truth in ROS 2 for scoring or evaluation, you must add those entries to
-  `dds_topics.yaml` and rebuild PX4. This is stock PX4 behaviour and identical under Gazebo.
+  `dds_topics.yaml` and rebuild PX4. This is stock PX4 behaviour, not something this
+  integration changes.
 - **`vehicle_angular_velocity` is commented out** in `dds_topics.yaml` (line 44-45). It is
   available in uORB but not over DDS. Relevant if you intended to close a rate loop offboard.
 - **Optical flow** (`HIL_OPTICAL_FLOW` → `sensor_optical_flow`) is handled by

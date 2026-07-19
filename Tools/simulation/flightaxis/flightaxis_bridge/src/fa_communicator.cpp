@@ -28,7 +28,8 @@
  *
  * FlightAxis (RealFlight) SOAP communicator for the PX4 flightaxis bridge.
  *
- * Ported from ArduPilot SIM_FlightAxis.{h,cpp}:
+ * Design (ported from the upstream implementation named in the licence
+ * header above):
  *  - one new TCP connection per SOAP request, hidden behind a background
  *    socket-creator thread that always keeps one connected socket parked
  *  - HTTP POST framing and SOAP envelopes copied verbatim
@@ -168,7 +169,7 @@ static const char *const key_names[KEY_COUNT] = {
 };
 
 /*
-  SOAP bodies for the startup sequence, copied from ArduPilot
+  SOAP bodies for the startup sequence
  */
 static const char *const soap_body_restore =
     "<?xml version='1.0' encoding='UTF-8'?>\n"
@@ -333,7 +334,7 @@ FACommunicator::~FACommunicator()
 
 /*
   socket-creator thread. Always keeps one connected socket parked so a
-  request never pays the connect latency (ArduPilot's socket_creator()).
+  request never pays the connect latency.
  */
 void FACommunicator::socketCreator()
 {
@@ -423,8 +424,7 @@ int FACommunicator::takeSocket(uint32_t timeout_ms)
 }
 
 /*
-  send one SOAP request on a fresh parked socket. HTTP framing copied
-  from ArduPilot's soap_request_start().
+  send one SOAP request on a fresh parked socket.
  */
 int FACommunicator::soapRequestStart(const char *action, const char *body)
 {
@@ -460,7 +460,7 @@ int FACommunicator::soapRequestStart(const char *action, const char *body)
 
 /*
   read the reply: find Content-Length, drain to end of \r\n\r\n + length,
-  close the socket (ArduPilot's soap_request_end())
+  close the socket
  */
 char *FACommunicator::soapRequestEnd(int fd, uint32_t timeout_ms)
 {
@@ -512,7 +512,7 @@ char *FACommunicator::soapRequestEnd(int fd, uint32_t timeout_ms)
 /*
   extremely primitive SOAP parser that assumes the format used by
   FlightAxis. Sequential scan in document order; repeated "item" keys
-  decode as an array (ArduPilot's parse_reply()).
+  decode as an array.
  */
 bool FACommunicator::parseReply(const char *reply, double *vals)
 {
@@ -603,7 +603,7 @@ void FACommunicator::fillState(const double *vals, FAState &state)
   (ResetAircraft if resetPosition) -> InjectUAVControllerInterface.
 
   The Restore call allows us to connect after the aircraft is changed
-  in RealFlight. As in ArduPilot, the SOAP replies are not checked:
+  in RealFlight. The SOAP replies are deliberately not checked:
   "already injected" style faults are treated as success.
  */
 /*
