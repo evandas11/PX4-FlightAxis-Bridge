@@ -75,7 +75,7 @@ PX4-Autopilot/
 │       ├── FA_check.py                               # sanity-ping 18083 before start
 │       ├── get_FAbridge_params.py                    # JSON → argv
 │       ├── cmake/
-│       │   └── FindMAVLink.cmake                     # third-party copy — REQUIRED
+│       │   └── FindMAVLink.cmake                     # REQUIRED — verbatim upstream, see COPYRIGHT.md
 │       ├── models/
 │       │   ├── plane.json
 │       │   ├── quad.json
@@ -83,10 +83,10 @@ PX4-Autopilot/
 │       │   └── heli.json
 │       └── src/
 │           ├── flightaxis_bridge.cpp                 # main loop
-│           ├── px4_communicator.{cpp,h}              # ADAPTED third-party (TCP 4560, HIL msgs)
+│           ├── px4_communicator.{cpp,h}              # TCP 4560, HIL msgs — adapted, see COPYRIGHT.md
 │           ├── fa_communicator.{cpp,h}               # SOAP client + parser
 │           ├── vehicle_state.{cpp,h}                 # RF→NED conversions (§6) + sensor synth (§7)
-│           └── geo_mag_declination.{cpp,h}           # verbatim third-party
+│           └── geo_mag_declination.{cpp,h}           # WMM tables — verbatim upstream, see COPYRIGHT.md
 ├── src/modules/simulation/simulator_mavlink/
 │   ├── sitl_targets_flightaxis.cmake                 # NEW (§3)
 │   └── CMakeLists.txt                                # MODIFIED: one include() line (§3.2)
@@ -334,49 +334,58 @@ done.
 
 `models/*.json` carries the RealFlight channel map, and `get_FAbridge_params.py` flattens it to argv — the same JSON-to-argv arrangement PX4's other in-tree bridges use for their model configuration.
 
-Below is the **shipped `models/quadplane.json`** (comments trimmed). The `px4` indices are *not*
-sequential, and that is the whole point of the file — see the rule that follows.
+Below is the **shipped `models/quadplane.json`** (comments trimmed). The `rf` and `px4` columns
+are identical, and that is deliberate — see the rule that follows.
 
 ```json
 {
   "Comment":   "reference-class quadplane on a RealFlight custom model",
   "RfModel":   "informational only - aircraft is selected inside RealFlight",
-  "Options":   ["ResetPosition"],
+  "Options":   ["ResetPosition", "SilenceFPS"],
   "Channels": [
-    {"rf": 0, "px4": 5, "scale": "bipolar",  "reverse": false, "comment": "aileron      <- controls[5] aileron left"},
-    {"rf": 1, "px4": 7, "scale": "bipolar",  "reverse": true,  "comment": "elevator     <- controls[7]"},
-    {"rf": 2, "px4": 4, "scale": "unipolar", "disarm": 0.0,    "comment": "fwd throttle <- controls[4] pusher motor"},
-    {"rf": 3, "px4": 8, "scale": "bipolar",  "reverse": false, "comment": "rudder       <- controls[8]"},
-    {"rf": 4, "px4": 0, "scale": "unipolar", "disarm": 0.0,    "comment": "lift motor 1 <- controls[0]"},
-    {"rf": 5, "px4": 1, "scale": "unipolar", "disarm": 0.0,    "comment": "lift motor 2 <- controls[1]"},
-    {"rf": 6, "px4": 2, "scale": "unipolar", "disarm": 0.0,    "comment": "lift motor 3 <- controls[2]"},
-    {"rf": 7, "px4": 3, "scale": "unipolar", "disarm": 0.0,    "comment": "lift motor 4 <- controls[3]"}
+    {"rf": 0, "px4": 0, "scale": "bipolar",  "reverse": false, "comment": "aileron      <- controls[0] aileron left"},
+    {"rf": 1, "px4": 1, "scale": "bipolar",  "reverse": true,  "comment": "elevator     <- controls[1]"},
+    {"rf": 2, "px4": 2, "scale": "unipolar", "disarm": 0.0,    "comment": "fwd throttle <- controls[2] pusher motor"},
+    {"rf": 3, "px4": 3, "scale": "bipolar",  "reverse": false, "comment": "rudder       <- controls[3]"},
+    {"rf": 4, "px4": 4, "scale": "unipolar", "disarm": 0.0,    "comment": "lift motor 1 <- controls[4]"},
+    {"rf": 5, "px4": 5, "scale": "unipolar", "disarm": 0.0,    "comment": "lift motor 2 <- controls[5]"},
+    {"rf": 6, "px4": 6, "scale": "unipolar", "disarm": 0.0,    "comment": "lift motor 3 <- controls[6]"},
+    {"rf": 7, "px4": 7, "scale": "unipolar", "disarm": 0.0,    "comment": "lift motor 4 <- controls[7]"}
   ],
   "UnmappedDefault": 0.5
 }
 ```
 
-**The rule that generates the `px4` column.** The JSON does not get to choose these numbers; PX4's
-control allocator does, and the JSON must mirror whatever the airframe script sets up:
+**The rule: RealFlight channel N == PX4 output channel N.** Every shipped map is a pure identity
+map. The JSON does not renumber anything; the ordering decision lives in the airframe, in
+`PWM_MAIN_FUNC<N>` (SITL) and `HIL_ACT_FUNC<N>` (HITL) — the same place ArduPilot puts it
+(`SERVOn_FUNCTION`) and the same place PX4's own Gazebo bridge puts it (`SIM_GZ_*_FUNC*`). Keeping
+it there means one channel numbering runs from SITL through HITL to the physical FC pinout.
 
-- `PWM_MAIN_FUNC<N>` in the airframe script lands on `HIL_ACTUATOR_CONTROLS.controls[N-1]`.
+- `PWM_MAIN_FUNC<N>` in the airframe script selects which allocator output lands on
+  `HIL_ACTUATOR_CONTROLS.controls[N-1]`, so choosing the FUNC values *is* choosing the order.
 - Function value `101+k` is `CA_ROTOR<k>` — **a motor, range [0,1]** → `"scale": "unipolar"`.
 - Function value `201+k` is `CA_SV_CS<k>` — **a control surface, range [-1,1]** → `"scale": "bipolar"`.
-- The allocator emits motors before servos, so on any mixed airframe the motors occupy the low
-  `controls[]` indices regardless of where they sit on the RealFlight transmitter. That is exactly
-  why the quadplane's RealFlight channel order (aileron, elevator, throttle, rudder, then the four
-  lift motors — the conventional RealFlight channel order for this class) maps to the scattered PX4 order
-  `5, 7, 4, 8, 0, 1, 2, 3`.
+- The allocator emits motors before servos, so on any mixed airframe the motors take the low
+  function numbers regardless of where they sit on the RealFlight transmitter. That mismatch is
+  real and still has to be absorbed somewhere — it is absorbed by the FUNC list. It is exactly why
+  the quadplane's `PWM_MAIN_FUNC1..9` are the scattered `201, 203, 105, 204, 101, 102, 103, 104,
+  202` rather than `101..104, 105, 201..204`: the RealFlight model wants aileron, elevator,
+  throttle, rudder, then the four lift motors, which is the conventional channel order for this
+  class, and the FUNCs deliver `controls[]` in exactly that order.
+- If a user's RealFlight model has a different channel order, the fix is to change
+  `PWM_MAIN_FUNC<N>` to match it and keep the JSON identity — **not** to scramble the JSON.
 
 Each shipped airframe script carries this derivation as a comment block next to its
-`PWM_MAIN_FUNC*` lines; that block and the JSON must be edited together. The other three models:
+`PWM_MAIN_FUNC*` lines; that block and the JSON must still agree, and a disagreement silently
+drives the wrong actuator. The other three models:
 
-| Model | RealFlight channel order | `px4` indices | Note |
+| Model | RealFlight channel order | `PWM_MAIN_FUNC1..N` | Note |
 |---|---|---|---|
-| `plane` | aileron, elevator, throttle, rudder | `1, 3, 0, 4` | `controls[0]` is the motor, so throttle is `rf2 -> px4 0` |
-| `quad` | motors 1–4 | `0, 1, 2, 3` | the only model where the orders coincide |
-| `quadplane` | aileron, elevator, throttle, rudder, lift 1–4 | `5, 7, 4, 8, 0, 1, 2, 3` | as above |
-| `heli` | swash 1–3, tail, main | `2, 3, 4, 1, 0` | `CA_AIRFRAME 11` orders motors first, then servos: `controls[0]`=main rotor motor, `[1]`=yaw tail servo, `[2..4]`=swash |
+| `plane` | aileron, elevator, throttle, rudder | `201, 203, 101, 204, 202` | `FUNC5` parks aileron right (Servo 2) on the spare `controls[4]`, unmapped |
+| `quad` | motors 1–4 | `101, 102, 103, 104` | the one all-motor airframe, so the allocator order is already the RealFlight order |
+| `quadplane` | aileron, elevator, throttle, rudder, lift 1–4 | `201, 203, 105, 204, 101, 102, 103, 104, 202` | as above; `FUNC9` parks aileron right on `controls[8]` |
+| `heli` | swash 1–3, tail, (5–7 idle), main | `202, 203, 204, 201, 0, 0, 0, 101` | `CA_AIRFRAME 11` numbers motors first, then servos — main rotor = Motor 1 = 101, yaw tail = Servo 1 = 201, swash = Servos 2–4 = 202–204 — and the FUNCs reorder those onto **ArduPilot's heli channel order**: swash on rf0–2, tail on rf3, RSC on rf7, rf4–6 idle. Ground truth: `AP_MotorsHeli_Swash.cpp:201-202` (swash → `SERVO1/2/3`, `k_motor1/2/3`), `AP_MotorsHeli_Single.cpp:207` (`add_motor_num(CH_4)`, tail → `SERVO4`), `AP_MotorsHeli.h:34` (`#define AP_MOTORS_HELI_RSC CH_8`, `k_heli_rsc` = 31) |
 
 Three heli-specific traps, all documented inside `heli.json`:
 
@@ -387,22 +396,36 @@ Three heli-specific traps, all documented inside `heli.json`:
   entire negative half of the yaw command: measured through the bridge, yaw −3 rad/s produced
   `rf3 = 0.000` with the tail on its lower stop, i.e. **no left yaw authority at all**. Type 10
   is only right for a heli with a separate unidirectional electric tail motor.
-- **Every row needs an explicit `"disarm"`**, including the swash servos. `HeliDemix` is applied
-  as a post-pass over the built channel array, so a row on the `-1` "hold last output" default
-  would have its already-demixed value re-demixed on the next frame. That iteration is a
-  non-involutive linear map and diverges: from a plausible in-flight swash it rails within about
-  three frames. Neutral is a fixed point, so it only shows up on the armed→disarmed transition
-  with the swash deflected — every landing — and nothing is logged.
-- **`HeliDemix` only inverts correctly for the swash geometry the airframe forces** via
-  `CA_SP0_ANG*` = 300/60/180, with equal arm lengths and `CA_MAX_SVO_THROW 0` (§12).
+- **Every row needs an explicit `"disarm"`**, including the swash servos. This is belt-and-braces
+  now that `HeliDemix` is off by default — the swash rows are plain pass-through and nothing
+  rewrites them after the fact, so holding would be safe on that ground alone. The rule stays
+  enforced so that *re-enabling* the demix for a CCPM model cannot quietly reintroduce the
+  hazard: when applied as a post-pass over the built channel array, a row on the `-1` "hold last
+  output" default would have its already-demixed value re-demixed on the next frame. That
+  iteration is a non-involutive linear map and diverges: from a plausible in-flight swash it
+  rails within about three frames. Neutral is a fixed point, so it only shows up on the
+  armed→disarmed transition with the swash deflected — every landing — and nothing is logged.
+  (The bridge additionally transforms out of a scratch copy, so holding is safe today either
+  way; nothing in a model JSON can tell whether that is still true.)
+- **Swash mixing lives in exactly one place, and that place is PX4.** `heli.json` ships without
+  `HeliDemix`, so the allocator's three swash servo positions reach RealFlight untouched and the
+  RealFlight model must be wired non-mixed / direct-servo. Two mixes in series compose rather
+  than cancel, cross-coupling roll and pitch. This also matches ArduPilot's default, where the
+  demix is opt-in via a `helidemix` substring in the frame name
+  (`SIM_FlightAxis.cpp:129-130`). Re-enable it only for a CCPM model whose mixing cannot be
+  turned off — an **untested path**, since with the demix off neither its arithmetic nor the
+  decoupling argument for the pinned geometry is exercised.
+- **When enabled, `HeliDemix` only inverts correctly for the swash geometry the airframe forces**
+  via `CA_SP0_ANG*` = 300/60/180, with equal arm lengths and `CA_MAX_SVO_THROW 0` (§12). With the
+  demix off those angles instead describe the **physical** head of the RealFlight model.
 
-- `px4` = index into `HIL_ACTUATOR_CONTROLS.controls[]` (defined by the airframe's actuator config, visible in the QGC Actuators tab — the JSON must mirror it).
+- `px4` = index into `HIL_ACTUATOR_CONTROLS.controls[]`, which the airframe's `PWM_MAIN_FUNC*` assignments populate and the QGC Actuators tab displays. On every shipped model it equals `rf`; what varies between models is the FUNC list, not this column.
 - Scaling: `unipolar` = clamp(v,0,1) for motors (HIL controls are 0..1 for motors); `bipolar` = (v+1)/2 for surfaces (−1..1). Net effect is the same as normalising a 1000–2000 µs PWM band to 0..1. `reverse` is applied *after* scaling, as `v -> 1-v`.
 - `disarm` = the value sent while PX4 is disarmed or the control is NaN. **`disarm: -1` (also the default when the key is absent) means "hold the last output"** rather than driving the channel anywhere — right for a plain control surface, wrong for a motor, which is why every motor row states `"disarm": 0.0` explicitly, and wrong for any row an option post-pass rewrites, which is why every row in `heli.json` states one (see the heli traps above).
 - **Duplicate indices are rejected at startup, not tolerated.** Two rows sharing an `rf` index would silently last-wins in `buildChannels()`, and a repeated `px4` index is almost always a typo, so the bridge refuses to start on either and names the two offending entries.
 - `UnmappedDefault` is the value sent on every RealFlight channel the map does not mention.
-- `Options` (a bit per option, flattened to a bitmask by `get_FAbridge_params.py`): `ResetPosition` (=1, ResetAircraft on startup, default), `Rev4Servos` (=2, swap ch1–4 ↔ 5–8 wholesale for RF models built that way — do **not** combine it with an already-reordered map like the quadplane's or you double-swap), `HeliDemix` (=4, swash servos → RF roll/pitch/collective: `roll=(s1−s2)/1.732`, `pitch=((s1+s2)/2−s3)/1.5`, `col=(s1+s2+s3)/3`, recentered 0..1 — the divisors are gain normalisation, see below), `SilenceFPS` (=8).
-- **The `HeliDemix` gain normalisation.** The geometric inverse alone is not unit-gain. `buildChannels()` maps each bipolar swash servo to `(v+1)/2` before the post-pass runs, and with the pinned 300/60/180 geometry that leaves `s1−s2` at gain 0.866 and `(s1+s2)/2−s3` at 0.750, against the 0.5 about a 0.5 centre that RealFlight wants for a full-scale command. Undivided, the cyclic saturates at ±0.577 of commanded roll torque and ±0.667 of pitch, roll hotter than pitch. So roll is divided by 0.866/0.5 = √3 = 1.732 and pitch by 0.750/0.5 = 1.5. **Not** by 0.866 and 0.750: that recovers raw torque and clips at half command. Collective, `(s1+s2+s3)/3`, is already exactly gain 0.5 and is deliberately untouched. The constants are only valid for the pinned geometry — changing `CA_SP0_ANG*` or the arm lengths invalidates them.
+- `Options` (a bit per option, flattened to a bitmask by `get_FAbridge_params.py`): `ResetPosition` (=1, ResetAircraft on startup, default), `Rev4Servos` (=2, swap ch1–4 ↔ 5–8 wholesale for RF models built that way — do **not** enable it on a model whose FUNC params already produce the right order, such as the quadplane, since it can only swap a correct order into a wrong one), `HeliDemix` (=4, **not enabled on any shipped model**; swash servos → RF roll/pitch/collective: `roll=(s1−s2)/1.732`, `pitch=((s1+s2)/2−s3)/1.5`, `col=(s1+s2+s3)/3`, recentered 0..1 — the divisors are gain normalisation, see below — for CCPM RealFlight models whose own mixing cannot be disabled), `SilenceFPS` (=8). All four shipped models flatten to **9** (`ResetPosition|SilenceFPS`).
+- **The `HeliDemix` gain normalisation.** The geometric inverse alone is not unit-gain. `buildChannels()` maps each bipolar swash servo to `(v+1)/2` before the post-pass runs, and with the pinned 300/60/180 geometry that leaves `s1−s2` at gain 0.866 and `(s1+s2)/2−s3` at 0.750, against the 0.5 about a 0.5 centre that RealFlight wants for a full-scale command. Undivided, the cyclic saturates at ±0.577 of commanded roll torque and ±0.667 of pitch, roll hotter than pitch. So roll is divided by 0.866/0.5 = √3 = 1.732 and pitch by 0.750/0.5 = 1.5. **Not** by 0.866 and 0.750: that recovers raw torque and clips at half command. Collective, `(s1+s2+s3)/3`, is already exactly gain 0.5 and is deliberately untouched. The constants are only valid for the pinned geometry — changing `CA_SP0_ANG*` or the arm lengths invalidates them. **These divisors are ours and ArduPilot has no equivalent:** `SIM_FlightAxis.cpp:348-350` is a plain unweighted inverse, exact only for a 140° head (`AP_MotorsHeli_Swash.cpp:138-145` mixes `H3_140` with flat ±1.0 factors). On the 120° head both projects actually use — `AP_MotorsHeli_Swash.cpp:147-154` defaults `add_servo_angle` to −60/+60/180, the same geometry as our `CA_SP0_ANG` 300/60/180 — ArduPilot's forward mixer carries cos 30° = 0.866 on roll against 0.5/1.0 on pitch, so its own round trip returns roll and pitch gains in the ratio 2/√3 = 1.155 rather than 1. Matching ArduPilot here would reintroduce that imbalance. **The channel order follows ArduPilot; the demix gains deliberately do not.**
 - **Both post-passes read a scratch copy, not the persistent channel array.** `channels[]` holds the untransformed per-channel state so that hold-last has something stable to hold; `out[]` is what goes to RealFlight. Transforming in place would re-transform every hold-last channel every frame — `HeliDemix` diverges, and `Rev4Servos`, whose swap is its own inverse, instead ping-pongs a held channel between `rf i` and `rf i+4` on alternate frames, a full-amplitude servo buzz at loop rate.
 - Adding a new aircraft takes **four** steps, not three: new JSON, one model name in the `models` list in `sitl_targets_flightaxis.cmake`, one airframe script — and that airframe must also be added to `ROMFS/px4fmu_common/init.d-posix/airframes/CMakeLists.txt` (§3.2) or it never reaches the ROMFS.
 
@@ -636,8 +659,9 @@ Loop rate is set by RealFlight's SOAP RTT (~2–5 ms → 200–500 Hz). Wired ne
 44–108 lines each, and the bulk of that is the actuator geometry (`CA_AIRFRAME`, `CA_ROTOR*`,
 `CA_SV_CS*`, `PWM_MAIN_FUNC*`) plus per-vehicle tuning, none of which is optional. Read the
 shipped files — `ROMFS/px4fmu_common/init.d-posix/airframes/120{0,1,2,3}_flightaxis_*` — before
-writing a new one; each carries a comment block deriving its `controls[]` indices, which must
-stay in step with the matching `models/<name>.json` (§5).
+writing a new one; each carries a comment block deriving its `PWM_MAIN_FUNC*` values from the
+allocator's own numbering, which is where the channel order is decided and which must stay in
+step with the matching `models/<name>.json` — an identity map (§5).
 
 ```sh
 #!/bin/sh
@@ -765,7 +789,8 @@ physical board.
 | **`EKF2_GPS_DELAY` and `EKF2_MULTI_IMU` silently clobbered** — `px4-rc.mavlinksim` runs after the airframe and re-defaults both | use `param set`, not `param set-default`, for those two (§9) |
 | **RC-loss failsafe on a headless run** — no joystick, no RC, no manual control source at all | `COM_RC_IN_MODE 4`, the only value that skips the check (§9) |
 | **Log closes at the first disarm**, so a multi-cycle validation session is mostly unlogged | `SDLOG_MODE 4` (§9) |
-| **Heli swash demix cross-couples roll into pitch** — PX4's default `CA_SP0_ANG*` 0/140/220 puts the mirrored servo pair on 2 and 3, which the `HeliDemix` inverse does not expect | force 300/60/180 in `1203_flightaxis_heli`, and pin the arm lengths and `CA_MAX_SVO_THROW 0` with it |
+| **Heli swash mixing applied twice** — PX4's allocator mixes, and the RealFlight model's own CCPM mixes again; the two compose rather than cancel and roll/pitch cross-couple in flight, with nothing logged | put the mix in exactly one place: `HeliDemix` off in `heli.json` (default) and the RealFlight model wired non-mixed / direct-servo (§5) |
+| **Heli cyclic response is rotated** — `CA_SP0_ANG*` does not match the model's actual head, so a pitch command banks the aircraft | force 300/60/180 in `1203_flightaxis_heli` (120° head, odd servo aft, ArduPilot's default) and pin the arm lengths and `CA_MAX_SVO_THROW 0`; use 120/240/0 for an odd-servo-forward head. Only confirmable in flight. |
 | **Heli has no left yaw** — under `CA_AIRFRAME 10` the tail is a *motor* clamped to `[0,1]`, so the whole negative half of the yaw command is clipped and the tail sits on its lower stop | `CA_AIRFRAME 11` (tail Servo), with `rf3` `bipolar` and `disarm` 0.5 in `heli.json` (§5) |
 | **Heli demix over-drives the cyclic** — the raw differences are gain 0.866 / 0.750, not 0.5, so roll saturates at 0.577 of command and pitch at 0.667, roll hotter than pitch | divide roll by √3 and pitch by 1.5 in the bridge's `HeliDemix` post-pass (§5). *Fixed — this was a known defect in earlier drafts and is not one now.* |
 | **Heli hold-last swash re-demixed every frame**, diverging within ~3 frames on the armed→disarmed transition | every `heli.json` row carries an explicit `disarm`, and the post-passes read a scratch copy rather than the persistent channel array (§5) |

@@ -82,7 +82,7 @@ Tools/simulation/flightaxis/
         ├── fa_communicator.{h,cpp}      # SOAP client, socket and reconnect logic (§8.1)
         ├── vehicle_state.{h,cpp}        # RF→NED conversions (§6) + sensor synthesis
         ├── px4_communicator.{h,cpp}     # HIL link: TCP 4560 for SITL, serial/UDP for HITL
-        └── geo_mag_declination.{h,cpp}  # WMM tables (third-party, see COPYRIGHT.md)
+        └── geo_mag_declination.{h,cpp}  # WMM tables — verbatim upstream, see COPYRIGHT.md
 
 src/modules/simulation/simulator_mavlink/
 └── sitl_targets_flightaxis.cmake        # make-target registration (PX4 v1.16 pattern)
@@ -276,8 +276,9 @@ Once per aircraft:
 
 - In the RealFlight aircraft editor: strip expo/mixes/gyros, max servo speed, one channel
   per actuator.
-- The QGC **Actuators** geometry must match the `"px4"` indices in the corresponding
-  `models/<name>.json` — see [Model JSON](#model-json-channel-maps) below.
+- The RealFlight model's channel order must match the airframe's `PWM_MAIN_FUNC*` assignments,
+  which is where the ordering is set; the `models/<name>.json` map is identity and stays that
+  way — see [Model JSON](#model-json-channel-maps) below.
 
 ## Home position
 
@@ -301,17 +302,31 @@ elevation, deliberately — see spec §6.
 ## Model JSON: channel maps
 
 Each `models/<name>.json` maps RealFlight transmitter channels (`rf`) to PX4 actuator outputs
-(`px4` = an index into `HIL_ACTUATOR_CONTROLS.controls[]`). The `px4` numbers are dictated by the
-airframe script, not chosen freely:
+(`px4` = an index into `HIL_ACTUATOR_CONTROLS.controls[]`).
 
-- `PWM_MAIN_FUNC<N>` lands on `controls[N-1]`.
+**RealFlight channel N == PX4 output channel N.** Every shipped map is a pure identity map: `rf`
+and `px4` are equal on every row, e.g. `quadplane.json` maps `rf0..rf7` to `px4` `0..7`.
+
+The channel order is decided in the airframe instead, by `PWM_MAIN_FUNC<N>` (SITL) or
+`HIL_ACT_FUNC<N>` (HITL) — the same place ArduPilot puts it (`SERVOn_FUNCTION`) and PX4's own
+Gazebo bridge puts it (`SIM_GZ_*_FUNC*`). One channel numbering therefore holds from SITL through
+HITL to the physical output pinout:
+
+- `PWM_MAIN_FUNC<N>` selects which allocator output lands on `controls[N-1]`, so choosing the
+  FUNC values *is* choosing the channel order.
 - Function `101+k` is `CA_ROTOR<k>` — a motor, range `[0,1]` → `"scale": "unipolar"`.
 - Function `201+k` is `CA_SV_CS<k>` — a surface, range `[-1,1]` → `"scale": "bipolar"`.
 - The allocator emits **motors before servos**, so on mixed airframes the motors take the low
-  indices no matter where they sit on the transmitter. This is why the shipped maps look
-  scrambled — e.g. `quadplane.json` maps `rf0..rf7` to `px4` `5, 7, 4, 8, 0, 1, 2, 3`.
+  function numbers no matter where they sit on the transmitter. That mismatch has to be absorbed
+  somewhere; it is absorbed by the FUNC list, which is why the shipped FUNC assignments look
+  scrambled — e.g. `1202_flightaxis_quadplane` sets `PWM_MAIN_FUNC1..9` to
+  `201, 203, 105, 204, 101, 102, 103, 104, 202`.
+- If your RealFlight model uses a different channel order, **change the FUNC params and keep the
+  JSON an identity map.** Re-scrambling the JSON splits the ordering across two files.
 
-Other keys:
+What remains in the JSON is what is genuinely not ordering and cannot be expressed as a FUNC
+value — `scale` (PX4 normalises motors to `[0,1]` but servos to `[-1,1]`, while RealFlight always
+wants `[0,1]`), `reverse`, `disarm`, and the option transforms:
 
 - `"reverse": true` is applied *after* scaling, as `v -> 1-v`.
 - `"disarm"` is the value sent while PX4 is disarmed. **`-1`, which is also the default when the
@@ -333,9 +348,35 @@ Other keys:
 | Option | Effect |
 |---|---|
 | `ResetPosition` | issue `ResetAircraft` on startup, so every run begins from a known state. On by default in all four shipped models. |
-| `Rev4Servos` | swap RealFlight channels 1–4 with 5–8 wholesale, for RF models built that way. **Do not combine with an already-reordered map** such as `quadplane.json` — you would double-swap. |
-| `HeliDemix` | convert the three swash servo outputs back into the roll/pitch/collective triple RealFlight expects (`roll=(s1−s2)/1.732`, `pitch=((s1+s2)/2−s3)/1.5`, `col=(s1+s2+s3)/3`). The two divisors normalise the raw differences to unit gain — without them the cyclic saturates at 0.577 of commanded roll and 0.667 of pitch. They are exact only for the swash geometry `1203_flightaxis_heli` forces via `CA_SP0_ANG*` = 300/60/180, which is why that airframe pins the angles and the arm lengths. |
+| `Rev4Servos` | swap RealFlight channels 1–4 with 5–8 wholesale, for RF models built that way. **Do not enable it on a model whose FUNC params already produce the right order** — every shipped model, `quadplane.json` included — as it can only swap a correct order into a wrong one. |
+| `HeliDemix` | **Off by default** — see "Swash mixing" below. Converts the three swash servo outputs back into the roll/pitch/collective triple a CCPM RealFlight model expects (`roll=(s1−s2)/1.732`, `pitch=((s1+s2)/2−s3)/1.5`, `col=(s1+s2+s3)/3`). The two divisors normalise the raw differences to unit gain — without them the cyclic saturates at 0.577 of commanded roll and 0.667 of pitch. They are exact only for the swash geometry `1203_flightaxis_heli` forces via `CA_SP0_ANG*` = 300/60/180, which is why that airframe pins the angles and the arm lengths. **The divisors are ours; ArduPilot's `SIM_FlightAxis.cpp:348-350` has no equivalent** and leaves roll and pitch in the ratio 2/√3 on the 120° head both projects use. The channel *order* follows ArduPilot (swash 1–3, tail 4, RSC 8); the demix *gains* deliberately do not. |
 | `SilenceFPS` | suppress the periodic `exchanges=… rtf=… glitches=…` line on stderr. **On in all four shipped models** — it prints once a second forever and buries everything else in the terminal. The alarms still print: each swallowed glitch gets its own `glitch 0.62s` line and an out-of-range realtime factor still warns, both independently of this option. Drop it from `Options` if you want the running heartbeat back. |
+
+### Swash mixing (helicopter)
+
+A collective-pitch heli needs exactly **one** CCPM mix between roll/pitch/collective and the
+three swash servos — in PX4's allocator, in the bridge, or in the RealFlight model, but in
+exactly one of them. Two mixes in series do not cancel, they compose, and roll and pitch
+cross-couple badly.
+
+**This integration puts the mix in PX4**, so `HeliDemix` is off in `heli.json` and the bridge
+sends the allocator's three swash **servo positions** to RealFlight untouched. `heli.json` is
+a pure identity map for the heli exactly as it is for the other three vehicles — RealFlight
+channel N carries PX4 output channel N, literally.
+
+That means **the RealFlight heli model must be wired non-mixed / direct-servo**: turn its own
+CCPM off in the aircraft editor and map each channel straight to its servo, the same way you
+would wire a fixed-wing model's ail/ele/thr/rud to channels 1–4. This also matches ArduPilot's
+default: `SIM_FlightAxis.cpp:129-130` only enables ArduPilot's own demix when the frame name
+contains the substring `helidemix`.
+
+**Re-enable `HeliDemix` only if your model has a CCPM head whose mixing cannot be disabled.**
+Add `"HeliDemix"` back to `Options` in `heli.json` (bitmask 9 → 13) and change nothing else.
+Never enable the model's mixing and the bridge's demix at the same time.
+
+With PX4 as the sole mixer, `CA_SP0_ANG*` describes the **physical** swash of your model. The
+airframe sets 300/60/180 — a 120° head with the odd servo aft, matching ArduPilot's default.
+If your model's third servo is at the front, use 120/240/0.
 
 Full derivation, per-model tables, and the heli traps: spec §5.
 
@@ -347,8 +388,9 @@ uninstaller leave them, and your model JSONs, strictly alone:
 
 1. New `Tools/simulation/flightaxis/flightaxis_bridge/models/<name>.json` (channel map — see
    above, and spec §5).
-2. New airframe script `12xx_flightaxis_<name>`, whose `PWM_MAIN_FUNC*` assignments must agree
-   with the JSON's `px4` indices.
+2. New airframe script `12xx_flightaxis_<name>`, whose `PWM_MAIN_FUNC*` assignments set the
+   channel order — choose them so that `controls[]` comes out in your RealFlight model's own
+   channel order, which lets the JSON stay an identity map.
 3. **Register that airframe in
    `ROMFS/px4fmu_common/init.d-posix/airframes/CMakeLists.txt`.** Skipping this is the classic
    mistake: everything builds cleanly and the airframe simply never reaches the ROMFS, so PX4
@@ -370,7 +412,7 @@ configure time rather than failing at launch.
 | `WARNING: RealFlight physics speed multiplier is <x> (set it to 1.0)` | RealFlight is running fast or slow motion. All timing and sensor synthesis assume real time — reset the multiplier in RealFlight. |
 | `glitch 0.35s` lines appearing | The bridge absorbed a physics-time jump (network hiccup) so it does not reach EKF2 as a time jump. Occasional lines are benign; a steady stream means the link cannot keep up — go wired, or move the bridge closer to the RealFlight machine. |
 | **Hangs silently at `waiting for PX4 on TCP 4560`** | The bridge is up and waiting, but PX4 never connected. Usually PX4 exited at startup — scroll back for its error. The most common cause is the missing airframes `CMakeLists.txt` registration (see step 3 of [Adding a new aircraft](#adding-a-new-aircraft)): the airframe is absent from the ROMFS, so `SYS_AUTOSTART` matches nothing. Also check that nothing else already holds TCP 4560. |
-| Aircraft twitches or flies inverted on one axis | Channel map mismatch. Compare the JSON's `px4` indices against the `PWM_MAIN_FUNC*` block in the matching airframe script — they are derived, not free (see [Model JSON](#model-json-channel-maps)). |
+| Aircraft twitches or flies inverted on one axis | Channel order mismatch. First confirm the JSON is still an identity map (`rf` == `px4` on every row); if it is, the fix is in the `PWM_MAIN_FUNC*` block of the matching airframe script, which must put `controls[]` in your RealFlight model's channel order (see [Model JSON](#model-json-channel-maps)). Inverted on exactly one axis with the right surface moving is instead a `"reverse"` flag. |
 | Heli has no left yaw at all; the tail sits on its lower stop | The tail row must be `"scale": "bipolar"` with `"disarm": 0.5`. `1203_flightaxis_heli` uses `CA_AIRFRAME 11` ("tail Servo"), so the tail is a servo on `[-1,1]`. Under `CA_AIRFRAME 10` it would be a motor clamped to `[0,1]` and the whole negative half of the yaw command would be clipped away. |
 | Bridge exits with `PX4 link lost - shutting down` | Expected, not a fault: a dead PX4 link is terminal by design. PX4 exited, the board rebooted, or the cable was pulled. Restart both sides — the bridge deliberately does not re-accept a fresh PX4 whose clock starts at zero. |
 

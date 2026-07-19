@@ -60,13 +60,14 @@ combined work containing GPLv3 code is distributed under GPLv3. BSD-3-Clause is
 GPL-compatible, so the PX4-derived files may be combined.
 
 **Where the notices live.** Files that carry a BSD-3-Clause notice upstream keep
-it verbatim in their own header. Two files are reused verbatim from upstream
-sources that ship them *without* any header notice —
-`cmake/FindMAVLink.cmake` (PX4-FlightGear-Bridge) and
-`Tools/simulation/flightaxis/sitl_run.sh` (PX4-Autopilot). We have not added a
-notice to either, because inventing a copyright line that the copyright holder
-never wrote would misstate the provenance. Their origin and licence are recorded
-in the table below instead, which is where you should look for those two.
+it verbatim in their own header. Two files come from upstream sources that ship
+them *without* any header notice — `cmake/FindMAVLink.cmake`, taken verbatim from
+PX4-FlightGear-Bridge, and `Tools/simulation/flightaxis/sitl_run.sh`, which began
+as PX4's FlightGear runner but has since been rewritten far enough that only 21
+of its 177 lines still match upstream. We have not added a notice to either,
+because inventing a copyright line that the copyright holder never wrote would
+misstate the provenance. Their origin and licence are recorded in the table below
+instead, which is where you should look for those two.
 
 ## Provenance by file
 

@@ -347,6 +347,15 @@ prefix `HIL_ACT`, 16 channels, visible only when `SYS_HITL>0`). Each `.hil` file
 substitution is one-for-one at the same `<N>` with the same numeric function value, so the `px4`
 indices in `models/*.json` mean the same thing on both paths.
 
+That is the whole reason the ordering decision lives in these params rather than in the JSON.
+RealFlight channel N is driven by PX4 output channel N — every shipped `models/*.json` is a pure
+identity map — and the channel order is chosen once, in `PWM_MAIN_FUNC<N>` for SITL and in the
+`HIL_ACT_FUNC<N>` twin for HITL, the same place ArduPilot puts it (`SERVOn_FUNCTION`) and PX4's
+own Gazebo bridge puts it (`SIM_GZ_*_FUNC*`). One channel numbering therefore survives from SITL
+through HITL to the physical output pinout, and moving a vehicle from the simulator to a board
+changes no channel numbers anywhere. If your RealFlight model uses a different order, change
+`HIL_ACT_FUNC<N>` and leave the JSON as an identity map.
+
 **What was dropped from the SITL airframes**, and why — these are SITL-only and wrong or
 meaningless on a board:
 
@@ -378,20 +387,32 @@ Plus `CA_ROTOR_COUNT 4` and the `CA_ROTOR*_P[XY]`/`CA_ROTOR*_KM` values from
 
 | Param | Value | → `controls[]` | RealFlight ch |
 |---|---|---|---|
-| `HIL_ACT_FUNC1` | 101 (Motor 1, throttle) | `[0]` | rf2 |
-| `HIL_ACT_FUNC2` | 201 (Servo 1, aileron L) | `[1]` | rf0 |
-| `HIL_ACT_FUNC3` | 202 (Servo 2, aileron R) | `[2]` | unmapped |
-| `HIL_ACT_FUNC4` | 203 (Servo 3, elevator) | `[3]` | rf1 (reversed) |
-| `HIL_ACT_FUNC5` | 204 (Servo 4, rudder) | `[4]` | rf3 |
+| `HIL_ACT_FUNC1` | 201 (Servo 1, aileron L) | `[0]` | rf0 |
+| `HIL_ACT_FUNC2` | 203 (Servo 3, elevator) | `[1]` | rf1 (reversed) |
+| `HIL_ACT_FUNC3` | 101 (Motor 1, throttle) | `[2]` | rf2 |
+| `HIL_ACT_FUNC4` | 204 (Servo 4, rudder) | `[3]` | rf3 |
+| `HIL_ACT_FUNC5` | 202 (Servo 2, aileron R) | `[4]` | unmapped |
 
 Plus the `CA_SV_CS*` surface definitions from `1200_flightaxis_plane`.
 
-**Quadplane** (`CA_AIRFRAME 2`): `HIL_ACT_FUNC1..5` = 101–105, `HIL_ACT_FUNC6..9` = 201–204,
-mirroring `1202_flightaxis_quadplane`.
+The values are non-sequential because the allocator numbers its outputs by kind — motors
+(`101…`) before servos (`201…`) — which is not the order a RealFlight fixed-wing is wired in.
+The FUNC list absorbs that mismatch, which is why the quad above needs no reordering (it is all
+motors) and the other three do.
 
-**Heli** (`CA_AIRFRAME 11`): `HIL_ACT_FUNC1` = 101, `HIL_ACT_FUNC2..5` = 201–204, mirroring
-`1203_flightaxis_heli`. The bridge's `HeliDemix` option is applied bridge-side and needs no
-board parameter.
+**Quadplane** (`CA_AIRFRAME 2`): `HIL_ACT_FUNC1..9` = 201, 203, 105, 204, 101, 102, 103, 104, 202
+— surfaces on `controls[0..3]`, the four lift motors on `[4..7]`, aileron right on `[8]` and
+unmapped — mirroring `1202_flightaxis_quadplane`.
+
+**Heli** (`CA_AIRFRAME 11`): `HIL_ACT_FUNC1..4` = 202, 203, 204, 201 and `HIL_ACT_FUNC8` = 101,
+with `FUNC5..7` explicitly 0 — swash servos 1–3 on `controls[0..2]`, yaw tail on `[3]`, main
+rotor on `[7]` — mirroring `1203_flightaxis_heli`. That is ArduPilot's own heli channel order
+(`AP_MotorsHeli_Swash.cpp:201-202` swash → `SERVO1/2/3`, `AP_MotorsHeli_Single.cpp:207` tail →
+`SERVO4`, `AP_MotorsHeli.h:34` RSC → `SERVO8`), so a RealFlight heli model already set up for
+ArduPilot needs no re-mapping; RealFlight channels 5–7 stay idle at 0.5 in both. As in SITL,
+PX4 does the CCPM mix and the bridge ships the three swash **servo positions** untouched —
+`HeliDemix` is **off** in `heli.json` — so the RealFlight model must be wired non-mixed /
+direct-servo. That choice is made bridge-side in the model JSON and needs no board parameter.
 
 Verify the result in QGC's **Actuators** tab, which reads `HIL_ACT_FUNC*` once `SYS_HITL>0`.
 
