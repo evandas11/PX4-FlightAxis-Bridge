@@ -168,7 +168,7 @@ boilerplate elsewhere gets wrong:
 - **`WORKING_DIRECTORY ${SITL_WORKING_DIR}`** on the run target, so the `rootfs` and logs land
   where every other PX4 SITL target puts them.
 
-The shipped file additionally warns at configure time if a listed model has no
+The shipped file also warns at configure time if a listed model has no
 `models/<model>.json` or no matching `*_flightaxis_<model>` airframe — both are otherwise
 silent misconfigurations that only surface as a Python traceback at launch. It also declares a
 `flightaxis_hitl_<model>` target per model, which runs `hitl_run.sh` and **depends on
@@ -267,7 +267,7 @@ Two things the shipped file adds that the sketch above omits, both for the sake 
 
 ## 4. Runner — `Tools/simulation/flightaxis/sitl_run.sh`
 
-Follows the shape of PX4's other simulator runners, with one difference: RealFlight isn't launched (it lives on the Windows gaming box) — we only verify reachability. Abridged below. The shipped script additionally echoes its arguments and the SITL command; honours `DONT_RUN` and `NO_PXH` (the latter passing `-d` so the target can be driven from CI or a non-tty); invokes both Python helpers as `python3 ./script.py` rather than relying on the exec bit and shebang, which a zip round-trip or a `noexec` mount would defeat — and which would make the `||` branch misreport a working network as unreachable; and captures PX4's exit status *before* the cleanup `kill`, since otherwise a PX4 crash reports success and a clean Ctrl-C reports failure, timing-dependently:
+Follows the shape of PX4's other simulator runners, with one difference: RealFlight isn't launched (it lives on the Windows gaming box) — we only verify reachability. Abridged below. The shipped script also echoes its arguments and the SITL command; honours `DONT_RUN` and `NO_PXH` (the latter passing `-d` so the target can be driven from CI or a non-tty); invokes both Python helpers as `python3 ./script.py` rather than relying on the exec bit and shebang, which a zip round-trip or a `noexec` mount would defeat — and which would make the `||` branch misreport a working network as unreachable; and captures PX4's exit status *before* the cleanup `kill`, since otherwise a PX4 crash reports success and a clean Ctrl-C reports failure, timing-dependently:
 
 ```bash
 #!/usr/bin/env bash
@@ -428,7 +428,9 @@ These go in `vehicle_state.cpp`. They are line-for-line what the upstream implem
 
 ```cpp
 if (touching_ground) {
-    accel_ef  = (velocity_ef - last_velocity_ef) / dt;
+    // dt_true, NOT the glitch-capped dt: a swallowed glitch would divide the
+    // real velocity change by a shorter interval and overstate the accel
+    accel_ef  = (velocity_ef - last_velocity_ef) / dt_true;
     accel_ef.z -= 9.80665f;
     accel_body = R_ned_to_body * accel_ef;      // yields exactly (0,0,-g) at rest
 }
@@ -470,15 +472,58 @@ nothing downstream cares about.
 
 ## 7. Timing — extrapolation & glitch handling
 
-RealFlight free-runs (~250 Hz). Upsampling alone is enough to dodge PX4's stale-sensor detection, but not enough to survive duplicate frames and network glitches; the bridge uses a stronger three-branch scheme, keyed on `m-currentPhysicsTime-SEC`:
+RealFlight free-runs (~250 Hz). Upsampling alone is enough to dodge PX4's stale-sensor detection, but not enough to survive duplicate frames, network glitches and a simulator that stops producing physics altogether; the bridge uses a four-branch scheme, keyed on `m-currentPhysicsTime-SEC`:
 
+0. **leaving a keep-alive** (physics time has advanced past the last frame we consumed, and a keep-alive was running) → re-base the epoch onto the clock already exported, so the next frame resumes at exactly the clock PX4 last saw, and skip glitch compensation for this frame. See below.
 1. **dt < 0** → RealFlight restarted: re-base initial time, zero position offset, continue.
 2. **dt < 1e-5 s** (same physics frame — bridge outran RF): do **not** resend an identical HIL_SENSOR. Extrapolate in 1 ms steps (propagate attitude by `q⊗exp(½ω·δt)`, hold accel/gyro), never beyond `average_frame_time` (EMA `0.98/0.02`).
 3. **normal frame** → full pipeline, then glitch compensation: if physics time jumped 50 ms–2 s (network hiccup), swallow the excess by advancing the epoch (`initial_time += dt − 50 ms`), cap dt at 50 ms, count the glitch. Backwards >500 ms = true reset, accept.
 
 Timestamps in HIL messages = physics time (µs since epoch capture). Watch `m-currentPhysicsSpeedMultiplier ≠ 1` → warn. Print the FPS line every 1000 frames.
 
-**Realtime-factor monitor.** The three branches above keep the bridge's *exported* clock clean,
+**The wall-clock keep-alive**, and why branch 0 exists to unwind it. Two situations stop
+RealFlight's physics clock while PX4 still needs a sensor stream: the controller reinject after
+a spacebar reset or an aircraft change, and a *stalled* clock — sim paused, a modal dialog open,
+the window minimised, with `ExchangeData` still returning valid replies carrying the same
+`m-currentPhysicsTime-SEC` over and over. From the bridge both look identical, a good frame with
+no new physics in it, so both get the same treatment: hold the last state, advance the exported
+clock off **wall** time at ~1 kHz, and keep sending. A single step is capped at 100 ms so a long
+stall cannot teleport the clock forward.
+
+The stall is only declared after 200 ms, and that threshold is load-bearing in both directions.
+Arriving at "no new frame" is *normal* once per frame — the loop free-runs at several kHz against
+a 250 Hz simulator and routinely finishes interpolating with time to spare — so too low a
+threshold makes branch 0 re-base on nearly every real frame, which measurably consumed most of
+them and left the realtime-factor monitor permanently reading `n/a`. Too high and PX4's sensor
+topics go stale, since the arming checks want each one updated within 1 s. 200 ms sits an order
+of magnitude above any plausible frame period (4 ms at 250 Hz, 20 ms even at a badly degraded
+50 Hz) and comfortably under that 1 s timeout.
+
+Sending nothing was the original behaviour and it was worse. Measured against the mock with a
+6 s freeze: HIL_SENSOR stopped about 52 ms into the stall, and PX4 went on to log `MAG #0 failed:
+TIMEOUT`, `BARO #0 failed: TIMEOUT` and `angular velocity no longer valid (timeout)`, failing
+every sensor arming check — and the whole stall was later applied to the clock as one 6 s jump,
+silently, since that exceeds the 2 s glitch ceiling.
+
+Branch 0 is what keeps the two clocks from drifting apart afterwards. The keep-alive advances
+the exported clock while the physics epoch stands still, so by the time real frames resume the
+two disagree by the length of the stall. Falling straight through to branch 3 would compute the
+new time from that stale epoch: diverged backwards, the monotonic clamp **freezes** the exported
+clock, and because the offset is constant — physics resumes exactly where it paused — it never
+self-corrects and stays frozen for the rest of the session. A frozen clock is severe even in
+SITL, where PX4 discards our timestamps anyway, because every send-rate gate is measured against
+it: HIL_GPS, DISTANCE_SENSOR and the baro/mag sub-rates stop being sent at all and only the
+ungated HIL_SENSOR survives. Re-basing the epoch onto the clock already exported removes both the
+freeze and the jump. The upstream implementation the other three branches were ported from has
+no wall-clock keep-alive and so never meets any of this: branch 0 and the keep-alive are
+original to this bridge, which is why the provenance notices still describe a *three*-branch
+port.
+
+The reinject itself is throttled to one attempt per 300 ms, separately from the keep-alive:
+`startController()` is three SOAP round-trips *including* `ResetAircraft`, and the branch is
+entered thousands of times a second while the flag is low.
+
+**Realtime-factor monitor.** The branches above keep the bridge's *exported* clock clean,
 which is necessary and not sufficient. PX4 timestamps the SITL sensor stream with its own clock
 on arrival (`SimulatorMavlink::handle_message_hil_sensor`), not with the physics time carried in
 the message, so what actually reaches EKF2 is the wall-clock arrival rate. If RealFlight's
@@ -491,7 +536,7 @@ wall second over each reporting window, prints it as `rtf=` in the FPS line, and
 limited to once per 5 s) outside 0.95–1.05. This is distinct from the
 `m-currentPhysicsSpeedMultiplier` warning, which is RealFlight's *self-reported setting*: the
 realtime factor catches RealFlight reporting 1.0 and the machine failing to keep up. One sample
-is suppressed after a reinject keep-alive, where the physics clock was paused on purpose.
+is suppressed after a keep-alive, where the physics clock was paused on purpose.
 
 ---
 
@@ -519,7 +564,7 @@ PX4 has a complete picture immediately:
 
 | Message | Rate | Notes |
 |---|---|---|
-| `HIL_SENSOR` | every frame / extrapolation step (~250 Hz+) | pressures in hPa (§6); `fields_updated` sub-rated, below |
+| `HIL_SENSOR` | every frame / extrapolation step (~1 kHz) | pressures in hPa (§6); `fields_updated` sub-rated, below |
 | `HIL_GPS` | **10 Hz** (`GPS_INTERVAL_US`) | COG = `atan2(vE,vN)`, **not** RF azimuth. PX4 publishes one `sensor_gps` per message with no rate limiting of its own, hence the decimation |
 | `HIL_STATE_QUATERNION` | **50 Hz** (`STATE_QUAT_INTERVAL_US`) | ground truth only — for log analysis, not consumed by the estimator |
 | `DISTANCE_SENSOR` | **20 Hz** (`DISTANCE_INTERVAL_US`) | built by `VehicleState::getDistanceSensorMsg()`; downward-facing (`PITCH_270`), 0.1–40 m, cm units. **Gated on `rangefinderValid()`** — suppressed entirely while the aircraft is inverted rather than sent as a bogus reading |
@@ -631,9 +676,11 @@ would give directly. **So `CA_ROTOR*_P[XY]` needs no adjustment per RealFlight m
 should suggest measuring it.** What is *not* free is asymmetry: feed asymmetric arms to a
 symmetric aircraft and roll and pitch stay clean while yaw cross-couples — with the asymmetric
 arms of PX4's stock standard-VTOL airframe (PY 0.245 / -0.1875), a unit yaw command also
-produces a 53 % roll disturbance, which is
-structural and no rate tuning removes. The symmetric square in the shipped airframes is
-therefore a deliberate choice, not a placeholder awaiting real numbers.
+produces a 53 % roll disturbance. That figure comes from working the allocator's mixing matrix
+through by hand, not from a flight — it is a property of the pseudo-inverse and needs no
+simulator to reproduce — and it is structural, so no rate tuning removes it. The symmetric
+square in the shipped airframes is therefore a deliberate choice, not a placeholder awaiting
+real numbers.
 
 ---
 

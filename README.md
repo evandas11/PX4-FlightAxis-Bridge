@@ -39,6 +39,7 @@ On the Linux box that builds and runs PX4:
 
 | Need | Why |
 |---|---|
+| **an existing PX4-Autopilot checkout** | this integration installs *into* a PX4 tree; it never clones or creates one. Clone PX4 v1.16 and run its setup script first — `git clone -b v1.16.0 --recursive https://github.com/PX4/PX4-Autopilot.git` |
 | **Eigen3 development headers** | the bridge's only external library (`find_package(Eigen3 REQUIRED)`) — `apt install libeigen3-dev` |
 | **python3** | `sitl_run.sh` calls `FA_check.py` and `get_FAbridge_params.py` at launch |
 | **cmake** | builds the bridge as a PX4 `ExternalProject` |
@@ -77,7 +78,7 @@ Tools/simulation/flightaxis/
     ├── cmake/FindMAVLink.cmake
     ├── models/{plane,quad,quadplane,heli}.json   # RealFlight channel maps
     └── src/
-        ├── flightaxis_bridge.cpp        # main loop + 3-branch physics-time handling (§7)
+        ├── flightaxis_bridge.cpp        # main loop + 4-branch physics-time handling (§7)
         ├── fa_communicator.{h,cpp}      # SOAP client, socket and reconnect logic (§8.1)
         ├── vehicle_state.{h,cpp}        # RF→NED conversions (§6) + sensor synthesis
         ├── px4_communicator.{h,cpp}     # HIL link: TCP 4560 for SITL, serial/UDP for HITL
@@ -201,8 +202,8 @@ apply as written (see spec §3).
    cp -R Tools src ROMFS /path/to/PX4-Autopilot/
    ```
 
-   Copy, do not mirror-with-delete: `Tools/simulation/flightaxis/models/` is also where your
-   own model JSONs live.
+   Copy, do not mirror-with-delete: `Tools/simulation/flightaxis/flightaxis_bridge/models/`
+   is also where your own model JSONs live.
 
 2. In `PX4-Autopilot/src/modules/simulation/simulator_mavlink/CMakeLists.txt`, add one line
    to the `include(sitl_targets_*.cmake)` block, keeping it alphabetical:
@@ -340,19 +341,24 @@ Full derivation, per-model tables, and the heli traps: spec §5.
 
 ## Adding a new aircraft
 
-Four steps. **Number your airframe in the
+Three steps. **Number your airframe in the
 1204–1219 range** — those ids are reserved for exactly this and the installer and
 uninstaller leave them, and your model JSONs, strictly alone:
 
-1. New `models/<name>.json` (channel map — see above, and spec §5).
-2. Add the model name to the `models` list in `sitl_targets_flightaxis.cmake`. That one line
-   creates both `flightaxis_<name>` and `flightaxis_hitl_<name>`.
-3. New airframe script `12xx_flightaxis_<name>`, whose `PWM_MAIN_FUNC*` assignments must agree
+1. New `Tools/simulation/flightaxis/flightaxis_bridge/models/<name>.json` (channel map — see
+   above, and spec §5).
+2. New airframe script `12xx_flightaxis_<name>`, whose `PWM_MAIN_FUNC*` assignments must agree
    with the JSON's `px4` indices.
-4. **Register that airframe in
+3. **Register that airframe in
    `ROMFS/px4fmu_common/init.d-posix/airframes/CMakeLists.txt`.** Skipping this is the classic
    mistake: everything builds cleanly and the airframe simply never reaches the ROMFS, so PX4
    starts with no matching `SYS_AUTOSTART`.
+
+There is no model list to edit: `sitl_targets_flightaxis.cmake` globs
+`*_flightaxis_*` out of the airframes directory and derives the targets from it, so the
+airframe file in step 2 is what creates both `flightaxis_<name>` and
+`flightaxis_hitl_<name>`. A missing `models/<name>.json` is reported as a CMake warning at
+configure time rather than failing at launch.
 
 ## Troubleshooting
 
@@ -363,7 +369,7 @@ uninstaller leave them, and your model JSONs, strictly alone:
 | `bad channel map: RealFlight channel rfN is mapped twice` <br> `bad channel map: PX4 control index px4[N] is mapped twice` | Two rows in the model JSON share an `rf` or a `px4` index. The message names both entries; fix the JSON. The bridge refuses to start rather than silently letting one win. |
 | `WARNING: RealFlight physics speed multiplier is <x> (set it to 1.0)` | RealFlight is running fast or slow motion. All timing and sensor synthesis assume real time — reset the multiplier in RealFlight. |
 | `glitch 0.35s` lines appearing | The bridge absorbed a physics-time jump (network hiccup) so it does not reach EKF2 as a time jump. Occasional lines are benign; a steady stream means the link cannot keep up — go wired, or move the bridge closer to the RealFlight machine. |
-| **Hangs silently at `waiting for PX4 on TCP 4560`** | The bridge is up and waiting, but PX4 never connected. Usually PX4 exited at startup — scroll back for its error. The most common cause is the missing airframes `CMakeLists.txt` registration (see step 4 above): the airframe is absent from the ROMFS, so `SYS_AUTOSTART` matches nothing. Also check that nothing else already holds TCP 4560. |
+| **Hangs silently at `waiting for PX4 on TCP 4560`** | The bridge is up and waiting, but PX4 never connected. Usually PX4 exited at startup — scroll back for its error. The most common cause is the missing airframes `CMakeLists.txt` registration (see step 3 of [Adding a new aircraft](#adding-a-new-aircraft)): the airframe is absent from the ROMFS, so `SYS_AUTOSTART` matches nothing. Also check that nothing else already holds TCP 4560. |
 | Aircraft twitches or flies inverted on one axis | Channel map mismatch. Compare the JSON's `px4` indices against the `PWM_MAIN_FUNC*` block in the matching airframe script — they are derived, not free (see [Model JSON](#model-json-channel-maps)). |
 | Heli has no left yaw at all; the tail sits on its lower stop | The tail row must be `"scale": "bipolar"` with `"disarm": 0.5`. `1203_flightaxis_heli` uses `CA_AIRFRAME 11` ("tail Servo"), so the tail is a servo on `[-1,1]`. Under `CA_AIRFRAME 10` it would be a motor clamped to `[0,1]` and the whole negative half of the yaw command would be clipped away. |
 | Bridge exits with `PX4 link lost - shutting down` | Expected, not a fault: a dead PX4 link is terminal by design. PX4 exited, the board rebooted, or the cable was pulled. Restart both sides — the bridge deliberately does not re-accept a fresh PX4 whose clock starts at zero. |

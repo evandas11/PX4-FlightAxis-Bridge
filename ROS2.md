@@ -11,8 +11,8 @@ observed on a live run; everything else is called out explicitly.
 
 ## 1. Architecture
 
-The bridge speaks **MAVLink HIL to PX4 over TCP 4560**. It does not know about uORB and it
-does not know about ROS 2, and it should not. ROS 2 support is entirely PX4's own
+The bridge speaks **MAVLink HIL to PX4 over TCP 4560**. It doesn't know about uORB and it
+doesn't know about ROS 2, and it shouldn't. ROS 2 support is entirely PX4's own
 uXRCE-DDS stack; the bridge's only job is to make PX4 believe it has sensors.
 
 ```
@@ -47,7 +47,7 @@ Consequences worth internalising:
 | `MicroXRCEAgent` | `which MicroXRCEAgent` |
 | `px4_msgs` **built from PX4 v1.16** | see the version warning below |
 
-> ### ⚠ `px4_msgs` must match PX4 v1.16
+> ### `px4_msgs` must match PX4 v1.16
 >
 > This is the one thing most likely to bite you, and it did bite during verification.
 >
@@ -209,7 +209,7 @@ home position, `distance_sensor 0.1 m`, GPS `fix_type 3` with 10 satellites at 4
   rather than an omission — a flow-based offboard app will not work here.
 - **`battery_status` and `system_power` are simulated by PX4**, not by us — `battery_simulator`
   and `system_power_simulator` are separate SITL modules and both were live at 100 Hz. Battery
-  values are therefore fictional and will not track RealFlight's own battery model.
+  values are therefore fictional and won't track RealFlight's own battery model.
 
 No topic that a ROS 2 offboard application would reasonably subscribe to was found empty,
 with the two exceptions above (optical flow, ground truth) and the `px4_msgs` version issue.
@@ -236,7 +236,7 @@ with the two exceptions above (optical flow, ground truth) and the `px4_msgs` ve
 ### The 100 Hz ceiling
 
 Nothing reaches ROS 2 faster than ~100 Hz, regardless of its uORB rate — `vehicle_attitude`
-runs at 204 Hz internally and arrives at 100 Hz. This is not decimation by us and not a
+runs at 204 Hz internally and arrives at 100 Hz. That isn't decimation by us, and it isn't a
 per-topic setting (`dds_topics.yaml` has no rate fields). The client polls its subscriptions
 with a **10 ms timeout** (`uxrce_dds_client.cpp:657`, `orb_poll_timeout_ms = 10`, used at
 `:668`), which caps the publish loop at 100 Hz.

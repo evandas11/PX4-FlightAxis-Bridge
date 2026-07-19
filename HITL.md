@@ -101,12 +101,12 @@ if (hil_enabled && !_hil_enabled && _datarate > 5000) {      // mavlink_main.cpp
 1. **The `_datarate > 5000` gate.** If the MAVLink instance's datarate is at or below 5000 B/s,
    PX4 silently never enables the HIL streams. `MAV_x_RATE` defaults to **1200 B/s**. This is
    the single most common reason a HITL link looks alive and never produces actuator controls.
-   See §7.
+   §6.2 sets it; §9 has the symptom.
 2. `HIL_STATE_QUATERNION` is only streamed **out** when `SYS_HITL == 2` (SIH), as ground truth.
 
 ### Why the bridge must not send `HIL_STATE_QUATERNION` in HITL
 
-This is the biggest behavioural difference from the SITL path and it is not a bandwidth
+This is the biggest behavioural difference from the SITL path, and it isn't a bandwidth
 question.
 
 In SITL, `simulator_mavlink` treats `HIL_STATE_QUATERNION` as ground truth for logging. On a
@@ -167,7 +167,7 @@ decimate.
 | 230400 | 23.0 kB/s | 90 % | too tight, no headroom |
 | 460800 | 46.1 kB/s | 45 % | fine |
 | **921600** | **92.2 kB/s** | **22 %** | **recommended**; 500 Hz also fits (43 %) |
-| USB CDC-ACM | ~1 MB/s | ~2 % | baud is nominal and ignored; best option |
+| USB CDC-ACM | 100 kB/s | 21 % | best option; baud is nominal and ignored, and the limit is PX4 capping its own datarate at 100000 B/s rather than anything about the wire |
 
 Return direction is independent (serial is full duplex): 200 Hz × 93 B = **18.6 kB/s** of
 `HIL_ACTUATOR_CONTROLS`. Note this must clear the `_datarate > 5000` gate from §2.
@@ -186,7 +186,7 @@ physics clock moves per `Send()` call**.
 
 When the main loop free-runs (several thousand iterations/s against RealFlight) that step is the
 1 ms extrapolation quantum, and 250 Hz comes out exact. If the loop is throttled — a slow link,
-a reader that is not draining — the step grows and the rate drops: at a 3 ms step, a 4 ms
+a reader that isn't draining — the step grows and the rate drops: at a 3 ms step, a 4 ms
 interval yields 6 ms, i.e. 166 Hz. This is what the PTY measurements in §11 show.
 
 The error is always in the safe direction (never faster than requested, so never over budget),
@@ -355,7 +355,7 @@ Verify the result in QGC's **Actuators** tab, which reads `HIL_ACT_FUNC*` once `
 
 ## 7. Running it
 
-Build the bridge (this does not build or start PX4 SITL):
+Build the bridge (this doesn't build or start PX4 SITL):
 
 ```bash
 cd ~/PX4-Autopilot
@@ -485,7 +485,7 @@ exactly as before. On the board, set `SYS_HITL 0`, clear `CBRK_SUPPLY_CHK`, rest
   **One SITL behaviour does change:** the `fields_updated` sub-rates now also apply in SITL
   (mag 100 Hz, baro/differential-pressure 50 Hz) rather than every message carrying `0x1FFF`.
   That was a deliberate, separately-motivated change (it keeps ulogs from being inflated by
-  redundant sensor republication) and it is not required by HITL — HITL sets its own values in
+  redundant sensor republication) and it isn't required by HITL — HITL sets its own values in
   `Configure()`. It is called out here because it is the one place the SITL wire content is not
   byte-identical to before.
 - **Serial transport over a PTY pair.** termios accepted at 921600; framing decodes cleanly

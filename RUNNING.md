@@ -38,11 +38,8 @@ Nothing below is optional.
 
 RealFlight then listens on **TCP 18083**.
 
-> The in-tree strings disagree about this path and neither is complete: `FA_check.py` prints
-> `Settings -> Physics -> Quality -> FlightAxis Link Enabled` (right sub-path, omits the
-> Simulation menu) and `install.sh` prints `Simulation > Settings > FlightAxis Link` (right
-> menu, omits Physics → Quality). The full path above is the complete one. On some RealFlight
-> builds the Quality preset must be set to **Custom** before the checkbox becomes editable.
+> On some RealFlight builds the Quality preset has to be set to **Custom** before the
+> checkbox becomes editable.
 
 Also in RealFlight, before flying:
 
@@ -101,7 +98,8 @@ Unreachable (exit code 1, and `make` will stop here too):
 ```
 FlightAxis check: cannot reach 192.168.10.1:18083 (timed out)
   - Is RealFlight running with FlightAxis Link enabled?
-    (RealFlight: Settings -> Physics -> Quality -> FlightAxis Link Enabled)
+    (RealFlight: Simulation -> Settings... -> Physics -> Quality ->
+     tick 'FlightAxis Link Enabled')
   - Is the host reachable / firewall open on TCP 18083?
   - Set PX4_FLIGHTAXIS_IP if RealFlight is not on 192.168.10.1.
 ```
@@ -352,12 +350,16 @@ Airframe side: `PWM_MAIN_FUNC1..5 = 101, 201, 202, 203, 204` →
 `controls[0]`=Motor 1 main rotor, `[1]`=Servo 1 yaw tail, `[2..4]`=Servos 2–4, the swash
 plate servos 1–3.
 
-**Every row carries an explicit `disarm`**, and none may be omitted. `HeliDemix` rewrites the
-channel array after it is built, so a row left on the `-1` "hold last output" default would
-have its already-demixed value fed back through the demix on the next frame. That iteration
-diverges: from a plausible in-flight swash it rails within about three frames. Neutral is a
-fixed point, so this only bites on the armed→disarmed transition with the swash deflected —
-that is, on every landing — and nothing is logged when it does.
+**Every row carries an explicit `disarm`**, and `get_FAbridge_params.py` refuses to flatten
+the file if one is missing. The bridge demixes out of a scratch copy and leaves the
+persistent channel array holding raw servo values, so a `-1` "hold last output" row would in
+fact hold correctly today. It did not always. When the demix was applied in place, a held row
+had its already-demixed value fed back through the demix on the next frame, and that
+iteration diverges — from a plausible in-flight swash it railed within about three frames.
+Neutral is a fixed point, so it only bit on the armed→disarmed transition with the swash
+deflected, which is to say on every landing, and nothing was logged when it did. The rule
+stays enforced because the property that makes holding safe lives in one function in the
+bridge, and nothing in a model JSON can see whether it still holds.
 
 **Then `HeliDemix` rewrites RF channels 0–2** before they are sent, because RealFlight expects
 roll/pitch/collective, not three swash servos:
@@ -845,7 +847,7 @@ a time), then:
 | Quadplane reports a motor failure in cruise | Shouldn't happen: the detector cannot fire in v1.16 SITL at all. `SimulatorMavlink` reports 1–16 A per ESC while armed, and the undercurrent test `1 + 15c < 2c` has no solution. If you see this, something outside SITL changed. |
 | Heli rolls when you command pitch | Swashplate angles are not 300/60/180, or the arm lengths are not all 1.0 (§2.4). |
 | Heli has no left yaw, tail sits at zero | Someone put `1203` back on `CA_AIRFRAME 10` (tail ESC), which clamps the tail to [0,1], or set `rf3` unipolar in `heli.json`. It ships as `CA_AIRFRAME 11` (tail servo) with `rf3` bipolar, disarm 0.5 (§2.4). |
-| Heli swash rails or goes chaotic on landing | A row in `heli.json` lost its explicit `"disarm"` and fell back to `-1` "hold last", so `HeliDemix` re-demixes the held value every frame (§2.4). |
+| Heli swash rails or goes chaotic on landing | Shouldn't happen: the demix runs on a scratch copy, and a `heli.json` row missing its `"disarm"` is rejected by `get_FAbridge_params.py` before the bridge starts. If you see it anyway, the demix is being applied in place again — check `buildChannels()` (§2.4). |
 | Bridge on the wrong side of the network | SOAP round-trip dominates the loop; MAVLink to PX4 tolerates far more latency. Put the bridge next to RealFlight, not next to a remote PX4. |
 
 ---
