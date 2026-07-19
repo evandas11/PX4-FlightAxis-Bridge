@@ -114,6 +114,39 @@ export PX4_HITL_TRANSPORT=tcp-server
 	$fa_bridge_params &
 FA_BRIDGE_PID=$!
 
+# Take everything down with this script, however it ends.
+#
+# Without this, the kill at the bottom only runs when PX4 returns normally. Kill
+# the script itself - or disrupt its process group - and BOTH children are
+# orphaned: the bridge keeps holding TCP 4560 and keeps hammering RealFlight
+# with SOAP, and PX4 keeps emitting heartbeats so the ground station still shows
+# a live vehicle that no longer exists. The next run then fails to bind, and the
+# stale vehicle has to be cleared by restarting the GCS.
+#
+# `pkill -P $$` reaps every direct child, which is both the bridge and PX4 -
+# PX4 runs in the foreground so its pid is never captured in a variable.
+#
+# Scope, honestly: Ctrl-C needs none of this. It signals the whole foreground
+# process group, so the bridge and PX4 each receive SIGINT directly and exit on
+# their own - verified. What this covers is the script exiting by itself: a
+# `set -e` abort, or PX4 returning while the bridge is still up. It does NOT
+# rescue `kill <pid-of-this-script>`, because bash defers trap handlers until
+# the running foreground command finishes, and that command is PX4. Kill the
+# process group rather than the script if you need to take a session down from
+# outside its terminal.
+fa_cleanup() {
+	trap - EXIT INT TERM HUP
+	pkill -INT -P $$ 2>/dev/null
+	for _ in 1 2 3 4 5 6 7 8 9 10; do
+		pgrep -P $$ >/dev/null 2>&1 || return 0
+		sleep 0.2
+	done
+	pkill -KILL -P $$ 2>/dev/null
+}
+trap fa_cleanup EXIT
+trap 'fa_cleanup; exit 130' INT
+trap 'fa_cleanup; exit 143' TERM HUP
+
 pushd "$rootfs" >/dev/null
 
 # Do not exit on failure now from here on because we want the complete cleanup
@@ -136,7 +169,9 @@ px4_status=$?
 
 popd >/dev/null
 
-kill $FA_BRIDGE_PID 2>/dev/null
-wait $FA_BRIDGE_PID 2>/dev/null
+# The EXIT trap does the reaping; wait so the shell does not exit while the
+# bridge is still closing its RealFlight session.
+fa_cleanup
+wait 2>/dev/null
 
 exit $px4_status
