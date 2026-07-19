@@ -1,7 +1,7 @@
 /****************************************************************************
  *
  * This file is part of the PX4-FlightAxis-Bridge project.
- * Copyright (c) 2026 the PX4-FlightAxis-Bridge contributors.
+ * Copyright (c) 2026 Evangels Brilliant Dasmasela
  *
  * The three-branch physics-time handling (restart / duplicate-frame
  * extrapolation / glitch compensation) and the Rev4Servos and HeliDemix

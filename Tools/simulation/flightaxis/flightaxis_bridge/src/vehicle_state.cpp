@@ -1,7 +1,7 @@
 /****************************************************************************
  *
  * This file is part of the PX4-FlightAxis-Bridge project.
- * Copyright (c) 2026 the PX4-FlightAxis-Bridge contributors.
+ * Copyright (c) 2026 Evangels Brilliant Dasmasela
  *
  * The RealFlight->NED frame conversions, the ground-accelerometer override, the
  * pitot-derived airspeed and the rangefinder handling in this file are ported

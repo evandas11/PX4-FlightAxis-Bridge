@@ -1,7 +1,7 @@
 /****************************************************************************
  *
  * This file is part of the PX4-FlightAxis-Bridge project.
- * Copyright (c) 2026 the PX4-FlightAxis-Bridge contributors.
+ * Copyright (c) 2026 Evangels Brilliant Dasmasela
  *
  * The socket/creator-thread design, the SOAP request bodies, the reply parser
  * key table and scan, and the startup and reconnect logic in this file are
