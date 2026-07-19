@@ -109,8 +109,10 @@ VehicleState::VehicleState(double home_lat_deg, double home_lon_deg, double home
 	airspeed_true(0.0),
 	airspeed_pitot(0.0),
 	rangefinder_m(std::numeric_limits<double>::quiet_NaN()),
+	rc_valid(false),
 	received_first_controls(false)
 {
+	std::memset(&rc_raw, 0, sizeof(rc_raw));
 	std::memset(&hil_gps_msg, 0, sizeof(hil_gps_msg));
 	std::memset(&last_controls, 0, sizeof(last_controls));
 
@@ -264,6 +266,37 @@ void VehicleState::setFAData(const FAState &fa, double dt_true)
 	} else {
 		rpm = 0;
 	}
+
+	/*
+	 * RC transmitter passthrough. fa.rcin[] is RealFlight's echo of the physical
+	 * TX channels, normalised 0..1.
+	 *
+	 * 1000 + x*1000 is the conventional expression of an RC channel as a raw
+	 * servo pulse width: 1000 us at one extreme, 1500 us centred, 2000 us at the
+	 * other. That is the unit input_rc.values[] is in, and it is what QGC's RC
+	 * calibration and the RC_MIN/RC_TRIM/RC_MAX parameters are expressed in, so
+	 * a standard calibration run maps these straight onto normalised stick
+	 * inputs with no scaling anywhere else in the chain.
+	 *
+	 * Clamped rather than trusted: RealFlight will report slightly outside 0..1
+	 * for a TX whose endpoints are set beyond the model's configured travel, and
+	 * an unclamped cast of, say, 1.3 would land at 2300 us - or, negative, wrap
+	 * to a huge uint16_t. NaN is treated as centre; a NaN cast to uint16_t is
+	 * undefined behaviour and must not reach the cast.
+	 */
+	for (int i = 0; i < RC_CHANNELS_N; i++) {
+		const double x = fa.rcin[i];
+
+		if (!std::isfinite(x)) {
+			rc_raw[i] = 1500;
+
+		} else {
+			rc_raw[i] = (uint16_t)(1000.0 + constrain(x, 0.0, 1.0) * 1000.0);
+		}
+	}
+
+	// Only now are the stick positions real; see rcValid() in vehicle_state.h.
+	rc_valid = true;
 
 	updateGPSMsg();
 }
@@ -450,6 +483,49 @@ mavlink_distance_sensor_t VehicleState::getDistanceSensorMsg(int offset_us)
 	// value was simply wrong under a comment claiming otherwise.
 	msg.covariance = UINT8_MAX;				// unknown
 	msg.signal_quality = 100;
+
+	return msg;
+}
+
+mavlink_rc_channels_t VehicleState::getRcChannelsMsg(int offset_us)
+{
+	mavlink_rc_channels_t msg{};
+
+	msg.time_boot_ms = (uint32_t)((time_usec + offset_us) / 1000);
+	msg.chancount = RC_CHANNELS_N;
+
+	// RealFlight gives us exactly 12. The remaining six get UINT16_MAX, which is
+	// MAVLink's "channel not available" sentinel for these fields - NOT 0, which
+	// would read as a real channel pegged below its minimum. chancount already
+	// says 12, but SimulatorMavlink copies all 18 raw fields into
+	// input_rc.values[] regardless of chancount (SimulatorMavlink.cpp:900-917),
+	// so the sentinel is what actually keeps 13-18 from looking live to anything
+	// that reads values[] without checking channel_count first.
+	uint16_t *const chan[18] = {
+		&msg.chan1_raw,  &msg.chan2_raw,  &msg.chan3_raw,
+		&msg.chan4_raw,  &msg.chan5_raw,  &msg.chan6_raw,
+		&msg.chan7_raw,  &msg.chan8_raw,  &msg.chan9_raw,
+		&msg.chan10_raw, &msg.chan11_raw, &msg.chan12_raw,
+		&msg.chan13_raw, &msg.chan14_raw, &msg.chan15_raw,
+		&msg.chan16_raw, &msg.chan17_raw, &msg.chan18_raw,
+	};
+
+	for (int i = 0; i < 18; i++) {
+		*chan[i] = (i < RC_CHANNELS_N) ? rc_raw[i] : UINT16_MAX;
+	}
+
+	/*
+	 * RSSI. The simulated link is perfect, but the value has to suit the
+	 * CONSUMER, and the two scales here disagree:
+	 *   - MAVLink RC_CHANNELS.rssi is 0-254 (254 = 100%), UINT8_MAX = unknown.
+	 *   - PX4's input_rc.rssi is a PERCENTAGE, 0-100 (InputRc.msg: RSSI_MAX =
+	 *     100, "100: full reception").
+	 * SimulatorMavlink assigns rc_channels.rssi straight into input_rc.rssi with
+	 * no rescaling, so the MAVLink-idiomatic 254 would reach PX4 as an rssi of
+	 * 254 - 2.5x its own declared maximum. 100 is the value that is correct on
+	 * the side that actually reads it, and is still a legal MAVLink value.
+	 */
+	msg.rssi = 100;
 
 	return msg;
 }

@@ -125,6 +125,15 @@ enum class PX4Transport {
  *    see mavlink_main.cpp:675-680.
  *  - RAW_RPM must NOT be sent: mavlink_receiver.cpp has no handler for it,
  *    so it is pure wasted bandwidth on a serial link.
+ *  - RC_CHANNELS must NOT be sent, for the same reason PLUS a better one.
+ *    mavlink_receiver.cpp handles RC_CHANNELS_OVERRIDE and MANUAL_CONTROL but
+ *    has no RC_CHANNELS handler, so it would be silently discarded. And the
+ *    intent would be wrong even if it were handled: on a real board the
+ *    operator's transmitter is wired to the board's own receiver, which is the
+ *    authoritative and safety-relevant RC path. Forwarding RealFlight's idea of
+ *    the stick positions to a board that already has the real ones is at best
+ *    redundant and at worst a second, laggier RC source competing with the one
+ *    the pilot is actually holding.
  *  - HIL_SENSOR / HIL_GPS / DISTANCE_SENSOR are all consumed
  *    (mavlink_receiver.cpp:347-378 for the HIL set, :207 for DISTANCE_SENSOR,
  *    which is handled unconditionally and so needs no HIL gating).
@@ -202,6 +211,20 @@ enum class PX4Profile {
  * than 250 Hz. This was measured on a PTY harness and is the reason the
  * numbers there sit below target.
  *
+ * The "~250 Hz" figure used throughout this file is the DESIGN assumption, not
+ * a measurement. On a fast machine and a low-latency link the observed
+ * FlightAxis frame rate is more like 750-800 Hz, and Send() correspondingly
+ * runs well over 1 kHz. Nothing here depends on the assumption being right:
+ * every gate is a time comparison against the physics clock, not a frame
+ * count, so a higher rate only makes the quantisation FINER and the achieved
+ * rates land closer to their targets. Measured against a mock driving Send()
+ * at ~1380 Hz, the sub-rates came out at 49-50 Hz (baro, diff pressure, RC),
+ * 99 Hz (mag), 19 Hz (rangefinder) and 10 Hz (GPS) - all within one period of
+ * target. The one thing that does scale with the frame rate is HIL_SENSOR
+ * itself, which is interval 0 in SITL and so genuinely goes out on every
+ * Send(); that is deliberate (accel/gyro are never masked) and is what
+ * PX4_HITL_SENSOR_HZ exists to cap on a bandwidth-limited link.
+ *
  * The error is always in the safe direction (never faster than requested,
  * so never over the bandwidth budget), which is why the simple "last = now"
  * form is kept rather than accumulating "last += interval" - the latter
@@ -245,6 +268,23 @@ private:
 	static const uint64_t STATE_QUAT_INTERVAL_US = 20000; // 50 Hz (ground truth only)
 	static const uint64_t DISTANCE_INTERVAL_US = 50000;   // 20 Hz (spec 6)
 
+	/*
+	 * RC_CHANNELS - the physical transmitter passthrough.
+	 *
+	 * 50 Hz because that is what RC actually is: a PPM frame is 20 ms, and SBUS
+	 * and the common serial protocols land in the same 50-150 Hz band. Sending
+	 * it at the FlightAxis frame rate would be pointless - the observed rate is
+	 * ~750-800 Hz on a fast machine, an order of magnitude past anything a real
+	 * receiver produces, and it is not new information: the stick positions come
+	 * from a human hand, which has nothing above a few Hz in it. It would only
+	 * add load and inflate every ulog.
+	 *
+	 * Nothing downstream needs more, either. PX4 does not consume input_rc at
+	 * its arrival rate - ManualControl runs its own 50 Hz-ish loop and RC_Input
+	 * republishes on a timer, so a faster stream is discarded rather than used.
+	 */
+	static const uint64_t RC_INTERVAL_US = 20000;         // 50 Hz
+
 	// Sentinel for "never send this message in this profile".
 	static const uint64_t INTERVAL_DISABLED = UINT64_MAX;
 
@@ -256,12 +296,14 @@ private:
 	uint64_t state_quat_interval_us = STATE_QUAT_INTERVAL_US;
 	uint64_t distance_interval_us = DISTANCE_INTERVAL_US;
 	uint64_t rpm_interval_us = 0;
+	uint64_t rc_interval_us = RC_INTERVAL_US;
 
 	uint64_t last_sensor_us = 0;
 	uint64_t last_gps_us = 0;
 	uint64_t last_state_quat_us = 0;
 	uint64_t last_distance_us = 0;
 	uint64_t last_rpm_us = 0;
+	uint64_t last_rc_us = 0;
 	bool sent_first = false;
 
 	/*

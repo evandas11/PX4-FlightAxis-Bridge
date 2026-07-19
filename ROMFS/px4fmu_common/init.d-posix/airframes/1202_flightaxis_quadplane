@@ -34,6 +34,34 @@ param set EKF2_MULTI_IMU 1
 # control is ever briefly present. NAV_RCL_ACT is deliberately left at its
 # firmware default: it is unreachable once COM_RC_IN_MODE is 4, and the value 0
 # suggested for it is outside the parameter's declared range (@min 1).
+#
+# THIS ALSO BLOCKS RC TRANSMITTER PASSTHROUGH, and that is a deliberate trade
+# rather than an oversight. The bridge forwards a physical transmitter plugged
+# into RealFlight to PX4 as RC_CHANNELS -> input_rc (see the RC block in
+# vehicle_state.h). That stream is sent regardless of this parameter, and
+# "listener input_rc" will show the live stick values either way - but value 4
+# makes commander ignore them, so the sticks will neither arm nor fly the
+# aircraft. If passthrough looks broken while input_rc is populated and moving,
+# this parameter is why.
+#
+# No single value serves both cases, because PX4 overloads this one parameter
+# for both jobs: the SAME value 4 is what skips the RC-loss failsafe
+# (failsafe.cpp:479, tested against RcInMode::StickInputDisabled) and what gates
+# the manual-mode arming check (modeCheck.cpp:154). Any value that enables the
+# sticks therefore necessarily re-arms the RC-loss failsafe, and a headless run
+# with no transmitter would take a failsafe action (NAV_RCL_ACT, default
+# 2 = Return) as soon as it armed. Defaulting to the transmitter case would
+# break every user who does not have one - the common case - while defaulting
+# to headless costs the transmitter user exactly one line, set at the pxh>
+# prompt or added to this file:
+#
+#     param set COM_RC_IN_MODE 0     # RC transmitter only
+#
+# Use 0 when the transmitter is the only stick source (it also keeps a QGC
+# virtual joystick from competing with it), or 2 to allow a transmitter and a
+# QGC joystick with fallback. The transmitter must then be calibrated in QGC
+# exactly as for real hardware (Vehicle Setup -> Radio): PX4 does not act on
+# input_rc until RC_MAP_* and the per-channel RC_MIN/RC_TRIM/RC_MAX are set.
 param set-default COM_RC_IN_MODE 4
 
 # Negative disables the pre-takeoff auto-disarm. rc.vtol_defaults does not set

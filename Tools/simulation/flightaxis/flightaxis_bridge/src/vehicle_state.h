@@ -90,6 +90,32 @@ public:
 	bool rangefinderValid() const { return std::isfinite(rangefinder_m); }
 	mavlink_distance_sensor_t getDistanceSensorMsg(int offset_us);
 
+	/*
+	 * RC TRANSMITTER PASSTHROUGH.
+	 *
+	 * RealFlight echoes the physical transmitter's stick positions back in the
+	 * ExchangeData reply as the 12 <item> values (FAState::rcin, 0..1). If the
+	 * user has an InterLink (or any TX RealFlight can see) plugged in, those are
+	 * live stick positions and PX4 can fly from them exactly as it would from a
+	 * real receiver.
+	 *
+	 * The carrier is RC_CHANNELS (msgid 65), NOT HIL_RC_INPUTS_RAW: PX4 v1.16's
+	 * simulator_mavlink has no HIL_RC_INPUTS_RAW handler at all.
+	 * SimulatorMavlink::handle_message_rc_channels() (SimulatorMavlink.cpp:894)
+	 * copies chan1_raw..chan18_raw into input_rc.values[0..17], takes chancount
+	 * and rssi, stamps timestamp_last_signal with its own hrt_absolute_time()
+	 * and publishes input_rc - which is precisely the topic a real receiver
+	 * driver feeds.
+	 *
+	 * rcValid() gates the send the same way rangefinderValid() gates the
+	 * rangefinder: before the first FlightAxis frame arrives there are no stick
+	 * positions, and publishing a neutral-looking frame of zeros would tell PX4
+	 * the RC link is UP with every stick at its minimum - including throttle,
+	 * and including whatever channel is mapped to the arming switch.
+	 */
+	bool rcValid() const { return rc_valid; }
+	mavlink_rc_channels_t getRcChannelsMsg(int offset_us);
+
 	// Physics clock, us. This is a pure MIRROR of the bridge main loop's
 	// glitch-compensated `time_now_us`, which is the single source of truth:
 	// VehicleState never accumulates time of its own (an accumulator here
@@ -167,6 +193,13 @@ private:
 	double airspeed_true;			// m/s (RF total TAS)
 	double airspeed_pitot;			// m/s (body-X, computed)
 	double rangefinder_m;			// m along body-down axis, NAN if invalid
+
+	// RC passthrough: physical TX channels, already converted to the raw
+	// microsecond pulse widths PX4 expects (1000-2000). rc_valid stays false
+	// until the first FlightAxis frame has been consumed.
+	static const int RC_CHANNELS_N = 12;
+	uint16_t rc_raw[RC_CHANNELS_N];
+	bool rc_valid;
 
 	// controls
 	mavlink_hil_actuator_controls_t last_controls;

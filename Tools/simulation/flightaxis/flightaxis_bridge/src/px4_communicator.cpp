@@ -122,6 +122,13 @@ void PX4Communicator::Configure(PX4Transport t, PX4Profile p,
         state_quat_interval_us = INTERVAL_DISABLED;
         rpm_interval_us = INTERVAL_DISABLED;
 
+        // RC passthrough is SITL-only. mavlink_receiver.cpp has no RC_CHANNELS
+        // handler, and on a real board the pilot's transmitter is wired to the
+        // board directly - that receiver is the authoritative RC path and must
+        // not be second-guessed from the simulator. See the profile block in
+        // px4_communicator.h.
+        rc_interval_us = INTERVAL_DISABLED;
+
         // A real GPS module is 5-10 Hz, so there is nothing to gain from
         // 10 Hz on a link where bytes are finite.
         gps_interval_us = 200000;   // 5 Hz
@@ -649,8 +656,8 @@ int PX4Communicator::Send(int offset_us)
     {
         // send one of each immediately so PX4 has a full picture from frame 1
         last_sensor_us = last_gps_us = last_state_quat_us = last_distance_us
-            = last_rpm_us = last_mag_us = last_baro_us = last_diff_press_us
-            = now_us - 1000000;
+            = last_rpm_us = last_rc_us = last_mag_us = last_baro_us
+            = last_diff_press_us = now_us - 1000000;
         sent_first = true;
     }
 
@@ -746,6 +753,27 @@ int PX4Communicator::Send(int offset_us)
         mavlink_distance_sensor_t dist_msg = vehicle->getDistanceSensorMsg(offset_us);
 
         mavlink_msg_distance_sensor_encode_chan(1, 200, MAVLINK_COMM_0, &msg, &dist_msg);
+
+        if (!Emit(msg))
+        {
+            return -1;
+        }
+    }
+
+    // RC transmitter passthrough (SITL only; see Configure()). Gated on
+    // rcValid() exactly as the rangefinder is gated on rangefinderValid():
+    // until the first FlightAxis frame lands there are no stick positions, and
+    // a frame of zeros would announce a live RC link with every stick at
+    // minimum. The 50 Hz gate is against the physics clock like every other
+    // message here, so it is time-based and holds at any FlightAxis frame rate.
+    if (rc_interval_us != INTERVAL_DISABLED && vehicle->rcValid()
+        && now_us - last_rc_us >= rc_interval_us)
+    {
+        last_rc_us = now_us;
+
+        mavlink_rc_channels_t rc_msg = vehicle->getRcChannelsMsg(offset_us);
+
+        mavlink_msg_rc_channels_encode_chan(1, 200, MAVLINK_COMM_0, &msg, &rc_msg);
 
         if (!Emit(msg))
         {
