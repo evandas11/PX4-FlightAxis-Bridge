@@ -684,33 +684,55 @@ Expect to refine the rate gains and the collective curve for your model.
 
 ---
 
-## 3. Home position
+## 3. Home position and heading
 
-Where the aircraft sits on the map is set by three environment variables:
+Where the aircraft sits on the map, and which way it faces, is set by four environment variables:
 
 | Variable | Default | Meaning |
 |---|---|---|
 | `PX4_HOME_LAT` | `47.397742` | degrees |
 | `PX4_HOME_LON` | `8.545594` | degrees |
 | `PX4_HOME_ALT` | `488.0` | metres AMSL |
+| `PX4_HOME_YAW` | unset | degrees true — start heading; unset leaves RealFlight's world unrotated |
 
-(Defaults are PX4's usual Zurich origin, read in `flightaxis_bridge.cpp` via `envOrDefault()`.)
+(Position defaults are PX4's usual Zurich origin, read in `flightaxis_bridge.cpp` via
+`envOrDefault()`.)
 
 Full copy-pasteable command with a worked set of coordinates:
 
 ```bash
 cd ~/PX4-Autopilot
 PX4_FLIGHTAXIS_IP=192.168.10.1 \
-PX4_HOME_LAT=-37.7304361 \
-PX4_HOME_LON=175.7437528 \
-PX4_HOME_ALT=50.6 \
+PX4_HOME_LAT=-37.7304917 \
+PX4_HOME_LON=175.7433944 \
+PX4_HOME_ALT=48.0 \
+PX4_HOME_YAW=205 \
 make px4_sitl_nolockstep flightaxis_plane
 ```
 
-**There is no yaw / heading variable.** The bridge reads only the three `PX4_HOME_*` variables
-above; there is no fourth one for initial heading. Heading comes from
-RealFlight's own aircraft attitude, so the aircraft points wherever the RealFlight model is
-pointing on its runway. If you need a specific initial heading, set it in RealFlight.
+**Heading.** `PX4_HOME_YAW` is the true heading the aircraft should **start** on. RealFlight's
+world north is arbitrary, so the bridge reads the model's actual attitude on the first frame and
+rotates the whole RF→NED mapping by the difference — the same kind of re-anchoring `PX4_HOME_ALT`
+does for altitude, and equally invisible to RealFlight. The rotation it derives is logged at
+startup:
+
+```
+[flightaxis_bridge] heading datum: RealFlight reports 12.3 deg,
+PX4_HOME_YAW asks for 205 deg -> rotating the RF world by 192.7 deg
+```
+
+The rotation is applied at the RF→NED ingest boundary to *every* world-frame quantity — attitude,
+position, velocity and wind — so heading and direction of travel stay consistent and EKF2 sees no
+contradiction. Body-frame sensors (accelerometer, gyro) and all Down components are untouched.
+GPS, baro, mag and COG follow for free, each being derived from something already rotated.
+
+The heading datum is latched alongside the position anchor and dropped with it, so a reset in
+RealFlight re-derives it against the post-reset attitude and your requested heading survives.
+
+Leaving it unset rotates nothing — that is the historical behaviour, and also what ArduPilot does:
+it accepts a heading as the 4th field of `--custom-location`, but `SIM_FlightAxis` overwrites the
+attitude from RealFlight on the first frame, so the value has no effect there. Alternatively, just
+point the model where you want it in RealFlight; the two approaches are interchangeable.
 
 **How home anchors the world.** The bridge captures a `position_offset` from the first RealFlight
 frame (and re-captures it after every reset), subtracts it from the raw RealFlight position, and
@@ -776,7 +798,7 @@ pxh> mavlink status
 ```bash
 cd ~/PX4-Autopilot
 PX4_FLIGHTAXIS_IP=192.168.10.1 \
-PX4_HOME_LAT=-37.7304361 PX4_HOME_LON=175.7437528 PX4_HOME_ALT=50.6 \
+PX4_HOME_LAT=-37.7304917 PX4_HOME_LON=175.7433944 PX4_HOME_ALT=48.0 PX4_HOME_YAW=205 \
 make px4_sitl_nolockstep flightaxis_plane
 ```
 
@@ -920,13 +942,17 @@ Occasional single lines are normal and benign:
    follow, same direction, no lag.
 2. **Position on the map** sits at your `PX4_HOME_LAT/LON`, and the vehicle icon moves the right
    way when you taxi.
-3. **EKF healthy** — no "Preflight fail: EKF" messages; attitude, velocity and position estimates
+3. **Heading matches** what you asked for. If you set `PX4_HOME_YAW`, the QGC compass should read
+   it on the first frame — check the `heading datum:` line in the bridge output for the rotation
+   it derived. Then taxi: the compass and the direction the icon travels must agree. If they
+   disagree, that is a frame problem, not a tuning one.
+4. **EKF healthy** — no "Preflight fail: EKF" messages; attitude, velocity and position estimates
    all valid. Give it 20–30 s after start.
-4. **Actuators move.** Vehicle Setup → Actuators, enable sliders, and confirm each PX4 actuator
+5. **Actuators move.** Vehicle Setup → Actuators, enable sliders, and confirm each PX4 actuator
    moves the *expected* RealFlight surface/rotor in the *expected* direction (§2 tables).
-5. **Altitude sane** — baro and GPS altitude both around `PX4_HOME_ALT`, and agreeing with each
+6. **Altitude sane** — baro and GPS altitude both around `PX4_HOME_ALT`, and agreeing with each
    other (they are derived from the same datum by design).
-6. **No physics-speed warning** in the console.
+7. **No physics-speed warning** in the console.
 
 ---
 
@@ -964,7 +990,7 @@ itself:
 cd ~/PX4-Autopilot/Tools/simulation/flightaxis/flightaxis_bridge
 
 # instance 1 -> listens on TCP 4561
-PX4_HOME_LAT=-37.7304361 PX4_HOME_LON=175.7437528 PX4_HOME_ALT=50.6 \
+PX4_HOME_LAT=-37.7304917 PX4_HOME_LON=175.7433944 PX4_HOME_ALT=48.0 PX4_HOME_YAW=205 \
 ~/PX4-Autopilot/build/px4_sitl_nolockstep/build_flightaxis_bridge/flightaxis_bridge \
   1 192.168.10.2 $(./get_FAbridge_params.py models/plane.json) &
 

@@ -487,7 +487,7 @@ ninja -C build/px4_sitl_nolockstep flightaxis_hitl_quad
 
 The positional argv protocol is **unchanged**, so existing callers
 (`get_FAbridge_params.py` + `sitl_run.sh`) keep working verbatim. Transport selection is by
-environment variable — consistent with `PX4_HOME_LAT/LON/ALT` and `PX4_FLIGHTAXIS_IP`, and it
+environment variable — consistent with `PX4_HOME_LAT/LON/ALT/YAW` and `PX4_FLIGHTAXIS_IP`, and it
 avoids an optional leading flag that every downstream positional index would have to account
 for.
 

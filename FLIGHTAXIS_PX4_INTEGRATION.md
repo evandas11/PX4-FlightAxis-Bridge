@@ -451,6 +451,8 @@ These go in `vehicle_state.cpp`. They are line-for-line what the upstream implem
 
 **Wind:** swapped like position: `(windY, windX, windZ)`.
 
+**Heading datum (optional, `PX4_HOME_YAW`):** RealFlight's world north is arbitrary, so the conversions above map it onto NED unrotated. When `PX4_HOME_YAW` is set it names the true heading the aircraft should *start* on; the rotation that implies is derived on the first frame — `θ = wrapPi(home_yaw − yaw(q_ned))`, taken from the converted quaternion rather than `m-azimuth-DEG` so it cannot disagree with the attitude the pipeline uses — and latched alongside `position_offset`, sharing its lifetime so a reset re-derives it. `θ` is then applied about the down axis to **every** world-frame quantity: `q_ned` (pre-multiplied), position (after the offset subtraction, so the world turns about home and not RealFlight's origin), world velocity, and wind. Body-frame quantities and all Down components are left alone — rotating the world does not change what a strapdown sensor measures. HIL_GPS, baro, mag and COG need no special handling: each is derived from something already rotated. Applying `θ` to attitude alone would leave heading disagreeing with direction of travel, which EKF2 reads as an inconsistency it cannot null out. Unset is NAN, not 0, since 0 is a valid request for due north; at `θ = 0` every path is a strict no-op.
+
 **Accelerometer (specific force):** in flight use `m-accelerationBodyA*` directly. On ground it's garbage — RealFlight's ground-contact accelerometer output is noisy enough to prevent a helicopter disarming — so override:
 
 ```cpp

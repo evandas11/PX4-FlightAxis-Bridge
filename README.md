@@ -255,9 +255,9 @@ PX4_FLIGHTAXIS_IP=<windows-ip> make px4_sitl_nolockstep flightaxis_plane
 
 (also `flightaxis_quad`, `flightaxis_quadplane`, `flightaxis_heli`; QGC connects on UDP 14550)
 
-A real invocation, with the home position pinned to the field you actually fly at — this is
-the form worth keeping around, since the default home is in Zurich and everything on the QGC
-map hangs off it:
+A real invocation, with the home position pinned to the field you actually fly at and the
+aircraft started on the runway heading — this is the form worth keeping around, since the
+default home is in Zurich and everything on the QGC map hangs off it:
 
 ```bash
 cd ~/PX4-Autopilot
@@ -266,6 +266,7 @@ PX4_FLIGHTAXIS_IP=192.168.10.1 \
 PX4_HOME_LAT=-37.7304917 \
 PX4_HOME_LON=175.7433944 \
 PX4_HOME_ALT=48.0 \
+PX4_HOME_YAW=205 \
 make px4_sitl_nolockstep flightaxis_quadplane
 ```
 
