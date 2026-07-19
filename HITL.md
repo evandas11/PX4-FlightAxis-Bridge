@@ -304,19 +304,63 @@ entry in v1.16 — HIL streams are added dynamically by `set_hil_enabled()` when
 
 ### 6.3 Airframe and output mapping
 
-**Our `1200`–`1203` airframes cannot be reused.** They live in `init.d-posix`, which is the
-POSIX/SITL startup path; a real board boots from `init.d`. They also use `PWM_MAIN_FUNC<N>`,
-whereas a HITL board routes through `HIL_ACT_FUNC<N>` (`pwm_out_sim/module_hil.yaml`, prefix
-`HIL_ACT`, 16 channels, visible only when `SYS_HITL>0`).
+**Four HITL airframes are shipped.** `install.sh` places them in the PX4 tree and registers them:
 
-Rather than ship ROMFS airframes for boards we cannot test, here is the parameter list to set
-by hand. Pick a stock airframe of the right type (`SYS_AUTOSTART`), then set the geometry
-exactly as the matching `init.d-posix/airframes/120x_flightaxis_*` file does, and map the
-outputs with `HIL_ACT_FUNC<N>` instead of `PWM_MAIN_FUNC<N>`.
+| `SYS_AUTOSTART` | File | Model JSON |
+|---|---|---|
+| 1200 | `ROMFS/px4fmu_common/init.d/airframes/1200_flightaxis_plane.hil` | `plane.json` |
+| 1201 | `…/1201_flightaxis_quad.hil` | `quad.json` |
+| 1202 | `…/1202_flightaxis_quadplane.hil` | `quadplane.json` |
+| 1203 | `…/1203_flightaxis_heli.hil` | `heli.json` |
 
-The rule is a straight substitution — **`HIL_ACT_FUNC<N>` lands on
-`HIL_ACTUATOR_CONTROLS.controls[N-1]`**, exactly as `PWM_MAIN_FUNC<N>` does in SITL — so the
-`px4` indices in `models/*.json` are unchanged.
+They carry the same ids as the SITL airframes deliberately, so **1201 means "FlightAxis quad"
+whether the firmware is SITL or on a board**. They are separate files because a real board boots
+from `init.d`, never `init.d-posix`, and because the two startup paths route outputs differently:
+SITL uses `PWM_MAIN_FUNC<N>`, a HITL board uses `HIL_ACT_FUNC<N>` (`pwm_out_sim/module_hil.yaml`,
+prefix `HIL_ACT`, 16 channels, visible only when `SYS_HITL>0`). Each `.hil` file forces
+`SYS_HITL 1` itself.
+
+> ### ⚠ Two things to know before you use these
+>
+> **1. They are untested against real hardware.** They were derived by mechanical substitution
+> from the four SITL airframes, which *are* flown and verified. The mapping is exact by
+> construction; the **controller gains are not verified on a board** and should be treated as a
+> starting point, particularly the helicopter's, which are flagged UNTESTED in the SITL file too.
+>
+> **2. Your board must be built with `pwm_out_sim` enabled, or the airframe will not exist.**
+> These live inside the `if(CONFIG_MODULES_SIMULATION_PWM_OUT_SIM)` block of
+> `init.d/airframes/CMakeLists.txt`, and only three boards in the tree set that symbol by default
+> (`holybro/kakuteh7mini`, `modalai/voxl2`, `voxl2-slpi`). No `px4_fmu-v6x`/`v6c` default enables
+> it. On a typical board, `SYS_AUTOSTART 1200` will resolve to nothing and `HIL_ACT_FUNC*` will
+> not appear until you enable it:
+>
+> ```bash
+> make <board> boardconfig      # Modules -> Simulation -> pwm_out_sim
+> make <board>
+> ```
+>
+> This is upstream behaviour and affects PX4's own stock `1001`/`1002` HIL airframes identically —
+> it is not something these files introduce — but it is the first thing that will bite you.
+
+**Why the model JSONs are unchanged.** `HIL_ACT_FUNC<N>` lands on
+`HIL_ACTUATOR_CONTROLS.controls[N-1]`, exactly as `PWM_MAIN_FUNC<N>` does in SITL. The
+substitution is one-for-one at the same `<N>` with the same numeric function value, so the `px4`
+indices in `models/*.json` mean the same thing on both paths.
+
+**What was dropped from the SITL airframes**, and why — these are SITL-only and wrong or
+meaningless on a board:
+
+- `EKF2_GPS_DELAY 0` — existed only to countermand `px4-rc.mavlinksim`, which runs after the
+  airframe in SITL. No such script exists on a board, and forcing 0 is actively wrong there: HITL
+  GPS arrives over a real link with real latency, so it would mis-time EKF fusion.
+- `EKF2_MULTI_IMU 1` — same rationale; the firmware default is already 1.
+- `SDLOG_MODE 4` — "from first arm until shutdown" never closes the log, which risks a truncated
+  file on a power-cut with a real SD card.
+- `SIM_BAT_ENABLE` — a SITL-only parameter that does not exist in a board build. See §6.4 for why
+  HITL cannot have real battery telemetry at all.
+
+The per-vehicle tables below are kept as **reference for debugging a mis-wired model** — they are
+no longer instructions.
 
 **Quad** (`CA_AIRFRAME 0`, model `quad.json`):
 
@@ -350,6 +394,31 @@ mirroring `1202_flightaxis_quadplane`.
 board parameter.
 
 Verify the result in QGC's **Actuators** tab, which reads `HIL_ACT_FUNC*` once `SYS_HITL>0`.
+
+### 6.4 Battery telemetry is SITL-only
+
+In SITL the bridge forwards RealFlight's real battery (pack voltage, current draw, or fuel on
+internal-combustion models) into `battery_status`. **On a HITL board it cannot, and this is not a
+gap that can be closed from our side.**
+
+`MavlinkReceiver::handle_message_hil_sensor()` publishes a **hardcoded** battery on **every**
+`HIL_SENSOR` message it receives:
+
+```c
+hil_battery_status.voltage_v = 16.0f;
+hil_battery_status.current_a = 10.0f;
+hil_battery_status.remaining = 0.70;
+```
+
+The bridge sends `HIL_SENSOR` at ~250 Hz. A real reading injected at 2 Hz would be overwritten
+roughly 125 times between updates, so the topic would show 16.0 V / 10 A / 70 % essentially always.
+No parameter disables this. Changing it means patching PX4 itself, which this project deliberately
+does not do — `install.sh` only ever *adds* files and splices CMakeLists registrations, so that the
+integration keeps working across PX4 versions.
+
+The bridge therefore does not even open its battery socket unless the transport is SITL
+(`tcp-server`); it logs one line saying so on the HITL paths. **Expect a constant 16.0 V / 70 % on
+a HITL board, and do not use HITL to test low-battery failsafes** — use SITL for that.
 
 ---
 
@@ -519,10 +588,18 @@ being wrong.**
   `cfsetspeed` and ignores it. Real UART timing, buffer depth and overruns are untested.
 - Whether 250 Hz is genuinely adequate for a real EKF2 on real hardware, or whether the board's
   CPU keeps up with it.
-- The `HIL_ACT_FUNC<N>` mappings in §6.3. These are derived by substitution from the working
-  SITL `PWM_MAIN_FUNC<N>` maps and the stock `.hil` airframes; the reasoning is sound and the
-  normalisation is provably identical (`PWMSim::updateOutputs` is the single shared function),
-  but no channel has been confirmed to move the right surface on a real board.
+- The four shipped `.hil` airframes in §6.3, in three separate respects:
+  - The `HIL_ACT_FUNC<N>` mappings. Derived by substitution from the working SITL
+    `PWM_MAIN_FUNC<N>` maps and the stock `.hil` airframes; the reasoning is sound and the
+    normalisation is provably identical (`PWMSim::updateOutputs` is the single shared function),
+    and the substitution was mechanically diffed one-for-one — but no channel has been confirmed
+    to move the right surface on a real board.
+  - **All controller gains.** They are dimensional and inherited from the SITL files, which took
+    several of them verbatim from a stock reference aircraft. The helicopter's rate gains were
+    already flagged UNTESTED upstream in the SITL file.
+  - That QGC's Actuators tab renders the geometry as intended once `SYS_HITL>0`.
+- Whether `CBRK_SUPPLY_CHK` and `COM_RC_IN_MODE 4` interact with any board-specific preflight
+  check.
 - UDP transport end to end — implemented and compiled, never run against a networked FC.
 - Every safety claim in §1 as *observed behaviour*. The code paths were read and cited; the
   servo rail was never watched.

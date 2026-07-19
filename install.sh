@@ -179,15 +179,21 @@ fi
 # --------------------------------------------------------------- layout ----
 SIM_CMAKE_REL="src/modules/simulation/simulator_mavlink/CMakeLists.txt"
 AF_CMAKE_REL="ROMFS/px4fmu_common/init.d-posix/airframes/CMakeLists.txt"
+# HITL airframes: a real board boots from init.d, so they need their own
+# directory and their own registration in that directory's CMakeLists.txt.
+HIL_AF_CMAKE_REL="ROMFS/px4fmu_common/init.d/airframes/CMakeLists.txt"
 SIM_CMAKE="$PX4_DIR/$SIM_CMAKE_REL"
 AF_CMAKE="$PX4_DIR/$AF_CMAKE_REL"
 AF_DIR="$PX4_DIR/ROMFS/px4fmu_common/init.d-posix/airframes"
+HIL_AF_CMAKE="$PX4_DIR/$HIL_AF_CMAKE_REL"
+HIL_AF_DIR="$PX4_DIR/ROMFS/px4fmu_common/init.d/airframes"
 BUILD_DIR="$PX4_DIR/build/px4_sitl_nolockstep"
 BRIDGE_BIN="$BUILD_DIR/build_flightaxis_bridge/flightaxis_bridge"
 
 # Both lists come from scripts/detect-px4.sh, the single source of truth for
 # what this integration owns (see the "what we own" block there).
 AIRFRAMES="$FA_AIRFRAMES"
+HIL_AIRFRAMES="$FA_HIL_AIRFRAMES"
 MODELS="$FA_MODELS"
 
 INCLUDE_LINE='include(sitl_targets_flightaxis.cmake)'
@@ -325,9 +331,12 @@ fi
 
 # Uncommitted local modifications to files we are about to overwrite.
 if px4_is_git "$PX4_DIR"; then
-	TRACKED="$SIM_CMAKE_REL $AF_CMAKE_REL Tools/simulation/flightaxis src/modules/simulation/simulator_mavlink/sitl_targets_flightaxis.cmake"
+	TRACKED="$SIM_CMAKE_REL $AF_CMAKE_REL $HIL_AF_CMAKE_REL Tools/simulation/flightaxis src/modules/simulation/simulator_mavlink/sitl_targets_flightaxis.cmake"
 	for a in $AIRFRAMES; do
 		TRACKED="$TRACKED ROMFS/px4fmu_common/init.d-posix/airframes/$a"
+	done
+	for a in $HIL_AIRFRAMES; do
+		TRACKED="$TRACKED ROMFS/px4fmu_common/init.d/airframes/$a"
 	done
 	# shellcheck disable=SC2086
 	STATUS="$(git -C "$PX4_DIR" status --short -- $TRACKED 2>/dev/null || true)"
@@ -455,6 +464,7 @@ backup() {
 
 backup "$SIM_CMAKE" fa_strip_include_of
 backup "$AF_CMAKE"  fa_strip_airframes
+backup "$HIL_AF_CMAKE" fa_strip_hil_airframes
 
 # ================================================================= 4/7 ======
 step "4/7  Copying the FlightAxis payload"
@@ -509,6 +519,22 @@ for a in $AIRFRAMES; do
 	if [ "$DRY_RUN" -eq 0 ]; then
 		ok "ROMFS/px4fmu_common/init.d-posix/airframes/$a"
 		record "copied   ROMFS/px4fmu_common/init.d-posix/airframes/$a"
+	fi
+done
+
+# The HITL airframes. init.d/airframes/ always exists in a PX4 checkout (it is
+# where every board's airframes live), but mkdir -p rather than assuming it:
+# a shallow or partial checkout that got this far should fail on the copy with
+# a clear message, not on a missing directory.
+run mkdir -p "$HIL_AF_DIR" \
+	|| die "could not create $HIL_AF_DIR for the HITL airframes."
+
+for a in $HIL_AIRFRAMES; do
+	run cp -p "$REPO_DIR/ROMFS/px4fmu_common/init.d/airframes/$a" "$HIL_AF_DIR/" \
+		|| die "failed to copy the HITL airframe $a into the PX4 tree."
+	if [ "$DRY_RUN" -eq 0 ]; then
+		ok "ROMFS/px4fmu_common/init.d/airframes/$a"
+		record "copied   ROMFS/px4fmu_common/init.d/airframes/$a"
 	fi
 done
 
@@ -691,6 +717,95 @@ $(for a in $AIRFRAMES; do printf '         %s\n' "$a"; done)"
 			|| { rm -f "$TMP"; die "could not write $AF_CMAKE_REL"; }
 		ok "registered$MISSING_AF in $AF_CMAKE_REL"
 		record "edited   $AF_CMAKE_REL  (+ airframe entries:$MISSING_AF)"
+	fi
+fi
+
+# --- 5c: the four HITL airframe entries ------------------------------------
+# Same idea as 5b, different shape. init.d/airframes/CMakeLists.txt is ONE
+# px4_add_romfs_files() list with if(CONFIG_*) guards nested inside it, and our
+# .hil entries have to land inside the CONFIG_MODULES_SIMULATION_PWM_OUT_SIM
+# guard beside PX4's own 1001/1002/110x HIL airframes -- so this splice is
+# ANCHORED on 1103_standard_vtol_sih.hil rather than sorted by id. A sorted
+# insert would put them before the first id above 1203, which is inside the
+# MC_RATE_CONTROL guard: a different block, and one whose contents are not
+# ours to depend on.
+# fa_lists_airframe cannot be reused here: it only recognises a
+# px4_add_romfs_files( at column 0, which is right for init.d-posix but wrong
+# for this file, where every guarded list is TAB-INDENTED. Reusing it would
+# report all four as missing on every run and re-splice each time (harmless,
+# because the splice is idempotent, but it would misreport "registered" forever).
+fa_lists_hil_airframe() {
+	awk -v want="$2" '
+		/^[ \t]*px4_add_romfs_files\(/ { inlist = 1; next }
+		inlist && /^[ \t]*\)/          { inlist = 0; next }
+		inlist {
+			line = $0; sub(/\r$/, "", line)
+			sub(/^[[:space:]]+/, "", line); sub(/[[:space:]]+$/, "", line)
+			if (line == want) { found = 1; exit }
+		}
+		END { exit (found ? 0 : 1) }
+	' "$1"
+}
+
+MISSING_HIL_AF=""
+for a in $HIL_AIRFRAMES; do
+	fa_lists_hil_airframe "$HIL_AF_CMAKE" "$a" || MISSING_HIL_AF="$MISSING_HIL_AF $a"
+done
+
+if [ -z "$MISSING_HIL_AF" ]; then
+	ok "$HIL_AF_CMAKE_REL already lists all four flightaxis HITL airframes (no change)"
+else
+	grep -q '^px4_add_romfs_files(' "$HIL_AF_CMAKE" || die \
+"could not find the 'px4_add_romfs_files(' list in
+         $HIL_AF_CMAKE_REL
+       Refusing to guess where to register the HITL airframes. Add these
+       manually, inside the CONFIG_MODULES_SIMULATION_PWM_OUT_SIM block:
+$(for a in $HIL_AIRFRAMES; do printf '         %s\n' "$a"; done)"
+
+	TMP="$(tmp_for "$HIL_AF_CMAKE.flightaxis.tmp.$$")"
+	if ! fa_splice_hil_airframes "$HIL_AF_CMAKE" "$HIL_AIRFRAMES" > "$TMP"; then
+		rm -f "$TMP"
+		die "could not find the anchor '$FA_HIL_ANCHOR' inside the px4_add_romfs_files()
+       list in $HIL_AF_CMAKE_REL
+       Refusing to blind-append. Register the four 120x_flightaxis_*.hil entries
+       manually, inside the CONFIG_MODULES_SIMULATION_PWM_OUT_SIM block."
+	fi
+
+	# Same three invariants as 5b: every name present, no duplicates, and every
+	# one of them inside the list rather than at top level where it would be a
+	# cmake syntax error.
+	for a in $HIL_AIRFRAMES; do
+		grep -qE "^[[:space:]]*$(printf '%s\n' "$a" | sed 's/\./\\./g')[[:space:]]*\$" "$TMP" \
+			|| { rm -f "$TMP"; die "splice into $HIL_AF_CMAKE_REL did not register $a"; }
+	done
+	N_HIL="$(grep -cE "$FA_HIL_ENTRY_RE" "$TMP" || true)"
+	N_HIL_EXPECT="$(printf '%s\n' $HIL_AIRFRAMES | grep -c . || true)"
+	[ "$N_HIL" -eq "$N_HIL_EXPECT" ] || { rm -f "$TMP"; die \
+		"splice into $HIL_AF_CMAKE_REL produced $N_HIL flightaxis entries, expected $N_HIL_EXPECT
+       (duplicate or stray entries - refusing to write the file)"; }
+	N_HIL_INSIDE="$(awk -v entry_re="$FA_HIL_ENTRY_RE" '
+		/^px4_add_romfs_files\(/ { inlist = 1; next }
+		inlist && /^[ \t]*\)/    { inlist = 0; next }
+		inlist {
+			line = $0; sub(/\r$/, "", line)
+			if (line ~ entry_re) { n++ }
+		}
+		END { print n + 0 }
+	' "$TMP")"
+	[ "$N_HIL_INSIDE" -eq "$N_HIL_EXPECT" ] || { rm -f "$TMP"; die \
+		"splice into $HIL_AF_CMAKE_REL put $N_HIL_INSIDE of $N_HIL_EXPECT entries inside the
+       px4_add_romfs_files() list; the rest would land at top level and break cmake."; }
+
+	if [ "$DRY_RUN" -eq 1 ]; then
+		printf '    %s[dry-run]%s would register the HITL airframes in %s:\n' \
+			"$C_YEL" "$C_OFF" "$HIL_AF_CMAKE_REL"
+		diff -u "$HIL_AF_CMAKE" "$TMP" | sed 's/^/      /' || true
+		rm -f "$TMP"
+	else
+		mv "$TMP" "$HIL_AF_CMAKE" \
+			|| { rm -f "$TMP"; die "could not write $HIL_AF_CMAKE_REL"; }
+		ok "registered$MISSING_HIL_AF in $HIL_AF_CMAKE_REL"
+		record "edited   $HIL_AF_CMAKE_REL  (+ HITL airframe entries:$MISSING_HIL_AF)"
 	fi
 fi
 

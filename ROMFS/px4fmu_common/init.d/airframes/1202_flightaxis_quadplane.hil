@@ -1,63 +1,63 @@
 #!/bin/sh
 #
-# @name FlightAxis Quadplane
+# ############################################################################
+# #  UNTESTED AGAINST REAL HARDWARE.                                         #
+# #                                                                          #
+# #  This airframe was derived by MECHANICAL SUBSTITUTION from the SITL      #
+# #  airframe init.d-posix/airframes/1202_flightaxis_quadplane: every        #
+# #  PWM_MAIN_FUNC<N> was rewritten to HIL_ACT_FUNC<N> with the same <N>     #
+# #  and the same numeric function value, SITL-only startup parameters were  #
+# #  dropped, and SYS_HITL was added. Nothing here has ever been flown, or   #
+# #  even booted, on a flight controller board. The geometry and the output  #
+# #  mapping are believed correct by construction; the CONTROLLER GAINS are  #
+# #  inherited from the SITL file and describe no particular aircraft.       #
+# #  Treat this as a starting point and verify the Actuators tab in QGC      #
+# #  before arming anything.                                                 #
+# ############################################################################
+#
+# Companion-side model:
+# Tools/simulation/flightaxis/flightaxis_bridge/models/quadplane.json
+#
+# @name HITL FlightAxis Quadplane
 #
 # @type Standard VTOL
+# @class VTOL
+#
+# @output Motor1 MC lift motor 1
+# @output Motor2 MC lift motor 2
+# @output Motor3 MC lift motor 3
+# @output Motor4 MC lift motor 4
+# @output Motor5 Forward/pusher motor
+# @output Servo1 Aileron left
+# @output Servo2 Aileron right
+# @output Servo3 Elevator
+# @output Servo4 Rudder
 #
 
 . ${R}etc/init.d/rc.vtol_defaults
 
-# RealFlight free-runs (no lockstep), GPS samples arrive fresh.
-# Forced with "param set": px4-rc.mavlinksim runs after this file and would
-# otherwise override the default back to 10 ms.
-param set EKF2_GPS_DELAY 0
+# HITL: sensors and GPS arrive as MAVLink HIL_* messages, real outputs stay
+# disabled and actuator commands leave the board as HIL_ACTUATOR_CONTROLS.
+param set SYS_HITL 1
 
-# rcS sets SDLOG_MODE 1 ("from boot until disarm"), which closes the log at the
-# FIRST disarm; the spec section 11 validation checklist spans several arm/disarm
-# cycles, so most of it -- including the groundtruth-vs-estimate check -- would
-# never reach a log. Mode 4 is "from 1st armed until shutdown". SDLOG_MODE is
-# @reboot_required, so this has to be a startup default, not a pxh> command.
-param set-default SDLOG_MODE 4
+param set UAVCAN_ENABLE 0
 
-# The bridge supplies the battery from RealFlight's own model (pack voltage and
-# current draw, or fuel remaining on internal-combustion models), so PX4's
-# synthetic battery must be switched off or the two publishers alternate on the
-# battery_status topic and the reading flickers between them.
-#
-# The bridge sends BATTERY_STATUS on UDP 14580+instance, which reaches
-# MavlinkReceiver::handle_message_battery_status(); the simulator link on TCP
-# 4560 cannot carry it, because SimulatorMavlink::handle_message() has no
-# BATTERY_STATUS case at all. See Tools/simulation/flightaxis/flightaxis_bridge/
-# src/battery_link.h for the full reasoning.
-#
-# If the bridge cannot open that socket it says so and PX4 is left with no
-# battery: set this back to 1 in that case.
-param set-default SIM_BAT_ENABLE 0
-
-# Only IMU instance 0 is ever supplied: the bridge sends HIL_SENSOR with id = 0,
-# so SimulatorMavlink only ever fills _px4_accel[0]/_px4_gyro[0]. px4-rc.mavlinksim
-# asks for 3, which leaves two EKF instances running on dead sensors.
-# Forced with "param set": px4-rc.mavlinksim runs after this file and would
-# otherwise override the default back to 3. Note 0 is not an alternative --
-# EKF2.cpp clamps EKF2_MULTI_IMU to a minimum of 1 whenever SENS_IMU_MODE is 0.
-param set EKF2_MULTI_IMU 1
+# The board is on the bench with no battery attached.
+param set-default CBRK_SUPPLY_CHK 894281
 
 # Headless runs (QGC optional) have no manual control source at all. Value 4
 # ("ignore any stick input") is the only value that skips the RC-loss failsafe;
-# rcS's default of 1 does not. Without this, RC-loss failsafe is avoided only by
-# the _manual_control_lost_at_arming fallback, which stops applying if manual
-# control is ever briefly present. NAV_RCL_ACT is deliberately left at its
+# the firmware default of 1 does not. NAV_RCL_ACT is deliberately left at its
 # firmware default: it is unreachable once COM_RC_IN_MODE is 4, and the value 0
 # suggested for it is outside the parameter's declared range (@min 1).
 #
-# THIS ALSO BLOCKS RC TRANSMITTER PASSTHROUGH, and that is a deliberate trade
-# rather than an oversight. The bridge forwards a physical transmitter plugged
-# into RealFlight to PX4 as RC_CHANNELS -> input_rc (see the RC block in
-# vehicle_state.h). That stream is sent regardless of this parameter, and
-# "listener input_rc" will show the live stick values either way - but value 4
-# makes commander ignore them, so the sticks will neither arm nor fly the
-# aircraft. If passthrough looks broken while input_rc is populated and moving,
-# this parameter is why.
+# THIS ALSO BLOCKS RC PASSTHROUGH -- both a receiver wired to the board and the
+# transmitter plugged into RealFlight, which the bridge forwards to PX4 as
+# RC_CHANNELS -> input_rc. That stream is sent regardless of this parameter and
+# "listener input_rc" will show live stick values either way, but value 4 makes
+# commander ignore them, so the sticks will neither arm nor fly the aircraft.
+# If passthrough looks broken while input_rc is populated and moving, this
+# parameter is why.
 #
 # No single value serves both cases, because PX4 overloads this one parameter
 # for both jobs: the SAME value 4 is what skips the RC-loss failsafe
@@ -65,18 +65,16 @@ param set EKF2_MULTI_IMU 1
 # the manual-mode arming check (modeCheck.cpp:154). Any value that enables the
 # sticks therefore necessarily re-arms the RC-loss failsafe, and a headless run
 # with no transmitter would take a failsafe action (NAV_RCL_ACT, default
-# 2 = Return) as soon as it armed. Defaulting to the transmitter case would
-# break every user who does not have one - the common case - while defaulting
-# to headless costs the transmitter user exactly one line, set at the pxh>
-# prompt or added to this file:
+# 2 = Return) as soon as it armed. Defaulting to headless costs the transmitter
+# user exactly one line, set at the pxh> prompt or added to this file:
 #
-#     param set COM_RC_IN_MODE 0     # RC transmitter only
+#     param set COM_RC_IN_MODE 0     # RC transmitter / receiver only
 #
-# Use 0 when the transmitter is the only stick source (it also keeps a QGC
-# virtual joystick from competing with it), or 2 to allow a transmitter and a
-# QGC joystick with fallback. The transmitter must then be calibrated in QGC
-# exactly as for real hardware (Vehicle Setup -> Radio): PX4 does not act on
-# input_rc until RC_MAP_* and the per-channel RC_MIN/RC_TRIM/RC_MAX are set.
+# Use 0 when a transmitter is the only stick source (it also keeps a QGC virtual
+# joystick from competing with it), or 2 to allow a transmitter and a QGC
+# joystick with fallback. The transmitter must then be calibrated in QGC exactly
+# as for real hardware (Vehicle Setup -> Radio): PX4 does not act on input_rc
+# until RC_MAP_* and the per-channel RC_MIN/RC_TRIM/RC_MAX are set.
 param set-default COM_RC_IN_MODE 4
 
 # Negative disables the pre-takeoff auto-disarm. rc.vtol_defaults does not set
@@ -88,30 +86,31 @@ param set-default COM_RC_IN_MODE 4
 # two multirotor-based airframes need it.
 param set-default COM_DISARM_PRFLT -1
 
-# NOTE: the motor failure detector cannot fire in v1.16 SITL, for any vehicle.
-# The inherited comment here (copied with the values from a stock PX4
-# standard-VTOL airframe) claimed SITL reports 0 A for every ESC.
-# It does not: SimulatorMavlink publishes esc_current = 1 + |control| * 15 while
-# armed, i.e. 1-16 A. The undercurrent test is
+# NOTE: the motor failure detector cannot fire in HITL, for any vehicle, and
+# FD_ACT_EN / FD_ACT_MOT_TOUT are therefore deliberately left at their firmware
+# defaults rather than being pre-suppressed here.
+# The undercurrent test is
 #   esc_current < esc_throttle * FD_ACT_MOT_C2T   (FD_ACT_MOT_C2T default 2.0)
-# and 1 + 15c < 2c has no solution for any throttle c, so the detector can never
-# trip. FD_ACT_EN 0 and FD_ACT_MOT_TOUT 500 were therefore suppressing nothing
-# and have been removed: they are left at firmware defaults so that if upstream
-# ever fixes the SITL ESC current model, detection starts working here rather
-# than staying silently masked.
-# Corollary, with one exception: no ORGANIC motor failure can be detected in
-# SITL. Deliberate injection still can - "failure esc <n> wrong" routes through
-# FailureInjector::manipulateEscStatus (FailureDetector.cpp:151-154), which
-# scales the reported current by 0.1, and 0.1*(1 + 15c) < 2c does have solutions
-# (c > 0.2) - which is also exactly where the FD_ACT_MOT_THR 0.2 arming gate on
-# the same test opens. So leaving FD_ACT_EN at its default is not merely
-# harmless: it is what keeps that injection path usable to exercise the failsafe.
+# and it needs an esc_status publication to evaluate. In HITL the outputs are
+# owned by pwm_out_sim's HIL backend, which publishes no esc_status at all (it
+# only fills actuator_outputs, which mavlink turns into HIL_ACTUATOR_CONTROLS),
+# and no real ESC telemetry is wired to the board on the bench. With no
+# esc_status the detector never evaluates, so pre-disabling it would suppress
+# nothing while permanently masking the check if you later attach real ESC
+# telemetry to a HITL rig.
+# (In SITL the equivalent conclusion holds for a different reason:
+# SimulatorMavlink there publishes esc_current = 1 + |control| * 15 while armed,
+# and 1 + 15c < 2c has no solution for any throttle c. Deliberate injection via
+# "failure esc <n> wrong" still trips it there because
+# FailureInjector::manipulateEscStatus scales the current by 0.1. That injection
+# path is NOT available in HITL, again for want of an esc_status publisher.)
 
 # Actuator geometry (QGC Actuators tab) MUST match the "px4" output indices
 # in Tools/simulation/flightaxis/flightaxis_bridge/models/quadplane.json.
 #
-# PWM_MAIN_FUNC<N> lands on HIL_ACTUATOR_CONTROLS.controls[N-1], so the
-# assignments below produce:
+# HIL_ACT_FUNC<N> lands on HIL_ACTUATOR_CONTROLS.controls[N-1] -- exactly as
+# PWM_MAIN_FUNC<N> does in SITL -- so the model JSON indices are unchanged and
+# the assignments below produce:
 #
 #   controls[0] = 101 Motor 1     lift motor 1    [0,1]  -> quadplane.json rf4
 #   controls[1] = 102 Motor 2     lift motor 2    [0,1]  -> quadplane.json rf5
@@ -170,15 +169,15 @@ param set-default CA_SV_CS2_TRQ_P 1
 param set-default CA_SV_CS3_TYPE 4
 param set-default CA_SV_CS3_TRQ_Y 1
 
-param set-default PWM_MAIN_FUNC1 101
-param set-default PWM_MAIN_FUNC2 102
-param set-default PWM_MAIN_FUNC3 103
-param set-default PWM_MAIN_FUNC4 104
-param set-default PWM_MAIN_FUNC5 105
-param set-default PWM_MAIN_FUNC6 201
-param set-default PWM_MAIN_FUNC7 202
-param set-default PWM_MAIN_FUNC8 203
-param set-default PWM_MAIN_FUNC9 204
+param set-default HIL_ACT_FUNC1 101
+param set-default HIL_ACT_FUNC2 102
+param set-default HIL_ACT_FUNC3 103
+param set-default HIL_ACT_FUNC4 104
+param set-default HIL_ACT_FUNC5 105
+param set-default HIL_ACT_FUNC6 201
+param set-default HIL_ACT_FUNC7 202
+param set-default HIL_ACT_FUNC8 203
+param set-default HIL_ACT_FUNC9 204
 
 param set-default FW_AIRSPD_MAX 25
 param set-default NPFG_PERIOD 12

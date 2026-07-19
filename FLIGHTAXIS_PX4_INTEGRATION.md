@@ -784,11 +784,75 @@ should assume them:
 
 - **RC passthrough.** `rcin[12]` is parsed and never read; no `HIL_RC_INPUTS_RAW` is sent (§8.2).
   The old "InterLink RC ch2 is reversed" row was advice for a feature that does not exist.
-- **Battery / ICE fuel telemetry.** `m-batteryVoltage-VOLTS` and `m-batteryCurrentDraw-AMPS` are
-  parsed into `FAState` but are not carried into any MAVLink
-  message, so PX4 sees no simulated battery at all and the old "clamp/synthetic for ICE models
-  reporting −1" fix has nothing to attach to. PX4 falls back to its own SITL battery model.
-- **Multi-instance from `make`.** Supported by the bridge, unreachable through `sitl_run.sh` (§4).
+- ~~**Battery / ICE fuel telemetry.**~~ **Implemented** — see §12.2.
+- ~~**Multi-instance from `make`.**~~ **Implemented** — see §12.3.
+
+### 12.2 Battery and fuel telemetry
+
+RealFlight's battery is now carried into PX4's `battery_status`, replacing the synthetic
+`battery_simulator` ramp. The route is not the obvious one, and the two dead ends are worth
+recording because both look like they should work:
+
+- **Not the simulator link.** `SimulatorMavlink::handle_message()` switches on exactly ten message
+  ids (`HIL_SENSOR`, `HIL_OPTICAL_FLOW`, `ODOMETRY`, `VISION_POSITION_ESTIMATE`,
+  `DISTANCE_SENSOR`, `HIL_GPS`, `RC_CHANNELS`, `LANDING_TARGET`, `HIL_STATE_QUATERNION`,
+  `RAW_RPM`) with no `BATTERY_STATUS` case and no default. A `BATTERY_STATUS` sent down TCP 4560 is
+  parsed and silently discarded. `simulator_mavlink` only ever *subscribes* to `battery_status`.
+- **Not HITL, at all.** On a real board `MavlinkReceiver::handle_message_hil_sensor()` publishes a
+  **hardcoded** battery (`voltage_v = 16.0f`, `current_a = 10.0f`, `remaining = 0.70`) on **every**
+  `HIL_SENSOR`. The bridge sends `HIL_SENSOR` at ~250 Hz, so a real reading injected at 2 Hz would
+  be overwritten ~125 times between updates. No parameter disables it. Real battery telemetry on a
+  HITL board requires patching PX4, which this project does not do.
+
+What is implemented: the bridge opens a second UDP socket and sends `BATTERY_STATUS` at **2 Hz** to
+`127.0.0.1:14580+instance`, PX4's API/offboard MAVLink link, where
+`MavlinkReceiver::handle_message_battery_status()` does handle it. Two constraints on that path,
+both of which silently eat the message if violated:
+
+1. **MAVLink v2 only.** A v1 `BATTERY_STATUS` never reaches the topic, even though id 147 encodes
+   fine in v1 and the `CRC_EXTRA` is identical (154). The bridge forces v2 on its channel.
+2. **`sysid` must equal PX4's `MAV_SYS_ID`, `compid` must differ from PX4's.** The handler's first
+   statement is
+   `if ((msg->sysid != mavlink_system.sysid) || (msg->compid == mavlink_system.compid)) return;`.
+   `rcS` sets `MAV_SYS_ID` to `px4_instance+1`, so the bridge transmits as sysid `instance+1`,
+   compid 200.
+
+The link is chosen deliberately: 14580 pins its remote with `-o`, so PX4 does **not** retarget its
+output stream at the sender — measured at 0 packets / 0 bytes returned after a 10-packet burst,
+which is what makes it safe to drive from the ~800 Hz exchange loop. The GCS link (18570) is
+**not** used: it has no `-o` and latches its partner address from the first packet it receives, so
+sending there would hijack the stream away from a real QGroundControl.
+
+Three sources, selected per frame and logged on change:
+
+| RealFlight reports | `remaining` from | `voltage_v` | Notes |
+|---|---|---|---|
+| pack voltage > 0 (electric) | linear per-cell SOC, 3.30 V empty → 4.20 V full | measured | cell count inferred once from the first sample; `discharged_mah` coulomb-integrated |
+| voltage = −1, fuel > 0 (IC) | `fuel_oz / max_fuel_oz_seen` | **nominal, not measured** | this is the −1 case the ledger used to flag; fuel is the physically meaningful "flying left", and a nominal voltage stops `BAT_V_EMPTY` firing on an armed aircraft |
+| neither | 1.0 | nominal | obviously synthetic; logged as such |
+
+Because the bridge is now the single publisher, the four SITL airframes set
+`param set-default SIM_BAT_ENABLE 0`; otherwise `battery_simulator` and the bridge alternate on the
+topic and the reading flickers between them. If the bridge cannot open its socket it says so, and
+`SIM_BAT_ENABLE` should be set back to 1.
+
+Full reasoning lives in `Tools/simulation/flightaxis/flightaxis_bridge/src/battery_link.h`.
+
+### 12.3 Multi-instance
+
+Wired through. `sitl_run.sh` reads **`PX4_FLIGHTAXIS_INSTANCE`** (default 0, validated as a
+non-negative integer) and threads it to both ends: the bridge gets it as argv[1] (TCP `4560+i`) and
+PX4 is launched with `-i $instance`, which is what makes `px4_instance` non-zero inside `rcS` and
+therefore offsets the simulator port, every MAVLink UDP port, and `MAV_SYS_ID`. Instance 0 keeps the
+historical `$build_path/rootfs` working directory; further instances use
+`$build_path/instance_$i`, following PX4's own `Tools/simulation/sitl_multiple_run.sh`.
+
+    PX4_FLIGHTAXIS_INSTANCE=1 PX4_FLIGHTAXIS_IP=<host> make px4_sitl_nolockstep flightaxis_quad
+
+Note that earlier drafts claimed multi-instance "follows the FlightGear convention". That was true
+and useless: PX4's own `Tools/simulation/flightgear/sitl_run.sh` hard-codes `0` in exactly the same
+place, so neither runner supported it. In practice each instance still needs its own RealFlight
+host — one RealFlight instance serves one aircraft.
 
 ## 13. References
 

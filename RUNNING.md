@@ -296,6 +296,20 @@ channels 5–8.
 wants, so enabling `Rev4Servos` would double-swap and put the lift motors on the surfaces.
 It exists for RF models built the other way round, where the map is written sequentially.
 
+**No shipped model uses `Rev4Servos`, and that is deliberate — it is not an oversight and no
+demonstration model is coming.** The option exists for *user-authored* models only. All four
+shipped models (`plane`, `quad`, `quadplane`, `heli`) write their `rf` indices out explicitly, and
+for any map written that way `Rev4Servos` is strictly harmful: it can only double-swap. The option
+pays off exactly when a RealFlight model's channel order is a wholesale 0–3 ↔ 4–7 rotation of what
+PX4 emits *and* you would rather flip one flag than rewrite eight `rf` indices. Shipping a model
+whose only purpose was to exercise the flag would mean shipping a model deliberately authored
+against the house style, immediately next to a `quadplane.json` that carries an explicit
+`OptionsComment` warning readers off the same flag. If you enable it, note the validator
+requirement: `get_FAbridge_params.py` rejects any `Rev4Servos`-covered row (rf0–7) left on
+`"disarm": -1` / hold-last, because the swap rewrites the slot every frame and a held channel would
+ping-pong between `rf i` and `rf i+4` at the loop rate — a full-amplitude servo buzz at ~250 Hz.
+Give those rows an explicit `disarm` (0.5 for a bipolar servo, 0.0 for a motor).
+
 **Gotcha — transition.** The airframe sets `VT_F_TRANS_THR 0.75`, `VT_FWD_THRUST_EN 4`,
 `FW_AIRSPD_MAX 25`. Transition needs the pusher to actually accelerate the model; if the
 RealFlight airframe is much draggier or lighter than a reference airframe, transition will stall or never
@@ -670,22 +684,33 @@ Occasional single lines are normal and benign:
 
 ## 6. Multiple instances
 
-**Be clear about this: multi-instance is not wired through the make targets.**
+Multi-instance is wired through the make targets. Set **`PX4_FLIGHTAXIS_INSTANCE`**:
 
-- The bridge *does* support it. Its first argv is the PX4 instance id, and
-  `px4_communicator.cpp` binds `portBase + portOffset`, i.e. `4560 + instance`.
-- But `sitl_run.sh` passes a **hard-coded `0`**, with no environment override:
+```bash
+# instance 1: bridge on TCP 4561, PX4 on 4561, MAVLink ports +1, MAV_SYS_ID 2
+PX4_FLIGHTAXIS_INSTANCE=1 PX4_FLIGHTAXIS_IP=192.168.10.2 \
+  make px4_sitl_nolockstep flightaxis_plane
+```
 
-  ```bash
-  "${build_path}/build_flightaxis_bridge/flightaxis_bridge" 0 "${FA_IP}" $fa_bridge_params &
-  ```
+`sitl_run.sh` threads it to both ends — the bridge takes it as argv[1] (`px4_communicator.cpp`
+binds `portBase + portOffset`, i.e. `4560 + instance`) and `px4` is launched with `-i $instance`.
+That `-i` is the load-bearing part: it is what sets `px4_instance` inside `rcS`, which is what
+offsets the simulator TCP port (`px4-rc.mavlinksim`), every MAVLink UDP port (`px4-rc.mavlink`) and
+`MAV_SYS_ID` (`px4_instance + 1`). Passing the instance to the bridge alone would leave PX4
+listening on 4560 regardless.
 
-So a second `make ... flightaxis_*` would just collide on TCP 4560. There is no
-`PX4_FLIGHTAXIS_INSTANCE` variable. Threading one through `sitl_run.sh` is the obvious fix and it
-has not been done.
+Working directories: instance 0 keeps `build/px4_sitl_nolockstep/rootfs` so existing saved
+parameters and logs stay put; instance *N* > 0 uses `build/px4_sitl_nolockstep/instance_N`,
+following PX4's own `Tools/simulation/sitl_multiple_run.sh`.
 
-**Manual workaround** (documented as a workaround, not a supported path). Launch the bridge and
-`px4` by hand:
+A non-numeric `PX4_FLIGHTAXIS_INSTANCE` is rejected with an error rather than being silently
+truncated to 0 — which would otherwise produce a "second" instance that collides with the first.
+
+In practice each instance still needs its own RealFlight host: one RealFlight instance serves one
+aircraft.
+
+**Launching by hand.** Still perfectly valid, and what you want if you are debugging the bridge
+itself:
 
 ```bash
 cd ~/PX4-Autopilot/Tools/simulation/flightaxis/flightaxis_bridge
@@ -702,8 +727,7 @@ PX4_SIM_MODEL=flightaxis_plane \
   ~/PX4-Autopilot/build/px4_sitl_nolockstep/etc
 ```
 
-Note `PX4_HOME_*` must be set on the **bridge** process, not on `px4`. And in practice each
-instance needs its own RealFlight host anyway — one RealFlight instance serves one aircraft.
+Note `PX4_HOME_*` must be set on the **bridge** process, not on `px4`.
 
 ---
 

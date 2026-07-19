@@ -96,6 +96,7 @@
 #include "px4_communicator.h"
 #include "fa_communicator.h"
 #include "vehicle_state.h"
+#include "battery_link.h"
 
 using namespace std;
 
@@ -175,6 +176,110 @@ static double envOrDefault(const char *name, double dflt)
 	}
 
 	return dflt;
+}
+
+/*
+ * Report RealFlight model health: m_hasLostComponents, m_isLocked and
+ * m_anEngineIsRunning.
+ *
+ * WHY THESE ARE LOGGED AND NOT FORWARDED INTO A uORB TOPIC
+ * --------------------------------------------------------
+ * These three are the only parsed FlightAxis fields that carry state PX4 has
+ * genuinely no other way to learn - everything else RealFlight reports is
+ * either already sent (attitude, velocity, position) or is a redundant
+ * re-expression of something already sent. A crashed model, a locked-up model
+ * and a healthy model are byte-for-byte identical from PX4's side: the
+ * physics keeps streaming, the attitude keeps updating, and the aircraft
+ * simply stops responding to controls.
+ *
+ * There is nonetheless no uORB topic that means any of this. The closest
+ * candidates all lie: publishing to a failure/health topic would make PX4's
+ * own failure detector and health checks act on a SIMULATOR bookkeeping flag
+ * as though it were a vehicle fault, changing arming and failsafe behaviour
+ * on the strength of something the flight stack should not be reasoning about
+ * at all. Forwarding a value into a topic nobody consumes is worse than
+ * leaving it parsed; forwarding it into a topic that DOES consume it, and
+ * consumes it wrongly, is worse still.
+ *
+ * So the consumer is the human reading the bridge log. That is the party who
+ * actually needs to know, and this is the difference between "my aircraft
+ * stopped responding, is the bridge broken?" and one line saying the model
+ * shed a wing forty seconds ago.
+ *
+ * EDGE TRIGGERED. The main loop turns at 750-800 Hz; level-triggered logging
+ * here would emit thousands of identical lines per second and is exactly the
+ * kind of thing that competes with the exchange budget. Every branch below is
+ * a compare against the previous frame's value.
+ */
+struct ModelHealth {
+	bool  initialised{false};
+	bool  lost_components{false};
+	bool  locked{false};
+	bool  engine_running{false};
+};
+
+static void reportModelHealth(ModelHealth &prev, const FAState &state)
+{
+	if (!prev.initialised) {
+		prev.initialised     = true;
+		prev.lost_components = state.m_hasLostComponents;
+		prev.locked          = state.m_isLocked;
+		prev.engine_running  = state.m_anEngineIsRunning;
+
+		// Announce the starting condition only when it is already bad -
+		// a healthy model at startup is the expected case and needs no line.
+		if (state.m_hasLostComponents) {
+			cerr << "[flightaxis_bridge] WARNING: RealFlight model has already LOST COMPONENTS at startup"
+			     << " - reset the aircraft in RealFlight (spacebar) before flying" << endl;
+		}
+
+		if (state.m_isLocked) {
+			cerr << "[flightaxis_bridge] WARNING: RealFlight model is LOCKED at startup"
+			     << " - it will not respond to controls" << endl;
+		}
+
+		return;
+	}
+
+	if (state.m_hasLostComponents != prev.lost_components) {
+		if (state.m_hasLostComponents) {
+			// The single most useful line this bridge can print. Everything
+			// downstream still looks nominal after this: PX4 keeps receiving
+			// well-formed sensor data and keeps commanding actuators, but the
+			// airframe that was flying no longer exists.
+			cerr << "[flightaxis_bridge] *** RealFlight model has LOST COMPONENTS (crash/breakup) ***" << endl;
+			cerr << "[flightaxis_bridge]     PX4 cannot detect this - sensors keep streaming and the"
+			     << " aircraft looks healthy from the flight stack's side." << endl;
+			cerr << "[flightaxis_bridge]     Reset the aircraft in RealFlight (spacebar) to continue." << endl;
+
+		} else {
+			cerr << "[flightaxis_bridge] RealFlight model components restored (aircraft reset)" << endl;
+		}
+
+		prev.lost_components = state.m_hasLostComponents;
+	}
+
+	if (state.m_isLocked != prev.locked) {
+		if (state.m_isLocked) {
+			cerr << "[flightaxis_bridge] *** RealFlight model is LOCKED - it will not respond to controls ***" << endl;
+
+		} else {
+			cerr << "[flightaxis_bridge] RealFlight model unlocked" << endl;
+		}
+
+		prev.locked = state.m_isLocked;
+	}
+
+	if (state.m_anEngineIsRunning != prev.engine_running) {
+		// Not a fault either way: it is normal before takeoff and after a
+		// deliberate shutdown. It is logged because an engine that quit on
+		// its own - flooded, out of fuel, or never started because the model
+		// needs a manual ignition - presents to PX4 as an aircraft that
+		// simply will not climb, with no other clue anywhere.
+		cerr << "[flightaxis_bridge] RealFlight engine "
+		     << (state.m_anEngineIsRunning ? "RUNNING" : "STOPPED") << endl;
+		prev.engine_running = state.m_anEngineIsRunning;
+	}
 }
 
 /*
@@ -503,6 +608,39 @@ int main(int argc, char **argv)
 
 	setup_unix_signals();
 	stop = 0;
+
+	// Battery / fuel telemetry -> PX4's battery_status.
+	//
+	// SITL only, and battery_link.h explains at length why: the simulator link
+	// this bridge already owns cannot carry it (SimulatorMavlink has no
+	// BATTERY_STATUS case at all), so it needs its own UDP socket to PX4's
+	// API/offboard MAVLink link; and on a HITL board the value would be
+	// overwritten ~125 times between updates by the hardcoded battery that
+	// mavlink_receiver publishes on every HIL_SENSOR.
+	BatteryLink battery;
+
+	if (transport == PX4Transport::TcpServer) {
+		if (battery.init(instance)) {
+			cerr << "[flightaxis_bridge] battery telemetry -> UDP 127.0.0.1:"
+			     << (14580 + instance) << " as sysid " << (instance + 1) << endl;
+			cerr << "[flightaxis_bridge]   (airframe must set SIM_BAT_ENABLE 0 so battery_simulator"
+			     << " does not publish over it)" << endl;
+
+		} else {
+			// Not fatal. The simulation is entirely usable without it; only
+			// the battery reading is lost, and battery_simulator can be left
+			// enabled to cover for it.
+			cerr << "[flightaxis_bridge] WARNING: could not open the battery telemetry socket;"
+			     << " PX4 will have no battery unless SIM_BAT_ENABLE is 1" << endl;
+		}
+
+	} else {
+		cerr << "[flightaxis_bridge] battery telemetry disabled on " << px4.TransportName()
+		     << ": a HITL board overwrites battery_status from every HIL_SENSOR"
+		     << " (see battery_link.h)" << endl;
+	}
+
+	ModelHealth model_health;
 
 	// inject the UAV controller interface into RealFlight
 	cerr << "[flightaxis_bridge] connecting to RealFlight at " << fa_ip << ":18083" << endl;
@@ -863,6 +1001,13 @@ int main(int argc, char **argv)
 		last_controller_active = state.m_flightAxisControllerIsActive;
 		last_reset_pressed = state.m_resetButtonHasBeenPressed;
 
+		// Both are edge/time gated internally, so calling them on every
+		// exchange is cheap: reportModelHealth() is three compares, and
+		// battery.update() returns on a single subtraction 399 times out of
+		// 400 at the measured exchange rate.
+		reportModelHealth(model_health, state);
+		battery.update(state, micros());
+
 		if (fail_count > 0) {
 			cerr << "[flightaxis_bridge] ExchangeData recovered after " << fail_count << " retries" << endl;
 			fail_count = 0;
@@ -1184,6 +1329,7 @@ int main(int argc, char **argv)
 	}
 
 	cerr << "[flightaxis_bridge] exiting" << endl;
+	battery.close();
 	px4.Clean();
 	delete [] maps;
 

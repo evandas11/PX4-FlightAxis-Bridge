@@ -19,6 +19,21 @@ param set EKF2_GPS_DELAY 0
 # @reboot_required, so this has to be a startup default, not a pxh> command.
 param set-default SDLOG_MODE 4
 
+# The bridge supplies the battery from RealFlight's own model (pack voltage and
+# current draw, or fuel remaining on internal-combustion models), so PX4's
+# synthetic battery must be switched off or the two publishers alternate on the
+# battery_status topic and the reading flickers between them.
+#
+# The bridge sends BATTERY_STATUS on UDP 14580+instance, which reaches
+# MavlinkReceiver::handle_message_battery_status(); the simulator link on TCP
+# 4560 cannot carry it, because SimulatorMavlink::handle_message() has no
+# BATTERY_STATUS case at all. See Tools/simulation/flightaxis/flightaxis_bridge/
+# src/battery_link.h for the full reasoning.
+#
+# If the bridge cannot open that socket it says so and PX4 is left with no
+# battery: set this back to 1 in that case.
+param set-default SIM_BAT_ENABLE 0
+
 # Only IMU instance 0 is ever supplied: the bridge sends HIL_SENSOR with id = 0,
 # so SimulatorMavlink only ever fills _px4_accel[0]/_px4_gyro[0]. px4-rc.mavlinksim
 # asks for 3, which leaves two EKF instances running on dead sensors.

@@ -104,9 +104,13 @@ SIM_CMAKE_REL="src/modules/simulation/simulator_mavlink/CMakeLists.txt"
 AF_CMAKE_REL="ROMFS/px4fmu_common/init.d-posix/airframes/CMakeLists.txt"
 SIM_CMAKE="$PX4_DIR/$SIM_CMAKE_REL"
 AF_CMAKE="$PX4_DIR/$AF_CMAKE_REL"
+# HITL airframes are registered in init.d (a board never reads init.d-posix).
+HIL_AF_CMAKE_REL="ROMFS/px4fmu_common/init.d/airframes/CMakeLists.txt"
+HIL_AF_CMAKE="$PX4_DIR/$HIL_AF_CMAKE_REL"
 
 # From scripts/detect-px4.sh - the single source of truth for what we own.
 AIRFRAMES="$FA_AIRFRAMES"
+HIL_AIRFRAMES="$FA_HIL_AIRFRAMES"
 INCLUDE_LINE='include(sitl_targets_flightaxis.cmake)'
 
 run() {
@@ -126,6 +130,7 @@ step "1/3  Undoing the CMakeLists.txt registrations"
 # thought were registered and uninstall could not remove.
 strip_include()   { fa_strip_include "$1" "$INCLUDE_LINE"; }
 strip_airframes() { fa_strip_airframes "$1"; }
+strip_hil_airframes() { fa_strip_hil_airframes "$1"; }
 
 # Restore from the backup when it is byte-identical to what a surgical removal
 # would produce (the normal case). If they differ, the file has been edited
@@ -188,6 +193,9 @@ undo_file() {
 
 undo_file "$SIM_CMAKE" "$SIM_CMAKE_REL" strip_include
 undo_file "$AF_CMAKE"  "$AF_CMAKE_REL"  strip_airframes
+# Guarded: a PX4 tree predating the HITL airframes has no such registration to
+# undo, and an absent file must not be treated as a failure.
+[ -f "$HIL_AF_CMAKE" ] && undo_file "$HIL_AF_CMAKE" "$HIL_AF_CMAKE_REL" strip_hil_airframes
 
 # ---------------------------------------------------------------- payload ----
 step "2/3  Removing the FlightAxis payload"
@@ -292,6 +300,10 @@ EOF
 	# not ours, is intentionally left registered, and must not fail this check.
 	if grep -qE "$FA_ENTRY_RE" "$AF_CMAKE" 2>/dev/null; then
 		printf '    %sFAIL%s %s still lists our flightaxis airframes\n' "$C_RED" "$C_OFF" "$AF_CMAKE_REL" >&2
+		LEFT=1
+	fi
+	if grep -qE "$FA_HIL_ENTRY_RE" "$HIL_AF_CMAKE" 2>/dev/null; then
+		printf '    %sFAIL%s %s still lists our flightaxis HITL airframes\n' "$C_RED" "$C_OFF" "$HIL_AF_CMAKE_REL" >&2
 		LEFT=1
 	fi
 	[ "$LEFT" -eq 0 ] || die "uninstall did not fully complete (see FAIL lines above)."

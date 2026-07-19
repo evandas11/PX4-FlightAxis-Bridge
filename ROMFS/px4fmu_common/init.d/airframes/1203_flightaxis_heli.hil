@@ -1,63 +1,59 @@
 #!/bin/sh
 #
-# @name FlightAxis Helicopter
+# ############################################################################
+# #  UNTESTED AGAINST REAL HARDWARE.                                         #
+# #                                                                          #
+# #  This airframe was derived by MECHANICAL SUBSTITUTION from the SITL      #
+# #  airframe init.d-posix/airframes/1203_flightaxis_heli: every             #
+# #  PWM_MAIN_FUNC<N> was rewritten to HIL_ACT_FUNC<N> with the same <N>     #
+# #  and the same numeric function value, SITL-only startup parameters were  #
+# #  dropped, and SYS_HITL was added. Nothing here has ever been flown, or   #
+# #  even booted, on a flight controller board. The geometry and the output  #
+# #  mapping are believed correct by construction; the CONTROLLER GAINS are  #
+# #  inherited from the SITL file and were already flagged UNTESTED there.   #
+# #  Treat this as a starting point and verify the Actuators tab in QGC      #
+# #  before arming anything.                                                 #
+# ############################################################################
+#
+# Companion-side model:
+# Tools/simulation/flightaxis/flightaxis_bridge/models/heli.json
+#
+# @name HITL FlightAxis Helicopter
 #
 # @type Helicopter
+# @class Copter
+#
+# @output Motor1 Main rotor / RSC
+# @output Servo1 Yaw tail servo
+# @output Servo2 Swash plate servo 1
+# @output Servo3 Swash plate servo 2
+# @output Servo4 Swash plate servo 3
 #
 
 . ${R}etc/init.d/rc.heli_defaults
 
-# RealFlight free-runs (no lockstep), GPS samples arrive fresh.
-# Forced with "param set": px4-rc.mavlinksim runs after this file and would
-# otherwise override the default back to 10 ms.
-param set EKF2_GPS_DELAY 0
+# HITL: sensors and GPS arrive as MAVLink HIL_* messages, real outputs stay
+# disabled and actuator commands leave the board as HIL_ACTUATOR_CONTROLS.
+param set SYS_HITL 1
 
-# rcS sets SDLOG_MODE 1 ("from boot until disarm"), which closes the log at the
-# FIRST disarm; the spec section 11 validation checklist spans several arm/disarm
-# cycles, so most of it -- including the groundtruth-vs-estimate check -- would
-# never reach a log. Mode 4 is "from 1st armed until shutdown". SDLOG_MODE is
-# @reboot_required, so this has to be a startup default, not a pxh> command.
-param set-default SDLOG_MODE 4
+param set UAVCAN_ENABLE 0
 
-# The bridge supplies the battery from RealFlight's own model (pack voltage and
-# current draw, or fuel remaining on internal-combustion models), so PX4's
-# synthetic battery must be switched off or the two publishers alternate on the
-# battery_status topic and the reading flickers between them.
-#
-# The bridge sends BATTERY_STATUS on UDP 14580+instance, which reaches
-# MavlinkReceiver::handle_message_battery_status(); the simulator link on TCP
-# 4560 cannot carry it, because SimulatorMavlink::handle_message() has no
-# BATTERY_STATUS case at all. See Tools/simulation/flightaxis/flightaxis_bridge/
-# src/battery_link.h for the full reasoning.
-#
-# If the bridge cannot open that socket it says so and PX4 is left with no
-# battery: set this back to 1 in that case.
-param set-default SIM_BAT_ENABLE 0
-
-# Only IMU instance 0 is ever supplied: the bridge sends HIL_SENSOR with id = 0,
-# so SimulatorMavlink only ever fills _px4_accel[0]/_px4_gyro[0]. px4-rc.mavlinksim
-# asks for 3, which leaves two EKF instances running on dead sensors.
-# Forced with "param set": px4-rc.mavlinksim runs after this file and would
-# otherwise override the default back to 3. Note 0 is not an alternative --
-# EKF2.cpp clamps EKF2_MULTI_IMU to a minimum of 1 whenever SENS_IMU_MODE is 0.
-param set EKF2_MULTI_IMU 1
+# The board is on the bench with no battery attached.
+param set-default CBRK_SUPPLY_CHK 894281
 
 # Headless runs (QGC optional) have no manual control source at all. Value 4
 # ("ignore any stick input") is the only value that skips the RC-loss failsafe;
-# rcS's default of 1 does not. Without this, RC-loss failsafe is avoided only by
-# the _manual_control_lost_at_arming fallback, which stops applying if manual
-# control is ever briefly present. NAV_RCL_ACT is deliberately left at its
+# the firmware default of 1 does not. NAV_RCL_ACT is deliberately left at its
 # firmware default: it is unreachable once COM_RC_IN_MODE is 4, and the value 0
 # suggested for it is outside the parameter's declared range (@min 1).
 #
-# THIS ALSO BLOCKS RC TRANSMITTER PASSTHROUGH, and that is a deliberate trade
-# rather than an oversight. The bridge forwards a physical transmitter plugged
-# into RealFlight to PX4 as RC_CHANNELS -> input_rc (see the RC block in
-# vehicle_state.h). That stream is sent regardless of this parameter, and
-# "listener input_rc" will show the live stick values either way - but value 4
-# makes commander ignore them, so the sticks will neither arm nor fly the
-# aircraft. If passthrough looks broken while input_rc is populated and moving,
-# this parameter is why.
+# THIS ALSO BLOCKS RC PASSTHROUGH -- both a receiver wired to the board and the
+# transmitter plugged into RealFlight, which the bridge forwards to PX4 as
+# RC_CHANNELS -> input_rc. That stream is sent regardless of this parameter and
+# "listener input_rc" will show live stick values either way, but value 4 makes
+# commander ignore them, so the sticks will neither arm nor fly the aircraft.
+# If passthrough looks broken while input_rc is populated and moving, this
+# parameter is why.
 #
 # No single value serves both cases, because PX4 overloads this one parameter
 # for both jobs: the SAME value 4 is what skips the RC-loss failsafe
@@ -65,18 +61,16 @@ param set EKF2_MULTI_IMU 1
 # the manual-mode arming check (modeCheck.cpp:154). Any value that enables the
 # sticks therefore necessarily re-arms the RC-loss failsafe, and a headless run
 # with no transmitter would take a failsafe action (NAV_RCL_ACT, default
-# 2 = Return) as soon as it armed. Defaulting to the transmitter case would
-# break every user who does not have one - the common case - while defaulting
-# to headless costs the transmitter user exactly one line, set at the pxh>
-# prompt or added to this file:
+# 2 = Return) as soon as it armed. Defaulting to headless costs the transmitter
+# user exactly one line, set at the pxh> prompt or added to this file:
 #
-#     param set COM_RC_IN_MODE 0     # RC transmitter only
+#     param set COM_RC_IN_MODE 0     # RC transmitter / receiver only
 #
-# Use 0 when the transmitter is the only stick source (it also keeps a QGC
-# virtual joystick from competing with it), or 2 to allow a transmitter and a
-# QGC joystick with fallback. The transmitter must then be calibrated in QGC
-# exactly as for real hardware (Vehicle Setup -> Radio): PX4 does not act on
-# input_rc until RC_MAP_* and the per-channel RC_MIN/RC_TRIM/RC_MAX are set.
+# Use 0 when a transmitter is the only stick source (it also keeps a QGC virtual
+# joystick from competing with it), or 2 to allow a transmitter and a QGC
+# joystick with fallback. The transmitter must then be calibrated in QGC exactly
+# as for real hardware (Vehicle Setup -> Radio): PX4 does not act on input_rc
+# until RC_MAP_* and the per-channel RC_MIN/RC_TRIM/RC_MAX are set.
 param set-default COM_RC_IN_MODE 4
 
 # Negative disables the pre-takeoff auto-disarm. rc.heli_defaults sets 60 s,
@@ -122,8 +116,9 @@ param set-default COM_DISARM_PRFLT -1
 # getEffectivenessMatrix() adds actuators in the order
 #   main rotor (MOTORS), tail (SERVOS here), then CA_SP0_COUNT swash SERVOS
 # so the output functions are Motor1=101 for the rotor and Servo1..Servo4 =
-# 201..204 for tail, swash1, swash2, swash3. PWM_MAIN_FUNC<N> lands on
-# HIL_ACTUATOR_CONTROLS.controls[N-1], so the assignments below produce:
+# 201..204 for tail, swash1, swash2, swash3. HIL_ACT_FUNC<N> lands on
+# HIL_ACTUATOR_CONTROLS.controls[N-1] -- exactly as PWM_MAIN_FUNC<N> does in
+# SITL -- so the assignments below produce:
 #
 #   controls[0] = 101 Motor 1     main rotor / RSC    [0,1]  -> heli.json rf4
 #   controls[1] = 201 Servo 1     yaw tail servo      [-1,1] -> heli.json rf3
@@ -144,17 +139,17 @@ param set-default COM_DISARM_PRFLT -1
 #   the tail is [-1,1] and heli.json MUST scale rf3 "bipolar" with disarm 0.5.
 #
 # If you do fly a model with a real electric tail motor, set CA_AIRFRAME 10,
-# renumber PWM_MAIN_FUNC2..5 to 102/201/202/203 (the swash shifts down one
+# renumber HIL_ACT_FUNC2..5 to 102/201/202/203 (the swash shifts down one
 # servo index because the tail no longer consumes Servo1), and change heli.json
 # rf3 back to "unipolar" with disarm 0.0. The controls[] indices are unchanged
 # by that swap, so only rf3's scaling differs in the JSON.
 param set-default CA_AIRFRAME 11
 
-param set-default PWM_MAIN_FUNC1 101
-param set-default PWM_MAIN_FUNC2 201
-param set-default PWM_MAIN_FUNC3 202
-param set-default PWM_MAIN_FUNC4 203
-param set-default PWM_MAIN_FUNC5 204
+param set-default HIL_ACT_FUNC1 101
+param set-default HIL_ACT_FUNC2 201
+param set-default HIL_ACT_FUNC3 202
+param set-default HIL_ACT_FUNC4 203
+param set-default HIL_ACT_FUNC5 204
 
 # Swash plate geometry. CA_SP0_ANG<i> is measured clockwise seen from above,
 # 0 = forward (+X). ActuatorEffectivenessHelicopter.cpp:179-185 drives each
@@ -212,7 +207,7 @@ param set-default CA_HELI_PITCH_C4 0.70
 #   tail = yaw + CA_HELI_YAW_CP_S*|collective - CA_HELI_YAW_CP_O|
 #              + CA_HELI_YAW_TH_S*throttle
 # RealFlight heli models have genuine collective->yaw coupling and there is no
-# heading-hold gyro in the loop (see the RealFlight notes above), so the yaw
+# heading-hold gyro in the loop (see the RealFlight notes below), so the yaw
 # loop has to counter it. _CP_S handles the part that varies with collective,
 # which is the part the yaw integrator is too slow to catch on a fast collective
 # pull. _CP_O is the collective of least rotor drag, i.e. zero blade pitch,

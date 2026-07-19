@@ -24,7 +24,39 @@ echo model: $model
 echo src_path: $src_path
 echo build_path: $build_path
 
-rootfs="$build_path/rootfs" # this is the working directory
+# PX4 instance id. Everything that has to be unique per instance derives from
+# it: the bridge's TCP listen port (4560+instance, PX4Communicator::InitTcpServer),
+# PX4's own simulator port (px4-rc.mavlinksim: simulator_tcp_port=$((4560+px4_instance))),
+# every MAVLink UDP port (px4-rc.mavlink), MAV_SYS_ID (rcS: px4_instance+1) and
+# the working directory.
+#
+# This used to be a hard-coded 0 here, which meant no make target could start a
+# second instance even though the bridge had always supported it -- a second
+# flightaxis_* target just collided on TCP 4560. (PX4's own
+# Tools/simulation/flightgear/sitl_run.sh still hard-codes 0 the same way, so
+# "it follows the FlightGear convention" was true and useless.)
+instance="${PX4_FLIGHTAXIS_INSTANCE:-0}"
+
+# Validate: a non-numeric value would otherwise reach `px4 -i` and the port
+# arithmetic as a silent 0, producing a second instance that collides with the
+# first instead of failing.
+case "$instance" in
+	''|*[!0-9]*)
+		echo "PX4_FLIGHTAXIS_INSTANCE must be a non-negative integer, got '$instance'" >&2
+		exit 1
+		;;
+esac
+
+# Working directory. Instance 0 keeps the historical "$build_path/rootfs" path
+# so existing saved parameters and logs stay where they were; additional
+# instances follow PX4's own multi-instance convention from
+# Tools/simulation/sitl_multiple_run.sh, which uses "$build_path/instance_$n".
+if [ "$instance" -eq 0 ]; then
+	rootfs="$build_path/rootfs" # this is the working directory
+else
+	rootfs="$build_path/instance_$instance"
+fi
+
 mkdir -p "$rootfs"
 
 # To disable user input: without this PX4 opens the interactive pxh> shell, so
@@ -78,7 +110,7 @@ fi
 # again an unexplained hang. SITL is always the bridge's tcp-server default.
 export PX4_HITL_TRANSPORT=tcp-server
 
-"$bridge_bin" 0 "${FA_IP}" \
+"$bridge_bin" "$instance" "${FA_IP}" \
 	$fa_bridge_params &
 FA_BRIDGE_PID=$!
 
@@ -87,7 +119,11 @@ pushd "$rootfs" >/dev/null
 # Do not exit on failure now from here on because we want the complete cleanup
 set +e
 
-sitl_command="\"$sitl_bin\" $no_pxh \"$build_path\"/etc"
+# -i is what makes px4_instance non-zero inside rcS (px4-alias.sh_in takes it as
+# $1), and that is what offsets the simulator TCP port and every MAVLink UDP
+# port. Without it PX4 would boot as instance 0 and listen on 4560 no matter
+# what the bridge was told.
+sitl_command="\"$sitl_bin\" -i $instance $no_pxh \"$build_path\"/etc"
 
 echo SITL COMMAND: $sitl_command
 

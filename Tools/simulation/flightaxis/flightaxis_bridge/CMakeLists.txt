@@ -48,6 +48,7 @@ add_executable(flightaxis_bridge
 	src/fa_communicator.cpp
 	src/vehicle_state.cpp
 	src/geo_mag_declination.cpp
+	src/battery_link.cpp
 	)
 
 target_include_directories(flightaxis_bridge

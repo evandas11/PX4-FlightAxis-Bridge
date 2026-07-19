@@ -55,6 +55,22 @@
 FA_AIRFRAMES='1200_flightaxis_plane 1201_flightaxis_quad 1202_flightaxis_quadplane 1203_flightaxis_heli'
 FA_MODELS='plane quad quadplane heli'
 
+# The HITL airframes. Same ids, so SYS_AUTOSTART 1200 means "FlightAxis plane"
+# whether the firmware is SITL or on a board; the ".hil" suffix is a real
+# parser-recognised extension (srcparser.py) and the two ROMFS trees are
+# separate, so there is no collision. A board boots from init.d, never
+# init.d-posix, which is why these cannot simply be the same files.
+FA_HIL_AIRFRAMES='1200_flightaxis_plane.hil 1201_flightaxis_quad.hil 1202_flightaxis_quadplane.hil 1203_flightaxis_heli.hil'
+
+# Anchor for the HITL splice. Deliberately anchored rather than sorted-inserted,
+# which is what the init.d-posix splice does: this list is one big
+# px4_add_romfs_files() with if(CONFIG_*) guards INSIDE it, and the .hil
+# airframes must land inside the CONFIG_MODULES_SIMULATION_PWM_OUT_SIM guard
+# next to PX4's own 1001/1002/110x HIL airframes. A sorted insert would put them
+# before the first id above 1203, which is inside the MC_RATE_CONTROL guard -
+# the wrong block entirely, and it would silently change when they ship.
+FA_HIL_ANCHOR='1103_standard_vtol_sih.hil'
+
 # The highest id we own. The splicer inserts our block before the first list
 # entry above this, so a user's 1204 entry sorts after ours and stays put.
 FA_MAX_ID=1203
@@ -69,6 +85,20 @@ for _fa_a in $FA_AIRFRAMES; do
 done
 FA_ENTRY_RE="^[[:space:]]*($_fa_alt)[[:space:]]*\$"
 unset _fa_alt _fa_a
+
+# The same, for the HITL entries. Built the same way and for the same reason:
+# an exact alternation of the four names, never an id range, so a user-authored
+# 1204_flightaxis_cessna.hil is never matched, moved or deleted by us.
+# NOTE the '.' in each name is escaped - unescaped, "1200_flightaxis_plane.hil"
+# as an ERE also matches "1200_flightaxis_planeXhil", and this regex drives a
+# DELETE path in the uninstaller.
+_fa_halt=''
+for _fa_a in $FA_HIL_AIRFRAMES; do
+	_fa_esc="$(printf '%s\n' "$_fa_a" | sed 's/\./[.]/g')"
+	if [ -z "$_fa_halt" ]; then _fa_halt="$_fa_esc"; else _fa_halt="$_fa_halt|$_fa_esc"; fi
+done
+FA_HIL_ENTRY_RE="^[[:space:]]*($_fa_halt)[[:space:]]*\$"
+unset _fa_halt _fa_a _fa_esc
 
 # fa_payload_files — the install manifest, one PX4-relative path per line.
 #
@@ -102,6 +132,10 @@ fa_payload_files() {
 	printf 'src/modules/simulation/simulator_mavlink/sitl_targets_flightaxis.cmake\n'
 	for _fa_a in $FA_AIRFRAMES; do
 		printf 'ROMFS/px4fmu_common/init.d-posix/airframes/%s\n' "$_fa_a"
+	done
+	# HITL airframes live in init.d (a real board never reads init.d-posix).
+	for _fa_a in $FA_HIL_AIRFRAMES; do
+		printf 'ROMFS/px4fmu_common/init.d/airframes/%s\n' "$_fa_a"
 	done
 }
 
@@ -218,6 +252,100 @@ fa_has_include() {
 fa_strip_include() {
 	# fa_strip_include FILE INCLUDE_LINE
 	_fa_include_awk strip "$1" "$2"
+}
+
+fa_splice_hil_airframes() {
+	# fa_splice_hil_airframes FILE "AIRFRAME AIRFRAME ..."
+	#
+	# Register the HITL airframes in init.d/airframes/CMakeLists.txt.
+	#
+	# Anchored, not sorted-inserted -- see FA_HIL_ANCHOR for why. Drops any
+	# existing entry of ours first, wherever it sits, then re-inserts the whole
+	# set immediately after the anchor line, copying the anchor's own
+	# indentation so the result matches its neighbours on a tab- or
+	# space-indented tree alike.
+	#
+	# Emits NO blank separator, deliberately. fa_strip_hil_airframes is then an
+	# exact inverse -- "delete our four lines" -- with none of the
+	# blank-line-ownership subtlety the init.d-posix pair has to carry, so the
+	# install/uninstall round-trip reproduces the original bytes exactly.
+	#
+	# Exit 3 = anchor not found.
+	awk -v airframes="$2" -v entry_re="$FA_HIL_ENTRY_RE" -v anchor="$FA_HIL_ANCHOR" '
+		function emit(l, e) { print l e }
+		BEGIN { inlist = 0; done = 0 }
+		{
+			line = $0; cr = ""
+			if (line ~ /\r$/) { cr = "\r"; sub(/\r$/, "", line) }
+
+			if (!inlist) {
+				# EVERY list is eligible, and the match allows leading
+				# whitespace. This file is not one list: it is a top-level
+				# px4_add_romfs_files() followed by a series of
+				# if(CONFIG_*)/endif() blocks, each wrapping its OWN
+				# TAB-INDENTED px4_add_romfs_files(). Anchoring the match at
+				# column 0 and latching after the first list -- which is what
+				# the init.d-posix splicer does, correctly, for its own file --
+				# means the PWM_OUT_SIM list is never entered and the anchor is
+				# never found. Traversing them all is safe here because the
+				# anchor line is unique.
+				if (line ~ /^[ \t]*px4_add_romfs_files\(/) { inlist = 1 }
+				emit(line, cr); next
+			}
+			# A ")" as the first non-blank character closes the current list.
+			# endif() does not match (it starts with "e").
+			if (line ~ /^[ \t]*\)/) { inlist = 0; emit(line, cr); next }
+
+			# Drop entries we own, wherever they currently are. Doing this
+			# before the anchor test is what makes a re-run a no-op and lets a
+			# half-applied tree converge.
+			if (line ~ entry_re) { next }
+
+			emit(line, cr)
+
+			# Insert directly after the anchor, matching its indentation.
+			if (!done) {
+				bare = line
+				sub(/^[ \t]*/, "", bare)
+				sub(/[ \t]*$/, "", bare)
+				if (bare == anchor) {
+					indent = line
+					sub(/[^ \t].*$/, "", indent)
+					na = split(airframes, a, " ")
+					for (i = 1; i <= na; i++) { emit(indent a[i], cr) }
+					done = 1
+				}
+			}
+			next
+		}
+		END { exit (done ? 0 : 3) }
+	' "$1"
+}
+
+fa_strip_hil_airframes() {
+	# fa_strip_hil_airframes FILE
+	#
+	# Exact inverse of fa_splice_hil_airframes: delete our four entries from
+	# inside the px4_add_romfs_files() list and nothing else. No blank-line
+	# handling, because the splice emits no blank.
+	awk -v entry_re="$FA_HIL_ENTRY_RE" '
+		function emit(l, e) { print l e }
+		BEGIN { inlist = 0 }
+		{
+			line = $0; cr = ""
+			if (line ~ /\r$/) { cr = "\r"; sub(/\r$/, "", line) }
+
+			if (!inlist) {
+				# Must mirror the traversal in fa_splice_hil_airframes
+				# exactly, or uninstall cannot reach what install wrote.
+				if (line ~ /^[ \t]*px4_add_romfs_files\(/) { inlist = 1 }
+				emit(line, cr); next
+			}
+			if (line ~ /^[ \t]*\)/) { inlist = 0; emit(line, cr); next }
+			if (line ~ entry_re) { next }
+			emit(line, cr)
+		}
+	' "$1"
 }
 
 fa_strip_airframes() {
