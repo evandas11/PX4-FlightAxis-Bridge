@@ -78,53 +78,96 @@ param set-default COM_RC_IN_MODE 4
 param set-default COM_DISARM_PRFLT -1
 
 #
-# SWASH DEMIX NORMALISATION (handled in the bridge - nothing to do here).
+# WHO DOES THE SWASH MIXING: PX4 DOES, AND ONLY PX4.
 #
-# flightaxis_bridge.cpp buildChannels() converts each bipolar swash servo with
-# out = (v+1)/2 and only THEN runs HeliDemix on those already-remapped values.
-# Substituting ch_i = (s_i+1)/2 into roll=s1-s2 and pitch=(s1+s2)/2-s3 halves
-# both, so the raw demix arrives at gain 0.866 on roll and 0.750 on pitch where
-# RealFlight wants 0.5 about the 0.5 centre. Left alone that would over-drive
-# roll by 1.732x and pitch by 1.500x, saturating the RealFlight cyclic at only
-# +-0.577 of commanded roll torque and +-0.667 of pitch.
+# A collective-pitch heli needs exactly one CCPM mix between the pilot's
+# roll/pitch/collective and the three swash servos. It can live in PX4's
+# allocator, in the bridge, or in the RealFlight model - but in EXACTLY ONE of
+# them. Two mixes in series do not cancel; they compose, and roll and pitch
+# cross-couple.
 #
-# The bridge now divides both back out - flightaxis_bridge.cpp:314-318 defines
-# HELI_ROLL_GAIN 1.732 and HELI_PITCH_GAIN 1.500 and applies them as divisors,
-# giving 0.866/1.732 = 0.750/1.500 = exactly 0.5 on both axes. So the cyclic is
-# 1:1: a full-scale roll or pitch command reaches RealFlight 1.0, and the
-# constrain() on lines 321-322 clips a saturating command cleanly rather than
-# wrapping. Collective is (s1+s2+s3)/3, already exactly 0.5, and is deliberately
-# left undivided.
+# This airframe puts it in PX4. The allocator below (CA_AIRFRAME 11 with the
+# CA_SP0_* geometry) turns roll/pitch/collective into three swash SERVO
+# POSITIONS, and the bridge passes those three numbers to RealFlight
+# completely untouched: heli.json is a pure identity map and HeliDemix is NOT
+# in its Options. RealFlight channel N carries PX4 servo N, literally.
+#
+# SO THE REALFLIGHT MODEL MUST BE NON-MIXED / DIRECT-SERVO - see the "REQUIRED
+# CHANGES TO THE REALFLIGHT MODEL" section below. Each RF channel is wired
+# straight through to the matching PWM channel, exactly the way the fixed-wing
+# airframes here put ail/ele/thr/rud on ch1-4. This is also what ArduPilot does
+# by default: SIM_FlightAxis.cpp:129-130 only enables its own demix when the
+# frame name contains the substring "helidemix", so a plain ArduPilot RealFlight
+# heli likewise ships raw swash positions with channel N = channel N.
+#
+# IF YOUR MODEL'S CCPM CANNOT BE TURNED OFF, put the mix in the bridge instead:
+# add "HeliDemix" to Options in heli.json (its bitmask goes 9 -> 13). The bridge
+# then inverts the allocator's swash mix back into the roll/pitch/collective
+# triple such a model expects. That path is fully supported and its gain
+# normalisation (the 1.732 and 1.500 divisors in buildChannels(), which are ours
+# and have no ArduPilot equivalent) is documented in heli.json's DemixComment.
+# It is simply not the right default for a model you can wire directly.
 #
 # CONSEQUENCES FOR THIS FILE:
+#  - With the demix off there is NO bridge-side gain constant in the heli path
+#    at all. The only thing shaping the roll/pitch axes is the swash geometry in
+#    CA_SP0_ANG* below, which is what shapes them on a real 120-degree head too.
 #  - Do NOT detune the rate gains below to compensate for cyclic scaling. There
-#    is nothing left to compensate; the axes are 1:1 and roll is no longer hot
-#    relative to pitch. (This is why they were never detuned in the first place:
-#    hiding a scaling error in control gains would have left them wrong exactly
-#    now, when the scaling was fixed.)
-#  - The 1.732 and 1.500 constants are NOT universal - they are derived from the
-#    CA_SP0_ANG* geometry set below being 300/60/180. Changing those angles
-#    changes the raw demix gains and silently invalidates the bridge constants,
-#    breaking the decoupling in both files at once. Change neither alone.
+#    is nothing to compensate: nothing rescales the cyclic anywhere. (This is
+#    why they were never detuned in the first place - hiding a scaling factor in
+#    control gains would have left them wrong exactly now, when the scaling was
+#    removed.)
 #
 
 # Actuator geometry (QGC Actuators tab) MUST match the "px4" output indices
 # in Tools/simulation/flightaxis/flightaxis_bridge/models/heli.json.
 #
-# CA_AIRFRAME 11 is "Helicopter (tail Servo)". ControlAllocator.cpp:260 gives
-# ActuatorEffectivenessHelicopter a tail of ActuatorType::SERVOS, and
-# getEffectivenessMatrix() adds actuators in the order
-#   main rotor (MOTORS), tail (SERVOS here), then CA_SP0_COUNT swash SERVOS
-# so the output functions are Motor1=101 for the rotor and Servo1..Servo4 =
-# 201..204 for tail, swash1, swash2, swash3. HIL_ACT_FUNC<N> lands on
-# HIL_ACTUATOR_CONTROLS.controls[N-1] -- exactly as PWM_MAIN_FUNC<N> does in
-# SITL -- so the assignments below produce:
+# DESIGN RULE: heli.json is a pure IDENTITY map - its "rf" and "px4" columns are
+# the same number, so PX4 output channel N is RealFlight channel N. THE CHANNEL
+# ORDERING LIVES HERE, in the HIL_ACT_FUNC* assignments below, exactly as
+# ArduPilot puts it in SERVOn_FUNCTION and as PX4's own gz bridge puts it in
+# SIM_GZ_*_FUNC*. If the order is wrong, renumber the FUNCs; do NOT re-scramble
+# the JSON.
 #
-#   controls[0] = 101 Motor 1     main rotor / RSC    [0,1]  -> heli.json rf4
-#   controls[1] = 201 Servo 1     yaw tail servo      [-1,1] -> heli.json rf3
-#   controls[2] = 202 Servo 2     swash plate servo 1 [-1,1] -> heli.json rf0
-#   controls[3] = 203 Servo 3     swash plate servo 2 [-1,1] -> heli.json rf1
-#   controls[4] = 204 Servo 4     swash plate servo 3 [-1,1] -> heli.json rf2
+# Two numberings must be kept apart:
+#
+#  1. The ALLOCATOR's internal numbering. This is a property of CA_AIRFRAME and
+#     is NOT affected by anything below. CA_AIRFRAME 11 is "Helicopter (tail
+#     Servo)": ControlAllocator.cpp:260 gives ActuatorEffectivenessHelicopter a
+#     tail of ActuatorType::SERVOS, and getEffectivenessMatrix() adds actuators
+#     in the order
+#       main rotor (MOTORS), tail (SERVOS here), then CA_SP0_COUNT swash SERVOS
+#     so the output functions are always Motor1=101 for the rotor and
+#     Servo1..Servo4 = 201..204 for tail, swash1, swash2, swash3.
+#
+#  2. The controls[] POSITIONS, which we choose. HIL_ACT_FUNC<N> lands on
+#     HIL_ACTUATOR_CONTROLS.controls[N-1] -- exactly as PWM_MAIN_FUNC<N> does in
+#     SITL -- so the assignments below are free to put any function at any index,
+#     and they are picked to reproduce ARDUPILOT'S heli channel order, so that a
+#     RealFlight heli model already set up for an ArduPilot pilot flies here
+#     with no re-mapping:
+#
+#   controls[0] = 202 Servo 2     swash plate servo 1 [-1,1] -> heli.json rf0
+#   controls[1] = 203 Servo 3     swash plate servo 2 [-1,1] -> heli.json rf1
+#   controls[2] = 204 Servo 4     swash plate servo 3 [-1,1] -> heli.json rf2
+#   controls[3] = 201 Servo 1     yaw tail servo      [-1,1] -> heli.json rf3
+#   controls[7] = 101 Motor 1     main rotor / RSC    [0,1]  -> heli.json rf7
+#
+# ARDUPILOT GROUND TRUTH for that order (all paths under libraries/):
+#   AP_Motors/AP_MotorsHeli_Swash.cpp:201-202  swash servos 1-3 default to
+#       SERVO1/2/3 via set_aux_channel_default(); the functions are
+#       k_motor1/2/3 = 33/34/35 (SRV_Channel/SRV_Channel.h:82-84).
+#   AP_Motors/AP_MotorsHeli_Single.cpp:207     add_motor_num(CH_4) puts the tail
+#       rotor / yaw on SERVO4, k_motor4 = 36.
+#   AP_Motors/AP_MotorsHeli.h:34               "#define AP_MOTORS_HELI_RSC CH_8"
+#       puts the rotor speed controller on SERVO8, k_heli_rsc = 31
+#       (SRV_Channel.h:80). Applied at AP_MotorsHeli_RSC.cpp:231-236.
+#   SITL/SIM_FlightAxis.cpp:330-332            output channel N is shipped as
+#       RealFlight channel N, unpermuted.
+# so ArduPilot's RealFlight heli is rf0-2 swash, rf3 yaw, rf7 throttle, with
+# rf4-6 idle. That is exactly the layout set below. NOTE the main rotor used to
+# sit on controls[4]/rf4 here; it was moved to controls[7]/rf7 for this reason,
+# and heli.json moved with it. The map stays a pure identity either way.
 #
 # WHY NOT CA_AIRFRAME 10 ("tail ESC"), which this airframe used to select:
 # under type 10 the tail is a MOTOR, and ControlAllocator.cpp:501-513 clamps
@@ -138,47 +181,81 @@ param set-default COM_DISARM_PRFLT -1
 #
 #   the tail is [-1,1] and heli.json MUST scale rf3 "bipolar" with disarm 0.5.
 #
-# If you do fly a model with a real electric tail motor, set CA_AIRFRAME 10,
-# renumber HIL_ACT_FUNC2..5 to 102/201/202/203 (the swash shifts down one
-# servo index because the tail no longer consumes Servo1), and change heli.json
-# rf3 back to "unipolar" with disarm 0.0. The controls[] indices are unchanged
-# by that swap, so only rf3's scaling differs in the JSON.
+# If you do fly a model with a real electric tail motor, set CA_AIRFRAME 10 and
+# renumber. Under type 10 the tail is a MOTOR, so the allocator's internal
+# numbering shifts: the tail becomes Motor2 = 102 (it is added second, still
+# ahead of the swash), and the swash servos move down one index to Servo1..Servo3
+# = 201/202/203 because the tail no longer consumes Servo1. The main rotor stays
+# Motor1 = 101. To keep the identity layout (swash on controls[0..2], tail on
+# controls[3], main rotor on controls[7]) the FUNCs become:
+#
+#   param set-default HIL_ACT_FUNC1 201   # Servo1 swash plate servo 1 -> rf0
+#   param set-default HIL_ACT_FUNC2 202   # Servo2 swash plate servo 2 -> rf1
+#   param set-default HIL_ACT_FUNC3 203   # Servo3 swash plate servo 3 -> rf2
+#   param set-default HIL_ACT_FUNC4 102   # Motor2 tail motor          -> rf3
+#   param set-default HIL_ACT_FUNC8 101   # Motor1 main rotor / RSC    -> rf7
+#
+# i.e. only FUNC1..4 change (204/201 drop out, 102 comes in); FUNC8 is already
+# 101 and stays. Also change heli.json rf3 back to "unipolar" with disarm 0.0,
+# since the tail is then a [0,1] motor. Nothing else in the JSON moves - it
+# stays identity.
 param set-default CA_AIRFRAME 11
 
-param set-default HIL_ACT_FUNC1 101
-param set-default HIL_ACT_FUNC2 201
-param set-default HIL_ACT_FUNC3 202
-param set-default HIL_ACT_FUNC4 203
-param set-default HIL_ACT_FUNC5 204
+param set-default HIL_ACT_FUNC1 202
+param set-default HIL_ACT_FUNC2 203
+param set-default HIL_ACT_FUNC3 204
+param set-default HIL_ACT_FUNC4 201
+# 5-7 deliberately disabled: ArduPilot leaves the same RealFlight channels idle
+# on a single-rotor heli (CH_7 is its external-gyro-gain / tail-RSC slot, which
+# a PX4-flown model must not have). heli.json leaves rf4-6 unmapped to match.
+param set-default HIL_ACT_FUNC5 0
+param set-default HIL_ACT_FUNC6 0
+param set-default HIL_ACT_FUNC7 0
+param set-default HIL_ACT_FUNC8 101
 
 # Swash plate geometry. CA_SP0_ANG<i> is measured clockwise seen from above,
 # 0 = forward (+X). ActuatorEffectivenessHelicopter.cpp:179-185 drives each
 # servo with
 #   servo_i = collective + pitch*cos(ang_i)*arm_i - roll*sin(ang_i)*arm_i
-# and the bridge's HeliDemix inverts that as roll=s1-s2,
-# pitch=(s1+s2)/2-s3, col=(s1+s2+s3)/3. That inverse is only exact when
-# servos 1 and 2 are mirrored about the X axis and servo 3 sits on it.
-# The PX4 defaults (0/140/220) put the mirrored pair on servos 2 and 3, so a
-# pure pitch command leaks 1.766 into the demixed roll and a pure roll command
-# leaks -0.964 into pitch. With 300/60/180 (still a standard 120-degree head,
-# just with the odd servo aft) the demix is exactly diagonal:
-#   roll -> 1.732*roll,  pitch -> 1.5*pitch,  collective -> collective
-# with no cross terms and no sign inversion on any axis. Mirroring the set
-# (120/240/0) also decouples but inverts roll and pitch, so do not use it.
+#
+# NOW THAT PX4 IS THE ONLY MIXER, THESE ANGLES ARE A CLAIM ABOUT THE PHYSICAL
+# SWASHPLATE OF YOUR REALFLIGHT MODEL, nothing more. Servo i must actually sit
+# at ang_i on the model's swash, because the number PX4 computes for servo i is
+# delivered to that servo unmodified. They no longer have to satisfy any
+# invertibility condition - the bridge does not invert anything any more - so
+# the only question is whether they match the head you are flying.
+#
+# 300/60/180 is a standard 120-degree head with the odd servo AFT, and is kept
+# because it is the geometry ArduPilot's own heli defaults to
+# (AP_MotorsHeli_Swash.cpp:147-154, add_servo_angle at -60/+60/180), so a
+# RealFlight model already set up for ArduPilot needs no change. The PX4
+# firmware defaults (0/140/220) describe a different head - odd servo FORWARD -
+# and would drive an aft-servo swash wrongly on both cyclic axes.
+#
+# If your model's third servo is at the FRONT rather than the rear, use
+# 120/240/0. Getting this set wrong does not produce a subtle trim error; it
+# rotates the cyclic response, so the aircraft banks when commanded to pitch.
+# Verify it against the model in RealFlight's aircraft editor.
 param set-default CA_SP0_COUNT 3
 param set-default CA_SP0_ANG0 300
 param set-default CA_SP0_ANG1 60
 param set-default CA_SP0_ANG2 180
 
-# The demix inverse assumes all three arms are equal; pin them so a stray
-# QGC edit cannot silently break the decoupling above.
+# Equal arm lengths, the right model for a symmetric head. Pinned so a stray
+# QGC edit cannot silently skew the cyclic; change only to match a model whose
+# servo arms genuinely differ.
 param set-default CA_SP0_ARM_L0 1.0
 param set-default CA_SP0_ARM_L1 1.0
 param set-default CA_SP0_ARM_L2 1.0
 
-# Must stay 0. Any non-zero value enables getLinearServoOutput()'s asin()
-# linearisation per servo, which makes the swash mapping non-linear and breaks
-# the linear demix in the bridge.
+# Left at 0 = no linearisation. Any non-zero value enables
+# getLinearServoOutput()'s asin() correction per servo, which pre-compensates
+# the geometric non-linearity of a real servo arm and pushrod. That correction
+# is only right if it matches the linkage geometry the RealFlight model
+# actually simulates, and a mismatched one is worse than none, so it stays off
+# unless you have measured the model's throw. (It previously had to be 0 for a
+# second reason - the bridge's linear demix assumed a linear swash - which no
+# longer applies now that the demix is off.)
 param set-default CA_MAX_SVO_THROW 0
 
 # Throttle curve: flat 100%. A RealFlight heli runs a constant head speed and
@@ -190,7 +267,10 @@ param set-default CA_HELI_THR_C2 1.0
 param set-default CA_HELI_THR_C3 1.0
 param set-default CA_HELI_THR_C4 1.0
 
-# Collective pitch curve. The bridge sends (collective+1)/2 to RealFlight, so
+# Collective pitch curve. Collective enters all three swash servos as a common
+# additive term, and the bridge's bipolar scaling sends each servo as (v+1)/2,
+# so a collective of c lands on RealFlight as (c+1)/2 plus the cyclic part -
+# i.e. gain 0.5, unchanged by the demix being off. On that scale
 # the PX4 default curve [-0.05 .. 0.45] only ever spans RealFlight 0.475..0.725
 # - a quarter of the model's collective travel, with hover already near the top
 # and almost no climb authority left. This linear curve spans -0.10..0.70,
@@ -237,10 +317,18 @@ param set-default CA_HELI_YAW_CCW 0
 #     independent yaw controller that will fight PX4's yaw loop and produce a
 #     slow yaw oscillation that no amount of MC_YAWRATE_* tuning fixes. Set the
 #     tail gyro to zero gain (or plain rate mode at minimum gain).
-#  2. Swashplate mixing (CCPM / eCCPM). The bridge already sends demixed
-#     roll / pitch / collective, so the model must be set to a NON-mixed head,
-#     with its three cyclic inputs taken straight from those channels. If the
-#     model re-mixes them, roll and pitch cross-couple.
+#  2. Swashplate mixing (CCPM / eCCPM). TURN IT OFF. PX4 has already done the
+#     CCPM mix - what arrives on rf0/rf1/rf2 is three finished SERVO POSITIONS,
+#     not roll/pitch/collective - so the model must be a NON-mixed, direct-servo
+#     head with each swash servo driven straight from its own channel. Map the
+#     channels one-to-one in the aircraft editor, the same way you would wire a
+#     fixed-wing model's ail/ele/thr/rud to ch1-4. If the model mixes as well,
+#     its CCPM composes with PX4's instead of cancelling it and roll and pitch
+#     cross-couple badly.
+#     If, and only if, the model has a CCPM head whose mixing cannot be
+#     disabled, move the mix to the bridge instead by adding "HeliDemix" to
+#     Options in heli.json - see the "WHO DOES THE SWASH MIXING" section above.
+#     Never enable both.
 #  3. Collective and throttle curves in the model. Flatten them - PX4 owns both
 #     via CA_HELI_PITCH_C* and CA_HELI_THR_C* above, and a second curve in the
 #     model composes with PX4's and destroys the linearity the allocator assumes.
@@ -248,9 +336,18 @@ param set-default CA_HELI_YAW_CCW 0
 #  5. Governor / RSC: leave the model's governor ON if it has one - PX4 holds
 #     the throttle channel at a constant 100% and expects constant head speed.
 #
-# Channel usage after HeliDemix (matches heli.json rf indices):
-#   rf0 = roll cyclic, rf1 = pitch cyclic, rf2 = collective,
-#   rf3 = tail rotor pitch, rf4 = main rotor throttle / RSC.
+# Channel usage (matches heli.json rf indices). These are SERVO POSITIONS on
+# the three swash channels, not axis commands - there is no channel that is
+# "the roll channel" any more, because every cyclic input is spread across all
+# three by the CCPM mix PX4 performs:
+#   rf0 = swash servo 1 (at CA_SP0_ANG0 = 300 deg),
+#   rf1 = swash servo 2 (at CA_SP0_ANG1 =  60 deg),
+#   rf2 = swash servo 3 (at CA_SP0_ANG2 = 180 deg),
+#   rf3 = tail rotor pitch, rf7 = main rotor throttle / RSC.
+#   rf4, rf5, rf6 are unused and idle at 0.5.
+# (With HeliDemix enabled instead, rf0-2 revert to roll / pitch / collective.)
+# This is ArduPilot's own RealFlight heli channel order (see the ground-truth
+# citations above), so a model configured for ArduPilot needs no re-mapping.
 # Reverse the channel in RealFlight (not here) if an axis responds backwards.
 
 # Rate controller. 16001_helicopter ships P=I=D=0 with FF only, but its own
