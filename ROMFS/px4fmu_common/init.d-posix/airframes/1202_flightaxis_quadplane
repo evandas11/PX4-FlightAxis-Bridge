@@ -32,7 +32,7 @@ param set-default SDLOG_MODE 4
 #
 # If the bridge cannot open that socket it says so and PX4 is left with no
 # battery: set this back to 1 in that case.
-param set-default SIM_BAT_ENABLE 0
+param set SIM_BAT_ENABLE 0
 
 # Only IMU instance 0 is ever supplied: the bridge sends HIL_SENSOR with id = 0,
 # so SimulatorMavlink only ever fills _px4_accel[0]/_px4_gyro[0]. px4-rc.mavlinksim
@@ -93,7 +93,12 @@ param set-default COM_RC_IN_MODE 4
 # message, so acting on it means acting on a number PX4 never received. Set to
 # None. Low-battery protection is unaffected - BAT_LOW_THR, BAT_CRIT_THR and
 # BAT_EMERGEN_THR all act on "remaining", which the bridge does supply.
-param set-default COM_FLTT_LOW_ACT 0
+# Forced with "param set", not set-default: a value saved from an earlier
+# session would otherwise win and bring the RTL straight back. The same
+# applies to SIM_BAT_ENABLE above - two battery publishers fighting is worse
+# than either alone. Both are requirements of this integration rather than
+# preferences, so they are not left to whatever is in parameters.bson.
+param set COM_FLTT_LOW_ACT 0
 
 # Negative disables the pre-takeoff auto-disarm. rc.vtol_defaults does not set
 # it, so this would inherit the 10 s firmware default (commander_params.c:225)
