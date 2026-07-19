@@ -53,6 +53,32 @@ static constexpr double EARTH_RADIUS_M = 6371000.0;
 static constexpr double DEG2RAD = M_PI / 180.0;
 static constexpr double RAD2DEG = 180.0 / M_PI;
 
+/*
+ * This file defines no constrain() of its own, so every call below used to
+ * resolve to the `const Scalar &constrain(const Scalar&, ...)` TEMPLATE that
+ * geo_mag_declination.h happens to bring in for the magnetics. That is
+ * accidental coupling - the magnetics header is a byte-identical third-party
+ * copy and is not this file's utility library - and it behaves differently:
+ * being a comparison chain that returns a reference, it propagates NaN
+ * unchanged. getDistanceSensorMsg() then casts the result to uint16_t, which
+ * is undefined behaviour, and is safe today only because a guard in a
+ * different file (rangefinderValid(), checked by px4_communicator.cpp) gates
+ * the call. A non-template overload on double is an exact match and so wins
+ * over the template for every call here, restoring local ownership.
+ */
+static double constrain(double v, double lo, double hi)
+{
+	return (v < lo) ? lo : ((v > hi) ? hi : v);
+}
+
+// ISA pressure in hPa at geodetic altitude h. Used both for the running baro
+// in setFAData() and for the constructor's initial value, which MUST use the
+// same datum - see the note in the constructor.
+static double isaPressureHpa(double h_m)
+{
+	return 101325.0 * std::pow(1.0 - 2.25577e-5 * h_m, 5.25588) / 100.0;
+}
+
 VehicleState::VehicleState(double home_lat_deg, double home_lon_deg, double home_alt_m) :
 	rpm(0.0),
 	home_lat(home_lat_deg),
@@ -71,7 +97,14 @@ VehicleState::VehicleState(double home_lat_deg, double home_lon_deg, double home
 	have_last_velocity(false),
 	mag_body(Vector3d::Zero()),
 	temperature(25.0),
-	abs_pressure(1013.25),
+	// These initial values ARE SENT: the bridge's reinject keep-alive calls
+	// Send() before any RealFlight frame has arrived. Sea-level ISA (1013.25)
+	// against a pressure_alt of home_alt therefore put PX4's baro and HIL_GPS
+	// ~480 m apart for the whole pre-injection window at the default 488 m
+	// home. Both must come off the same datum as setFAData(), which derives
+	// them from h = home_alt - position_ned.z(); at startup position_ned is
+	// zero, so h is exactly home_alt.
+	abs_pressure(isaPressureHpa(home_alt_m)),
 	pressure_alt(home_alt_m),
 	diff_pressure(0.0),
 	airspeed_true(0.0),
@@ -151,7 +184,15 @@ void VehicleState::setFAData(const FAState &fa, double dt_true)
 			      fa.m_aircraftPositionX_MTR,
 			      -fa.m_altitudeASL_MTR);
 
-	if (!offset_captured || fa.m_resetButtonHasBeenPressed) {
+	// Re-anchor whenever there is no valid anchor. This is deliberately the
+	// ONLY condition: m_resetButtonHasBeenPressed is NOT checked here, because
+	// this function is unreachable while that flag is set - the bridge's main
+	// loop catches the flag and continue()s long before setFAData() is called
+	// (flightaxis_bridge.cpp, the reinject branch). A `|| resetButtonPressed`
+	// clause here would read as a safety net while being dead code. The bridge
+	// instead calls invalidatePositionOffset() unconditionally on the flag,
+	// which clears offset_captured and lands us here on the next real frame.
+	if (!offset_captured) {
 		resetPositionOffset(fa);
 	}
 
@@ -196,7 +237,7 @@ void VehicleState::setFAData(const FAState &fa, double dt_true)
 	// sits at its own arbitrary ASL and any mismatch shows up to EKF2 as a
 	// constant baro-vs-GPS height disagreement. position_ned is already set.
 	const double h = home_alt - position_ned.z();
-	abs_pressure = 101325.0 * std::pow(1.0 - 2.25577e-5 * h, 5.25588) / 100.0;
+	abs_pressure = isaPressureHpa(h);
 	pressure_alt = h;
 	temperature = 25.0;
 
@@ -272,17 +313,28 @@ void VehicleState::updateGPSMsg()
 	hil_gps_msg.vn = (int16_t)(velocity_ef.x() * 100.0);
 	hil_gps_msg.ve = (int16_t)(velocity_ef.y() * 100.0);
 	hil_gps_msg.vd = (int16_t)(velocity_ef.z() * 100.0);
-	hil_gps_msg.vel = (uint16_t)(std::sqrt(velocity_ef.x() * velocity_ef.x() +
-					       velocity_ef.y() * velocity_ef.y()) * 100.0);
+	const double ground_speed = std::sqrt(velocity_ef.x() * velocity_ef.x() +
+					      velocity_ef.y() * velocity_ef.y());
+	hil_gps_msg.vel = (uint16_t)(ground_speed * 100.0);
 
-	// COG from velocity (NOT RF azimuth)
-	double cog = std::atan2(velocity_ef.y(), velocity_ef.x()) * RAD2DEG;
+	// COG from velocity (NOT RF azimuth). At rest the direction is undefined -
+	// atan2(0,0) is 0, which claims "heading due north" - so report MAVLink's
+	// explicit unknown sentinel (65535), which SimulatorMavlink.cpp:441 maps
+	// to NAN. Cosmetic: sensor_gps.cog_rad has no reader in EKF2 in v1.16
+	// (only GPS drivers and fake_gps write it). Kept because it costs nothing
+	// and the sentinel is what the field is for.
+	if (ground_speed < 0.1) {
+		hil_gps_msg.cog = 65535;
 
-	if (cog < 0) {
-		cog += 360.0;
+	} else {
+		double cog = std::atan2(velocity_ef.y(), velocity_ef.x()) * RAD2DEG;
+
+		if (cog < 0) {
+			cog += 360.0;
+		}
+
+		hil_gps_msg.cog = (uint16_t)(cog * 100.0);
 	}
-
-	hil_gps_msg.cog = (uint16_t)(cog * 100.0);
 	hil_gps_msg.satellites_visible = 10;
 }
 
@@ -361,11 +413,43 @@ mavlink_distance_sensor_t VehicleState::getDistanceSensorMsg(int offset_us)
 	msg.time_boot_ms = (uint32_t)((time_usec + offset_us) / 1000);
 	msg.min_distance = (uint16_t)(min_m * 100.0);
 	msg.max_distance = (uint16_t)(max_m * 100.0);
-	msg.current_distance = (uint16_t)(constrain(rangefinder_m, min_m, max_m) * 100.0);
+	/*
+	 * Out of range must be SIGNALLED, not clamped.
+	 *
+	 * EKF2's validity test is inclusive - SensorRangeFinder::isDataInRange()
+	 * is `rng >= min && rng <= max` (sensor_range_finder.cpp:117) - so a
+	 * reading clamped to exactly max_m is ACCEPTED as a real measurement. In
+	 * cruise that hands FixedwingPositionControl.cpp:3069-3071 a landing-flare
+	 * terrain estimate pinned 40 m below the aircraft, which then jumps as the
+	 * aircraft descends through 40 m; it also reaches mission_block.cpp:1002
+	 * and the hover-thrust estimator. Reporting max + 1 m instead falls
+	 * outside the inclusive bound and is rejected properly.
+	 *
+	 * rangefinder_m is also NAN when the vehicle is inverted. px4_communicator
+	 * gates this call on rangefinderValid(), but a float->uint16_t cast of NaN
+	 * is undefined behaviour, so do not depend on a guard in another file for
+	 * well-definedness: handle it here too, as out-of-range.
+	 */
+	const double out_of_range_m = max_m + 1.0;
+	double d;
+
+	if (!std::isfinite(rangefinder_m) || rangefinder_m > max_m) {
+		d = out_of_range_m;
+
+	} else {
+		d = constrain(rangefinder_m, min_m, max_m);
+	}
+
+	msg.current_distance = (uint16_t)(d * 100.0);
 	msg.type = MAV_DISTANCE_SENSOR_LASER;
 	msg.id = 0;
 	msg.orientation = MAV_SENSOR_ROTATION_PITCH_270;	// downward facing
-	msg.covariance = 0;					// unknown
+	// UINT8_MAX is MAVLink's "unknown" sentinel. NOT 0: PX4 computes
+	// distance_sensor.variance = covariance * 1e-4 (SimulatorMavlink.cpp:1494),
+	// so 0 asserts a PERFECT sensor with zero variance rather than an unknown
+	// one. Low impact today because EKF2 uses EKF2_RNG_NOISE instead, but the
+	// value was simply wrong under a comment claiming otherwise.
+	msg.covariance = UINT8_MAX;				// unknown
 	msg.signal_quality = 100;
 
 	return msg;

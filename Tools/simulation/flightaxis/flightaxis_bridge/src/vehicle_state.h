@@ -98,8 +98,24 @@ public:
 	//
 	// The setter clamps monotonically. The main loop is already designed to
 	// keep time_now_us monotonic across a RealFlight restart and a glitch
-	// swallow, so this is a belt-and-braces guard: a backwards HIL timestamp
-	// faults EKF2, and a stalled one merely looks like a paused simulator.
+	// swallow, so this is a belt-and-braces guard.
+	//
+	// What a backwards timestamp costs depends on the target, and the SITL
+	// answer is NOT the obvious one:
+	//  - HITL: the board's mavlink_receiver stamps the sensor topics with the
+	//    time we send, so a backwards timestamp does fault EKF2.
+	//  - SITL: it does not reach the estimator at all. SimulatorMavlink
+	//    timestamps everything with its own hrt_absolute_time() on arrival
+	//    (SimulatorMavlink.cpp:497,512 for HIL_SENSOR, :452 for HIL_GPS,
+	//    :1489 for DISTANCE_SENSOR); the px4_clock_settime() call at :490-494
+	//    is a no-op on a nolockstep build (it resolves to clock_settime() on
+	//    CLOCK_MONOTONIC, which Linux rejects with EINVAL). What matters in
+	//    SITL is the WALL-CLOCK ARRIVAL RATE - see the realtime-factor monitor
+	//    in flightaxis_bridge.cpp.
+	// The clock is still load-bearing in SITL for a different reason: it is
+	// what every send-rate gate in px4_communicator.cpp is measured against,
+	// so a stalled clock silently stops HIL_GPS, the baro/mag sub-rates and
+	// DISTANCE_SENSOR entirely.
 	void setTimeUsec(uint64_t t_us)
 	{
 		if (t_us > time_usec) {

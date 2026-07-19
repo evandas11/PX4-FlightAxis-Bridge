@@ -182,10 +182,31 @@ static double envOrDefault(const char *name, double dflt)
  * Build the 12 RealFlight channel values (0..1) from the latest
  * HIL_ACTUATOR_CONTROLS through the JSON channel map, then apply the
  * Rev4Servos / HeliDemix options (ArduPilot exchange_data() order).
- * channels[] is persistent so disarm=-1 can hold the last output.
+ *
+ * channels[] is PERSISTENT and holds the UNTRANSFORMED per-channel state, so
+ * that disarm=-1 ("hold last output") has something stable to hold. out[] is
+ * what actually goes to RealFlight.
+ *
+ * The two must not be the same array. Applying the option post-passes in place
+ * re-transforms every hold-last channel on every frame, because the held value
+ * that comes back round is already transformed:
+ *  - HeliDemix diverges. Feeding demixed swash values back through the demix
+ *    compounds without bound; measured against the mock, three held channels
+ *    went 0.74/0.28/0.51 -> 0.55/0.40/0.72 -> 0.98/0.70/0.64 on successive
+ *    frames. Neutral is a fixed point, which is why it only shows up on the
+ *    armed->disarmed transition with a non-neutral swash - i.e. every landing.
+ *  - Rev4Servos does not diverge (the swap is its own inverse) but makes a
+ *    hold-last channel PING-PONG between rf i and rf i+4 on alternate frames:
+ *    a full-amplitude servo buzz at the loop rate.
+ * Armed mapped rows happen to be safe (the fresh write dominates) and unmapped
+ * rows are re-seeded from unmapped_default each call, so only hold-last rows
+ * are exposed - which is exactly the case that is silent until someone watches
+ * the servos. Transforming out of a scratch copy makes the post-passes
+ * idempotent across repeated frames, which is what hold-last requires.
  */
 static void buildChannels(const VehicleState &veh, const ChannelMap *maps, int nmaps,
-			  double unmapped_default, uint32_t options, double channels[RF_CHANNELS])
+			  double unmapped_default, uint32_t options, double channels[RF_CHANNELS],
+			  double out[RF_CHANNELS])
 {
 	bool mapped[RF_CHANNELS] = {};
 
@@ -243,27 +264,60 @@ static void buildChannels(const VehicleState &veh, const ChannelMap *maps, int n
 		channels[m.rf] = constrain(out, 0.0, 1.0);
 	}
 
+	// From here on the option post-passes read the untransformed channels[] and
+	// write only out[]; channels[] keeps the hold-last state (see above).
+	memcpy(out, channels, sizeof(double) * RF_CHANNELS);
+
 	if (options & OPT_REV4_SERVOS) {
 		// swap first 4 and last 4 servos, for quadplane RF models
-		double saved[4];
-		memcpy(saved, &channels[0], sizeof(saved));
-		memcpy(&channels[0], &channels[4], sizeof(saved));
-		memcpy(&channels[4], saved, sizeof(saved));
+		memcpy(&out[0], &channels[4], sizeof(double) * 4);
+		memcpy(&out[4], &channels[0], sizeof(double) * 4);
 	}
 
 	if (options & OPT_HELI_DEMIX) {
-		// FlightAxis expects "roll/pitch/collective" input; PX4 outputs swash servos
-		double swash1 = channels[0];
-		double swash2 = channels[1];
-		double swash3 = channels[2];
+		// FlightAxis expects "roll/pitch/collective" input; PX4 outputs swash
+		// servos. Read the swash from out[] so that Rev4Servos, if also set,
+		// still composes in the ArduPilot order - but never from a previous
+		// frame's demixed result.
+		double swash1 = out[0];
+		double swash2 = out[1];
+		double swash3 = out[2];
 
-		double roll_rate  = swash1 - swash2;
-		double pitch_rate = (swash1 + swash2) / 2.0 - swash3;
+		/*
+		 * GAIN NORMALISATION. The raw differences below are not unit-gain, and
+		 * feeding them to RealFlight straight OVER-DRIVES the cyclic.
+		 *
+		 * The swash servos sit at CA_SP0_ANG = 300 / 60 / 180 degrees with
+		 * equal arm lengths (the airframe pins those angles for exactly this
+		 * reason - CHANGING THEM INVALIDATES THE CONSTANTS BELOW). With the
+		 * 0.5 per-servo scale that geometry gives
+		 *   swash1 - swash2               = 2*sin(60) * 0.5 = 0.866 * roll
+		 *   (swash1+swash2)/2 - swash3    = 1.5       * 0.5 = 0.750 * pitch
+		 * Measured through live PX4 output: commanding 3 rad/s at FF 0.1
+		 * (torque 0.3) produced rf0 = 0.7600 and rf1 = 0.7250, i.e. exactly
+		 * 0.866*0.3 + 0.5 and 0.75*0.3 + 0.5.
+		 *
+		 * RealFlight wants a full command to reach 1.0, i.e. a gain of 0.5
+		 * about the 0.5 centre. At 0.866 and 0.75 the cyclic instead saturates
+		 * at only +/-0.577 of roll torque and +/-0.667 of pitch. So divide by
+		 * 0.866/0.5 = sqrt(3) = 1.732 and 0.75/0.5 = 1.5.
+		 *
+		 * NOT by 0.866 and 0.75 - that recovers raw torque and makes it worse
+		 * (a full command would land at 1.5 and clip at half command).
+		 *
+		 * Collective is (s1+s2+s3)/3, which is already exactly gain 0.5 and is
+		 * deliberately left alone.
+		 */
+		const double HELI_ROLL_GAIN  = 1.732;	// sqrt(3)
+		const double HELI_PITCH_GAIN = 1.500;	// 3/2
+
+		double roll_rate  = (swash1 - swash2) / HELI_ROLL_GAIN;
+		double pitch_rate = ((swash1 + swash2) / 2.0 - swash3) / HELI_PITCH_GAIN;
 		double col        = (swash1 + swash2 + swash3) / 3.0;
 
-		channels[0] = constrain(roll_rate + 0.5, 0.0, 1.0);
-		channels[1] = constrain(pitch_rate + 0.5, 0.0, 1.0);
-		channels[2] = constrain(col, 0.0, 1.0);
+		out[0] = constrain(roll_rate + 0.5, 0.0, 1.0);
+		out[1] = constrain(pitch_rate + 0.5, 0.0, 1.0);
+		out[2] = constrain(col, 0.0, 1.0);
 	}
 }
 
@@ -394,6 +448,26 @@ int main(int argc, char **argv)
 				     << " will never enable the HIL streams (and will not tell you)." << endl;
 			}
 
+			// The other classic silent failure, and the one that costs a whole
+			// debugging session: nothing the bridge sends can put PX4 into HIL
+			// mode. MavlinkReceiver gates HIL_SENSOR / HIL_STATE_QUATERNION
+			// (mavlink_receiver.cpp:347) and HIL_GPS (:367) on get_hil_enabled(),
+			// which tracks vehicle_status.hil_state == HIL_STATE_ON. In this PX4
+			// tree that is set ONLY by Commander::enable_hil()
+			// (Commander.cpp:2688), reachable only from `commander start -h`
+			// (Commander.cpp:2681) - which rcS runs only when SYS_HITL > 0
+			// (rcS:451-453). There is no runtime SET_MODE path to it, so the
+			// bridge cannot fix this for you; it can only tell you.
+			//
+			// Without it the board silently DISCARDS HIL_SENSOR and HIL_GPS and
+			// only DISTANCE_SENSOR (handled unconditionally, :207) gets through.
+			cerr << "[flightaxis_bridge] PRECONDITION: the board must have SYS_HITL=1 set"
+			     << " AND HAVE BEEN REBOOTED. Without it PX4 never calls"
+			     << " Commander::enable_hil(), and mavlink_receiver DISCARDS every"
+			     << " HIL_SENSOR and HIL_GPS this bridge sends - silently, with no"
+			     << " error at either end. Check with `param show SYS_HITL` and"
+			     << " `commander status` (expect HIL enabled) on the board." << endl;
+
 			if (getenv("PX4_HITL_STATE_QUAT_BYPASS") != nullptr) {
 				px4.EnableStateQuaternionBypass();
 				cerr << "[flightaxis_bridge] WARNING: HIL_STATE_QUATERNION bypass ENABLED."
@@ -433,19 +507,45 @@ int main(int argc, char **argv)
 
 	const bool reset_position = (options & OPT_RESET_POSITION) != 0;
 
+	// Pump the HEARTBEAT (and drain the PX4 link) while we retry the injection.
+	// This loop is the ONLY thing running before the main loop, and Send() -
+	// the only other heartbeat source - is unreachable from here. PX4 will not
+	// bring a USB MAVLink instance up until it hears from the other end, so
+	// without this, starting the bridge before RealFlight leaves the board-side
+	// link uninitialised for as long as RealFlight takes to appear, with no
+	// diagnostic at either end. No-op in the SITL profile.
 	while (stop == 0 && !fa.startController(reset_position)) {
 		cerr << "[flightaxis_bridge] FlightAxis controller injection failed, retrying ..." << endl;
 		fa.markNeedsRestart();
-		usleep(1000000);
+
+		for (int i = 0; i < 20 && stop == 0 && !px4.LinkLost(); i++) {
+			px4.SendHeartbeat();
+			px4.Recieve(false);
+			usleep(50000);
+		}
+
+		if (px4.LinkLost()) {
+			break;
+		}
+	}
+
+	if (px4.LinkLost()) {
+		cerr << "[flightaxis_bridge] PX4 link died while waiting for RealFlight - exiting" << endl;
+		px4.Clean();
+		delete [] maps;
+		return -1;
 	}
 
 	if (stop == 0) {
 		cerr << "[flightaxis_bridge] controller injected, aircraft reset" << endl;
 	}
 
-	// persistent RealFlight channel values (0..1); start mapped slots at their
-	// disarm value (or neutral) so the first frames are safe
+	// Persistent, UNTRANSFORMED RealFlight channel values (0..1); start mapped
+	// slots at their disarm value (or neutral) so the first frames are safe.
+	// tx_channels[] is the transformed copy that actually goes out - see
+	// buildChannels().
 	double channels[RF_CHANNELS];
+	double tx_channels[RF_CHANNELS];
 
 	for (int i = 0; i < RF_CHANNELS; i++) {
 		channels[i] = constrain(unmapped_default, 0.0, 1.0);
@@ -484,6 +584,41 @@ int main(int argc, char **argv)
 	uint64_t last_socket_frame_counter = 0;
 	double last_frame_count_s = 0.0;
 
+	/*
+	 * REALTIME FACTOR (physics seconds per wall second).
+	 *
+	 * This is the one number that decides whether a SITL run is meaningful,
+	 * because in SITL PX4 THROWS OUR TIMESTAMPS AWAY.
+	 * SimulatorMavlink::handle_message_hil_sensor() does call
+	 * px4_clock_settime(CLOCK_MONOTONIC, imu.time_usec)
+	 * (SimulatorMavlink.cpp:490-494), but on a nolockstep build that macro is
+	 * plain clock_settime() (px4_platform_common/time.h:24 ->
+	 * visibility.h:65), and Linux never allows CLOCK_MONOTONIC to be set - it
+	 * fails with EINVAL, unchecked. What is actually passed to update_sensors()
+	 * is hrt_absolute_time() (:497 and :512), and HIL_GPS (:452) and
+	 * DISTANCE_SENSOR (:1489) timestamp themselves the same way.
+	 *
+	 * So what reaches EKF2 is the WALL-CLOCK ARRIVAL RATE of our messages, not
+	 * the physics time in them. If RealFlight's physics runs at 0.8x, PX4
+	 * integrates the vehicle's motion over 25% more real time than the physics
+	 * actually covered: the aircraft flies in slow motion while every sensor
+	 * value looks perfectly correct, and velocities, accelerations and every
+	 * control loop are scaled wrong. Nothing in the sensor data can reveal it.
+	 *
+	 * Worse, the glitch compensation below actively HIDES this, because it
+	 * smooths the bridge's own exported clock rather than the arrival rate.
+	 *
+	 * This is distinct from the m_currentPhysicsSpeedMultiplier warning below,
+	 * which is RealFlight's SELF-REPORTED setting: this catches the case where
+	 * RealFlight says 1.0 and the machine simply cannot keep up.
+	 */
+	double last_frame_count_wall_s = 0.0;
+	double realtime_factor = 0.0;
+	uint64_t last_rtf_warn_us = 0;
+	// suppress one sample after a keep-alive: the physics clock was paused for
+	// that window on purpose, which is not the fault this is looking for
+	bool rtf_skip_sample = true;
+
 	// ArduPilot report_FPS(): called from BOTH the extrapolation path and the
 	// normal-frame path, otherwise the printed rate drifts
 	auto report_FPS = [&](const FAState &st) {
@@ -491,17 +626,56 @@ int main(int argc, char **argv)
 			return;
 		}
 
+		const uint64_t now_wall_us = micros();
+		const double wall_s = now_wall_us * 1.0e-6;
+
 		if (last_frame_count_s != 0.0) {
 			const uint64_t frames = socket_frame_counter - last_socket_frame_counter;
 			last_socket_frame_counter = socket_frame_counter;
 			const double dtw = st.m_currentPhysicsTime_SEC - last_frame_count_s;
+			const double d_wall = wall_s - last_frame_count_wall_s;
+
+			// physics seconds per wall second over this reporting window
+			if (!rtf_skip_sample && dtw > 0.0 && d_wall > 0.0) {
+				realtime_factor = dtw / d_wall;
+
+				if ((realtime_factor < 0.95 || realtime_factor > 1.05)
+				    && (last_rtf_warn_us == 0 || now_wall_us - last_rtf_warn_us >= 5000000)) {
+					last_rtf_warn_us = now_wall_us;
+					fprintf(stderr,
+						"[flightaxis_bridge] WARNING: realtime factor %.2f (physics s per wall s)."
+						" PX4 timestamps the SITL sensor stream with its OWN clock on arrival"
+						" (SimulatorMavlink.cpp:497,512), so it is integrating %.0f%% %s real"
+						" time than the physics covers: the vehicle will fly %s with entirely"
+						" correct-looking sensor values, and velocities, accelerations and every"
+						" control loop are scaled wrong. Reduce RealFlight's graphics load or"
+						" close other applications.\n",
+						realtime_factor,
+						fabs(100.0 / realtime_factor - 100.0),
+						(realtime_factor < 1.0) ? "more" : "less",
+						(realtime_factor < 1.0) ? "in slow motion" : "fast");
+				}
+			}
+
+			rtf_skip_sample = false;
 
 			if (!(options & OPT_SILENCE_FPS) && dtw > 0.0 && average_frame_time_s > 0.0) {
 				// exchanges/loop are informational (loop free-runs against a fast
-				// RealFlight); avg= is the authoritative physics frame rate
-				fprintf(stderr, "[flightaxis_bridge] exchanges=%.1f/s loop=%.1f/s avg=%.1f FPS glitches=%u\n",
+				// RealFlight); avg= is the authoritative physics frame rate, and
+				// rtf= is the one to watch - see the block where it is declared
+				char rtf_str[32];
+
+				if (realtime_factor > 0.0) {
+					snprintf(rtf_str, sizeof(rtf_str), "%.2f", realtime_factor);
+
+				} else {
+					snprintf(rtf_str, sizeof(rtf_str), "n/a");
+				}
+
+				fprintf(stderr,
+					"[flightaxis_bridge] exchanges=%.1f/s loop=%.1f/s avg=%.1f FPS rtf=%s glitches=%u\n",
 					frames / dtw, 1000.0 / dtw, 1.0 / average_frame_time_s,
-					(unsigned)glitch_count);
+					rtf_str, (unsigned)glitch_count);
 			}
 
 			if (fabs(st.m_currentPhysicsSpeedMultiplier - 1.0) > 0.01) {
@@ -511,22 +685,42 @@ int main(int argc, char **argv)
 		}
 
 		last_frame_count_s = st.m_currentPhysicsTime_SEC;
+		last_frame_count_wall_s = wall_s;
 	};
 
 	bool announced_first_controls = false;
 	unsigned fail_count = 0;
 	bool have_fa_data = false;
 
+	// Set while the reinject keep-alive is driving the clock off wall time.
+	// Cleared by the rebase on the first good frame afterwards - see there.
+	bool keepalive_active = false;
+
+	// The FA-side state that decides whether an ExchangeData failure warrants
+	// re-running the full startup sequence (ArduPilot SIM_FlightAxis.cpp:295-298
+	// keeps the equivalent in its persistent `state`).
+	bool last_controller_active = true;
+	bool last_reset_pressed = false;
+
 	while (stop == 0) {
 
-		buildChannels(vehicle, maps, nmaps, unmapped_default, options, channels);
+		// The PX4 side can vanish silently (SITL exits, USB unplugged). The
+		// communicator latches that; there is nothing left to simulate for, so
+		// stop - which also stops hammering RealFlight with SOAP requests.
+		// See the dead-link policy block in px4_communicator.h.
+		if (px4.LinkLost()) {
+			cerr << "[flightaxis_bridge] PX4 link lost - shutting down" << endl;
+			break;
+		}
+
+		buildChannels(vehicle, maps, nmaps, unmapped_default, options, channels, tx_channels);
 
 		// send selectedChannels=0 until PX4 is up (RealFlight holds neutral)
 		const uint32_t selectedChannels = vehicle.receivedFirstControls() ? 4095 : 0;
 
 		FAState state;
 
-		if (!fa.exchangeData(channels, RF_CHANNELS, selectedChannels, state)) {
+		if (!fa.exchangeData(tx_channels, RF_CHANNELS, selectedChannels, state)) {
 			// connect/send/parse failure: force startup re-run, back off and retry
 			fa.markNeedsRestart();
 
@@ -539,12 +733,37 @@ int main(int argc, char **argv)
 			unsigned shift = (fail_count < 6) ? fail_count : 6;
 			usleep(10000u << shift);	// 20 ms .. 640 ms backoff
 
-			if (!fa.controllerStarted()) {
+			// Re-run the startup sequence only when the LAST KNOWN FlightAxis
+			// state says the controller actually needs re-injecting - i.e.
+			// ArduPilot's condition (SIM_FlightAxis.cpp:295-298), minus the
+			// socket test, which has no analogue here.
+			//
+			// `if (!fa.controllerStarted())` on its own is vacuous: the
+			// markNeedsRestart() two lines above has already forced that false,
+			// so it reads as a condition while being unconditional. Every failed
+			// exchange therefore ran three SOAP round-trips INCLUDING
+			// ResetAircraft - so a transient network hiccup mid-flight repeatedly
+			// teleported the aircraft back to the runway instead of recovering
+			// in place, and recovery took far longer than the backoff suggests.
+			//
+			// Safety valve on top of ArduPilot's condition: if RealFlight comes
+			// back WITHOUT our controller injected, ExchangeData itself faults,
+			// so we never get a state to read m_flightAxisControllerIsActive
+			// from and the two terms above stay stale-good forever. Retry the
+			// injection occasionally in that case - but far less often than
+			// once per failure, which is the whole point of this change.
+			const bool needs_restart = !last_controller_active || last_reset_pressed;
+			const bool stuck = (fail_count >= 20 && (fail_count % 32) == 0);
+
+			if (needs_restart || stuck) {
 				fa.startController(reset_position);
 			}
 
 			continue;
 		}
+
+		last_controller_active = state.m_flightAxisControllerIsActive;
+		last_reset_pressed = state.m_resetButtonHasBeenPressed;
 
 		if (fail_count > 0) {
 			cerr << "[flightaxis_bridge] ExchangeData recovered after " << fail_count << " retries" << endl;
@@ -568,6 +787,26 @@ int main(int argc, char **argv)
 			// REINJECT_INTERVAL_MS, regardless of whether it succeeds or fails.
 			const uint64_t now_us = micros();
 
+			// Drop the position anchor on the RESET FLAG ITSELF, not on the
+			// reinject succeeding. `state` was parsed BEFORE ResetAircraft ran,
+			// so it describes the pre-reset location and the anchor is stale
+			// either way. Doing this only inside `if (fa.startController(...))`
+			// meant that when injection failed - RealFlight busy reloading, a
+			// dropped socket, i.e. exactly when a reset is most likely - the
+			// offset was never dropped, the flag cleared on the next frame, and
+			// the vehicle flew the rest of the session anchored to its pre-reset
+			// position. GPS and baro both derive from that anchor, so they agree
+			// with each other and the estimator cannot notice. ArduPilot does it
+			// unconditionally (SIM_FlightAxis.cpp:512-514).
+			//
+			// Also deliberately outside the reinject throttle below: the SOAP
+			// storm is what needs rate limiting, dropping a flag does not.
+			// invalidatePositionOffset() is idempotent - the next real frame
+			// re-anchors via VehicleState's offset_captured flag.
+			if (state.m_resetButtonHasBeenPressed) {
+				vehicle.invalidatePositionOffset();
+			}
+
 			if (last_reinject_us == 0 || now_us - last_reinject_us >= REINJECT_INTERVAL_US) {
 				last_reinject_us = now_us;
 
@@ -578,16 +817,16 @@ int main(int argc, char **argv)
 
 				if (fa.startController(reset_position)) {
 					cerr << "[flightaxis_bridge] controller injected, aircraft reset" << endl;
-					// `state` was parsed BEFORE ResetAircraft ran, so it describes the
-					// pre-reset location. Drop the offset (ArduPilot zeroes it) and let
-					// the next real frame re-anchor from the post-reset position.
-					vehicle.invalidatePositionOffset();
 				}
 			}
 
-			// Keep the sensor stream alive across the reinject: PX4 trips its
-			// sensor-timeout failsafe after ~0.5 s of silence, and spec 11.6 wants
-			// this to self-heal. This keep-alive is NOT gated on the throttle above
+			// Keep the sensor stream alive across the reinject. There is no
+			// single "sensor timeout failsafe" to name here: what actually
+			// breaks is (a) the arming checks, which require each sensor topic
+			// to have been updated within 1 s (accelerometerCheck.cpp:56 and
+			// its gyro/mag/baro siblings), and (b) EKF2's own per-source
+			// timeouts. (COM_RC_LOSS_T is 0.5 s but is RC loss and unrelated.)
+			// Spec 11.6 wants this to self-heal. NOT gated on the throttle above
 			// - only the SOAP reinject is. Hold the last state, advance the clock,
 			// and keep draining actuator controls so 4560 cannot back up.
 			//
@@ -612,6 +851,9 @@ int main(int argc, char **argv)
 				vehicle.setTimeUsec(time_now_us);
 				vehicle.extrapolate(alive_dt_us * 1.0e-6);
 				px4.Send(0);
+				// the exported clock and initial_time_s have now diverged; the
+				// rebase below reconciles them on the way out
+				keepalive_active = true;
 			}
 
 			px4.Recieve(false);
@@ -620,6 +862,52 @@ int main(int argc, char **argv)
 
 		last_reinject_us = 0;
 		last_alive_us = 0;
+
+		// ---- branch 0: leaving the reinject keep-alive.
+		//
+		// The keep-alive above advanced time_now_us off the WALL clock while
+		// initial_time_s - the physics epoch - was left untouched. The two are
+		// now out of step by (wall elapsed - physics elapsed) over the stall,
+		// and physics elapsed is ~0 because RealFlight was paused. Falling
+		// straight through to branch 3 would compute new_time_us from that
+		// stale epoch:
+		//   - diverged backwards, setTimeUsec()'s monotonic clamp FREEZES the
+		//     exported clock until physics catches up;
+		//   - diverged forwards by more than the 2 s glitch ceiling, the whole
+		//     jump is applied in one step.
+		//
+		// The backwards case is the bad one, and it is not self-correcting: the
+		// divergence is a CONSTANT offset (physics resumes where it paused), so
+		// physics never does catch up and the exported clock stays frozen for
+		// the rest of the session - unless the gap happens to exceed 500 ms, in
+		// which case the glitch branch below rebases, but at the cost of a
+		// spurious invalidatePositionOffset() that drops the position anchor.
+		//
+		// A frozen clock is severe even in SITL, where PX4 discards our
+		// timestamps (see the realtime-factor block above): time_now_us is what
+		// every send-rate gate in px4_communicator.cpp is measured against, so
+		// once it stops, HIL_GPS, DISTANCE_SENSOR and the baro/mag sub-rates
+		// stop being sent AT ALL and only the ungated HIL_SENSOR survives. In
+		// HITL it is worse still, because there the board does timestamp its
+		// sensor topics from what we send. (ArduPilot has no wall-clock
+		// keep-alive, so it never hits any of this.)
+		//
+		// Fix it the way the restart branch already does: rebase the epoch onto
+		// the clock we have ALREADY exported, so the next frame resumes at
+		// exactly time_now_us, and skip glitch compensation for this frame.
+		if (keepalive_active) {
+			keepalive_active = false;
+			// the paused window is not a realtime-factor problem; don't warn
+			rtf_skip_sample = true;
+			initial_time_s = state.m_currentPhysicsTime_SEC - time_now_us * 1.0e-6;
+			have_epoch = true;
+			last_time_s = state.m_currentPhysicsTime_SEC;
+			// this frame is consumed by the rebase (as in branch 1); the
+			// keep-alive already sent a sample ~1 ms ago, so nothing is owed
+			extrapolated_s = 0.0;
+			px4.Recieve(false);
+			continue;
+		}
 
 		// EMA of the physics frame time (ArduPilot exchange_data())
 		double dt = state.m_currentPhysicsTime_SEC - last_time_s;
@@ -644,6 +932,11 @@ int main(int argc, char **argv)
 			initial_time_s = state.m_currentPhysicsTime_SEC - time_now_us * 1.0e-6;
 			have_epoch = true;
 			last_time_s = state.m_currentPhysicsTime_SEC;
+			// extrapolated_s counts how far past the LAST REAL FRAME we have
+			// run; that frame no longer exists after a rebase. Clearing it only
+			// in branch 3 left a stale value here, which then shortened (or
+			// zeroed) the first extrapolation steps after the restart.
+			extrapolated_s = 0.0;
 			// genuine restart: drop the anchor, the next real frame recaptures it
 			vehicle.invalidatePositionOffset();
 			px4.Recieve(false);
@@ -654,8 +947,13 @@ int main(int argc, char **argv)
 		if (have_fa_data && dt < 1.0e-5) {
 			double delta_time = 0.001;
 
-			// don't go past the next expected frame
-			if (delta_time + extrapolated_s > average_frame_time_s) {
+			// Don't go past the next expected frame - but only once we have an
+			// estimate of when that is. The EMA skips the very first frame, so
+			// average_frame_time_s is still 0 here on the first duplicate
+			// frames, and the cap then drove delta_time to -extrapolated_s
+			// (i.e. <= 0): the loop span without ever sending, for as long as
+			// RealFlight repeated a frame. With no estimate, just step 1 ms.
+			if (average_frame_time_s > 0.0 && delta_time + extrapolated_s > average_frame_time_s) {
 				delta_time = average_frame_time_s - extrapolated_s;
 			}
 

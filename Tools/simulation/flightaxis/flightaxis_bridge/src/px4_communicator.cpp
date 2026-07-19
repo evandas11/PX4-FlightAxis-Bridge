@@ -487,12 +487,138 @@ int PX4Communicator::Clean()
     return 0;
 }
 
+/*
+ * Wall-clock microseconds. Used for the heartbeat interval and the send-failure
+ * log dedup, both of which have to keep working when the physics clock does not.
+ */
+static uint64_t wallMicros()
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000000u + (uint64_t)(ts.tv_nsec / 1000);
+}
+
+void PX4Communicator::MarkLinkLost(const char *reason)
+{
+    if (link_lost) {
+        return;
+    }
+
+    link_lost = true;
+    std::cerr << "PX4 Communicator: PX4 link is DEAD (" << reason << ")."
+              << " No further messages will be sent; the bridge will shut down"
+              << " (this also stops the RealFlight SOAP traffic)." << std::endl;
+}
+
+/*
+ * One failed write. Logs at most once a second - a dead link fails on every
+ * message of every Send(), which without dedup is thousands of identical lines
+ * per second - and applies the dead-link policy from px4_communicator.h.
+ */
+void PX4Communicator::NoteSendFailure()
+{
+    const int err = errno;
+    send_fail_count++;
+
+    const uint64_t now_us = wallMicros();
+
+    if (send_fail_count == 1 || now_us - last_send_fail_log_us >= 1000000)
+    {
+        last_send_fail_log_us = now_us;
+        std::cerr << "PX4 Communicator: send to PX4 failed (" << send_fail_count
+                  << " consecutive): " << strerror(err) << std::endl;
+    }
+
+    // Fatal errnos mean the peer is gone and will not come back on this fd.
+    if (err == EPIPE || err == ECONNRESET || err == ENOTCONN || err == ECONNREFUSED
+        || err == EBADF || err == ENXIO || err == ENODEV || err == EIO || err == ESHUTDOWN)
+    {
+        MarkLinkLost(strerror(err));
+        return;
+    }
+
+    // A serial link that never drains has no distinguishing errno (SendBuffer
+    // just times out in poll(POLLOUT)), so fall back on a repetition count.
+    if (send_fail_count >= SEND_FAIL_LIMIT)
+    {
+        MarkLinkLost("too many consecutive send failures");
+    }
+}
+
+bool PX4Communicator::Emit(mavlink_message_t &msg)
+{
+    if (link_lost)
+    {
+        return false;
+    }
+
+    uint8_t buffer[MAVLINK_MAX_PACKET_LEN];
+    const int packetlen = mavlink_msg_to_send_buffer(buffer, &msg);
+
+    if (SendBuffer(buffer, packetlen))
+    {
+        if (send_fail_count > 0)
+        {
+            std::cerr << "PX4 Communicator: send recovered after " << send_fail_count
+                      << " failures" << std::endl;
+            send_fail_count = 0;
+        }
+
+        return true;
+    }
+
+    NoteSendFailure();
+    return false;
+}
+
+/*
+ * HEARTBEAT is paced off the WALL clock, not the physics clock: its whole job
+ * is to prove the link is alive, including while RealFlight is not producing
+ * frames (and, via SendHeartbeat() from the bridge's injection retry loop,
+ * before RealFlight is reachable at all).
+ */
+int PX4Communicator::SendHeartbeat()
+{
+    if (!heartbeat_enabled || link_lost)
+    {
+        return 0;
+    }
+
+    const uint64_t wall_us = wallMicros();
+    const uint64_t hb_interval = seen_controls ? HEARTBEAT_SLOW_INTERVAL_US
+                                               : HEARTBEAT_FAST_INTERVAL_US;
+
+    if (last_heartbeat_us != 0 && wall_us - last_heartbeat_us < hb_interval)
+    {
+        return 0;
+    }
+
+    last_heartbeat_us = wall_us;
+
+    mavlink_heartbeat_t hb{};
+    hb.type = MAV_TYPE_GENERIC;
+    hb.autopilot = MAV_AUTOPILOT_INVALID;   // we are not an autopilot
+    hb.base_mode = 0;
+    hb.custom_mode = 0;
+    hb.system_status = MAV_STATE_ACTIVE;
+
+    // BRIDGE_SYSID/BRIDGE_COMPID, not the vehicle's 1/200 - see the identity
+    // note in px4_communicator.h.
+    mavlink_message_t msg;
+    mavlink_msg_heartbeat_encode_chan(BRIDGE_SYSID, BRIDGE_COMPID, MAVLINK_COMM_0, &msg, &hb);
+
+    return Emit(msg) ? 0 : -1;
+}
+
 int PX4Communicator::Send(int offset_us)
 {
 
     mavlink_message_t msg;
-    uint8_t buffer[MAVLINK_MAX_PACKET_LEN];
-    int packetlen;
+
+    if (link_lost)
+    {
+        return -1;
+    }
 
     // Every message is decimated against the bridge's own physics clock: see
     // the interval members and the bandwidth block in px4_communicator.h.
@@ -509,37 +635,9 @@ int PX4Communicator::Send(int offset_us)
         sent_first = true;
     }
 
-    // HEARTBEAT is paced off the WALL clock, not the physics clock: its whole
-    // job is to prove the link is alive, including while RealFlight is not
-    // producing frames.
-    if (heartbeat_enabled)
+    if (SendHeartbeat() != 0)
     {
-        struct timespec ts;
-        clock_gettime(CLOCK_MONOTONIC, &ts);
-        const uint64_t wall_us = (uint64_t)ts.tv_sec * 1000000u + (uint64_t)(ts.tv_nsec / 1000);
-        const uint64_t hb_interval = seen_controls ? HEARTBEAT_SLOW_INTERVAL_US
-                                                   : HEARTBEAT_FAST_INTERVAL_US;
-
-        if (last_heartbeat_us == 0 || wall_us - last_heartbeat_us >= hb_interval)
-        {
-            last_heartbeat_us = wall_us;
-
-            mavlink_heartbeat_t hb{};
-            hb.type = MAV_TYPE_GENERIC;
-            hb.autopilot = MAV_AUTOPILOT_INVALID;   // we are not an autopilot
-            hb.base_mode = 0;
-            hb.custom_mode = 0;
-            hb.system_status = MAV_STATE_ACTIVE;
-
-            mavlink_msg_heartbeat_encode_chan(1, 200, MAVLINK_COMM_0, &msg, &hb);
-            packetlen = mavlink_msg_to_send_buffer(buffer, &msg);
-
-            if(!SendBuffer(buffer, packetlen))
-            {
-                std::cerr << "PX4 Communicator: Sent to PX4 failed: " << strerror(errno) <<std::endl;
-                return -1;
-            }
-        }
+        return -1;
     }
 
     if (now_us - last_sensor_us >= sensor_interval_us)
@@ -549,8 +647,10 @@ int PX4Communicator::Send(int offset_us)
         mavlink_hil_sensor_t sensor_msg =vehicle->getSensorMsg(offset_us);
 
         // Mask the slow sensors down to their own rates. vehicle_state always
-        // reports 0x1FFF ("everything is new"); in the SITL profile these
-        // intervals are 0 so the mask stays 0x1FFF and nothing changes.
+        // reports 0x1FFF ("everything is new"), which at the rate Send() runs
+        // at over-publishes baro/mag/pitot on BOTH targets - see the
+        // fields_updated block in px4_communicator.h. Accel and gyro are never
+        // masked, so the IMU stream is untouched.
         {
             uint32_t fields = sensor_msg.fields_updated & FIELD_ALL;
 
@@ -579,10 +679,9 @@ int PX4Communicator::Send(int offset_us)
         }
 
         mavlink_msg_hil_sensor_encode_chan(1, 200, MAVLINK_COMM_0, &msg, &sensor_msg);
-        packetlen = mavlink_msg_to_send_buffer(buffer, &msg);
-        if(!SendBuffer(buffer, packetlen))
+
+        if (!Emit(msg))
         {
-            std::cerr << "PX4 Communicator: Sent to PX4 failed: "<< strerror(errno) <<std::endl;
             return -1;
         }
     }
@@ -595,10 +694,9 @@ int PX4Communicator::Send(int offset_us)
         hil_gps_msg.time_usec+=offset_us;
 
         mavlink_msg_hil_gps_encode_chan(1, 200, MAVLINK_COMM_0, &msg, &hil_gps_msg);
-        packetlen = mavlink_msg_to_send_buffer(buffer, &msg);
-        if(!SendBuffer(buffer, packetlen))
+
+        if (!Emit(msg))
         {
-            std::cerr << "PX4 Communicator: Sent to PX4 failed: " << strerror(errno) <<std::endl;
             return -1;
         }
     }
@@ -613,10 +711,9 @@ int PX4Communicator::Send(int offset_us)
         mavlink_hil_state_quaternion_t state_quat_msg = vehicle->getStateQuatMsg(offset_us);
 
         mavlink_msg_hil_state_quaternion_encode_chan(1, 200, MAVLINK_COMM_0, &msg, &state_quat_msg);
-        packetlen = mavlink_msg_to_send_buffer(buffer, &msg);
-        if(!SendBuffer(buffer, packetlen))
+
+        if (!Emit(msg))
         {
-            std::cerr << "PX4 Communicator: Sent to PX4 failed: " << strerror(errno) <<std::endl;
             return -1;
         }
     }
@@ -630,10 +727,9 @@ int PX4Communicator::Send(int offset_us)
         mavlink_distance_sensor_t dist_msg = vehicle->getDistanceSensorMsg(offset_us);
 
         mavlink_msg_distance_sensor_encode_chan(1, 200, MAVLINK_COMM_0, &msg, &dist_msg);
-        packetlen = mavlink_msg_to_send_buffer(buffer, &msg);
-        if(!SendBuffer(buffer, packetlen))
+
+        if (!Emit(msg))
         {
-            std::cerr << "PX4 Communicator: Sent to PX4 failed: " << strerror(errno) <<std::endl;
             return -1;
         }
     }
@@ -648,10 +744,9 @@ int PX4Communicator::Send(int offset_us)
         rpmmessage.index=0;
         rpmmessage.frequency=vehicle->rpm;
         mavlink_msg_raw_rpm_encode_chan(1, 200, MAVLINK_COMM_0, &msg, &rpmmessage);
-        packetlen = mavlink_msg_to_send_buffer(buffer, &msg);
-        if(!SendBuffer(buffer, packetlen))
+
+        if (!Emit(msg))
         {
-            std::cerr << "PX4 Communicator: Sent to PX4 failed: " << strerror(errno) <<std::endl;
             return -1;
         }
     }
@@ -693,7 +788,17 @@ int PX4Communicator::Recieve(bool blocking)
                 break;      // nothing (more) pending
 
             if(!(fds[0].revents & POLLIN))
+            {
+                // Checked only when there is no readable data left, because a
+                // TCP peer that closed after writing raises POLLHUP alongside
+                // POLLIN and that data is still ours to drain.
+                if (fds[0].revents & (POLLHUP | POLLERR | POLLNVAL))
+                {
+                    MarkLinkLost("poll reported hangup/error (PX4 gone, or the device was removed)");
+                }
+
                 break;
+            }
 
             ssize_t rlen;
 
@@ -705,6 +810,15 @@ int PX4Communicator::Recieve(bool blocking)
             {
                 unsigned int slen=sizeof(px4_mavlink_addr);
                 rlen = recvfrom(commFd, buffer, sizeof(buffer), 0, (struct sockaddr *)&px4_mavlink_addr, &slen);
+            }
+
+            // A 0-length read on a stream socket is an orderly close: the PX4
+            // process exited. (On a serial fd VMIN=0 makes 0 a normal "nothing
+            // to read", so this must stay TCP-only.)
+            if (rlen == 0 && transport == PX4Transport::TcpServer)
+            {
+                MarkLinkLost("PX4 closed the connection");
+                break;
             }
 
             if (rlen <= 0)

@@ -89,9 +89,6 @@
 #include <cstdint>
 #include <time.h>
 
-#define TIMEOUTS 5
-#define TIMEOUTUS 0
-
 /*
  * Transport selection.
  *
@@ -282,9 +279,26 @@ private:
 	 * message either way) but it does cost CPU and it misrepresents the
 	 * sensor suite to the estimator.
 	 *
-	 * So in the HITL profile the accel/gyro bits stay set on every message
-	 * and the mag/baro/diff-pressure bits are masked out except at their own
-	 * interval. Bit values are SensorSource in mavlink_receiver.h:365-371.
+	 * So the accel/gyro bits stay set on every message and the
+	 * mag/baro/diff-pressure bits are masked out except at their own interval.
+	 * Bit values are SensorSource in mavlink_receiver.h:365-371, and
+	 * identically SimulatorMavlink.hpp:88-94.
+	 *
+	 * THIS APPLIES IN SITL TOO, which is why the intervals below are no longer
+	 * 0 by default. SimulatorMavlink::update_sensors() is, if anything, worse
+	 * than the board: for every HIL_SENSOR carrying the BARO bits it publishes
+	 * sensor_baro TWICE (SimulatorMavlink.cpp:312-325, two device ids off one
+	 * message), plus mag once and differential pressure once. At the ~1 kHz
+	 * rate Send() runs at that is baro at ~20x and mag/pitot at ~10x their
+	 * intended rates. VehicleAirData drains only ORB_QUEUE_LENGTH per cycle and
+	 * averages what it got (VehicleAirData.cpp:172-174), so the surplus is
+	 * silently dropped after inflating every ulog for nothing.
+	 *
+	 * Note the masks are ALL-BITS-EQUAL tests, not any-bit: BARO needs bits 9,
+	 * 11 and 12 together. Bit 12 is also what latches _sensors_temperature
+	 * (SimulatorMavlink.cpp:190-195), which accel, gyro and mag then read - so
+	 * BARO must never be masked out of the FIRST message. It is not: sent_first
+	 * backdates every last_*_us so message one carries the full 0x1FFF.
 	 */
 	static const uint32_t FIELD_ACCEL      = 0b111;
 	static const uint32_t FIELD_GYRO       = 0b111000;
@@ -293,10 +307,12 @@ private:
 	static const uint32_t FIELD_DIFF_PRESS = 0b10000000000;
 	static const uint32_t FIELD_ALL        = 0x1FFF;
 
-	// 0 = every HIL_SENSOR (SITL behaviour, unchanged)
-	uint64_t mag_interval_us = 0;
-	uint64_t baro_interval_us = 0;
-	uint64_t diff_press_interval_us = 0;
+	// Sub-rates within HIL_SENSOR. Accel and gyro are never masked and so stay
+	// at the full HIL_SENSOR rate; these three are what real hardware runs
+	// slower. Overridden (lower) for HITL in Configure().
+	uint64_t mag_interval_us = 10000;        // 100 Hz
+	uint64_t baro_interval_us = 20000;       // 50 Hz
+	uint64_t diff_press_interval_us = 20000; // 50 Hz
 
 	uint64_t last_mag_us = 0;
 	uint64_t last_baro_us = 0;
@@ -309,18 +325,78 @@ private:
 	 * the same reason (sitl_gazebo-classic mavlink_interface.cpp:215-228).
 	 * Sent quickly until the board answers with HIL_ACTUATOR_CONTROLS, then
 	 * at 1 Hz to keep the link marked alive.
+	 *
+	 * IDENTITY. The HIL messages are addressed as sysid 1 / compid 200 because
+	 * that is what PX4's simulator path has always seen and the SITL byte
+	 * stream must not change. The HEARTBEAT is different in kind: a heartbeat
+	 * is what builds MAVLink's routing table, so emitting one as sysid 1 makes
+	 * the bridge look like a component OF THE VEHICLE. On a link shared with
+	 * QGC that shows up as a phantom component of the airframe.
+	 *
+	 * So the heartbeat gets its own identity. MavlinkReceiver::
+	 * handle_message_heartbeat() (mavlink_receiver.cpp:2144-2146) only records
+	 * a heartbeat when `msg->sysid == mavlink_system.sysid` OR the type is
+	 * MAV_TYPE_GCS; a distinct sysid with MAV_TYPE_GENERIC matches neither, so
+	 * PX4 ignores it for telemetry_status purposes while still seeing inbound
+	 * traffic - which is all that is needed to bring a USB CDC-ACM MAVLink
+	 * instance up. Deliberately NOT MAV_TYPE_GCS: that would register the
+	 * bridge as a ground station and interfere with GCS-loss failsafe.
 	 */
+	static const uint8_t BRIDGE_SYSID = 51;
+	static const uint8_t BRIDGE_COMPID = MAV_COMP_ID_ONBOARD_COMPUTER;
 	static const uint64_t HEARTBEAT_FAST_INTERVAL_US = 100000;	// 10 Hz
 	static const uint64_t HEARTBEAT_SLOW_INTERVAL_US = 1000000;	// 1 Hz
 	bool heartbeat_enabled = false;
 	uint64_t last_heartbeat_us = 0;
 	bool seen_controls = false;
 
+	/*
+	 * DEAD-LINK POLICY.
+	 *
+	 * PX4 can vanish silently: the SITL binary exits, the USB cable is pulled,
+	 * the board reboots. Every send then fails. Without a policy the bridge
+	 * retries forever, logs one line per message per Send() (~5000 lines/s in
+	 * SITL), and keeps hammering RealFlight with SOAP requests for a simulation
+	 * nobody is consuming - and on serial each failed frame first burns up to
+	 * 100 ms in poll(POLLOUT).
+	 *
+	 * The policy chosen here is: A DEAD PX4 LINK IS TERMINAL. Once the link is
+	 * declared lost the communicator stops sending, LinkLost() latches true,
+	 * and the bridge's main loop breaks out and exits cleanly (which stops the
+	 * SOAP traffic as a consequence). Reconnecting is deliberately not
+	 * attempted: for the SITL TCP server that would mean re-accept()ing into a
+	 * fresh PX4 instance whose clock starts at zero while ours has not, and the
+	 * process supervisor that started both sides is the right place to restart
+	 * the pair. This mirrors the treatment the FlightAxis side already gets
+	 * (dedup, backoff, explicit recovery logging) rather than leaving the PX4
+	 * side - the side that can actually disappear without warning - unhandled.
+	 *
+	 * Detection, in order of reliability:
+	 *   - poll() reports POLLHUP/POLLERR/POLLNVAL (USB unplugged, tty gone)
+	 *   - a TCP read returns 0 (orderly close: PX4 exited)
+	 *   - a send fails with a fatal errno (EPIPE, ECONNRESET, ...)
+	 *   - SEND_FAIL_LIMIT consecutive send failures of any kind (catches the
+	 *     serial POLLOUT-timeout case, which has no distinguishing errno)
+	 *
+	 * UDP has no such signal at all - a datagram to a dead board succeeds
+	 * forever. That is inherent to the transport, not an omission here.
+	 */
+	static const uint32_t SEND_FAIL_LIMIT = 100;
+	bool link_lost = false;
+	uint32_t send_fail_count = 0;
+	uint64_t last_send_fail_log_us = 0;
+
 	// Transport helpers
 	int InitTcpServer(int portOffset);
 	int InitSerial();
 	int InitUdp();
 	bool SendBuffer(const uint8_t *buf, int len);
+
+	// Frame and write one encoded message; handles dedup logging and the
+	// dead-link policy above. Returns false once anything has failed.
+	bool Emit(mavlink_message_t &msg);
+	void NoteSendFailure();
+	void MarkLinkLost(const char *reason);
 
 public:
 	PX4Communicator(VehicleState *v);
@@ -356,10 +432,23 @@ public:
 	int Send(int offset_us);
 	int Recieve(bool blocking);
 
+	/*
+	 * Emit only the HEARTBEAT (subject to its own wall-clock interval), with
+	 * no sensor traffic. The bridge calls this while it is still blocked
+	 * retrying the RealFlight controller injection: Send() is not reachable
+	 * from there, and PX4 will not bring a USB MAVLink instance up until it
+	 * hears from the other end. Without this, starting the bridge before
+	 * RealFlight leaves the board-side link uninitialised with no diagnostic
+	 * at either end. No-op in the SITL profile.
+	 */
+	int SendHeartbeat();
+
+	// True once the PX4 link has been declared dead; see the policy block
+	// above. Latching - the bridge is expected to shut down.
+	bool LinkLost() const { return link_lost; }
+
 	// For startup logging
 	const char *TransportName() const;
-
-	int Test();
 };
 
 
