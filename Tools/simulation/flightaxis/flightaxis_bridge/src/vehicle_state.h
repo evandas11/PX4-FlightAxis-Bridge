@@ -183,6 +183,12 @@ private:
 	bool offset_captured;
 	bool have_last_velocity;
 
+	// Which accel source the previous frame used. Switching between RealFlight's
+	// reported acceleration and the finite-difference override means the next
+	// difference would span a discontinuity, so the edge drops the velocity
+	// history. See the accel block in VehicleState::update().
+	bool last_used_finite_difference{false};
+
 	// synthesized sensors
 	Eigen::Vector3d mag_ned;		// earth field at home, gauss
 	Eigen::Vector3d mag_body;		// gauss

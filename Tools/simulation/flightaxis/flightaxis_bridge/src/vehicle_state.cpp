@@ -324,22 +324,97 @@ void VehicleState::setFAData(const FAState &fa, double dt_true)
 	 *
 	 * So: treat an exactly-zero triad as a missing reading rather than a
 	 * measurement, and fall through to the finite-difference path, which yields
-	 * (0,0,-g) for a stationary wreck. Testing all three against exact zero is
-	 * deliberate - it is RealFlight's sentinel, and a genuine sample is never
-	 * bit-exact zero on all three axes.
+	 * (0,0,-g) for a stationary wreck.
+	 *
+	 * THE FIRST VERSION OF THIS TEST COMPARED ALL THREE AXES TO EXACT ZERO, ON
+	 * THE THEORY THAT ZERO WAS RealFlight's SENTINEL. It never once fired.
+	 * Measured in flight 10_32_18: for 8.84 s (1786 consecutive samples,
+	 * t=21.77-30.61) PX4 received |a| = 0.0047884 m/s2 - one accelerometer LSB,
+	 * not zero - while groundtruth stood still. The branch is provably not
+	 * taken there: it subtracts g in the earth frame, and rotation preserves
+	 * magnitude, so any sample it produced would read at least 9.8.
+	 *
+	 * So test what is actually meant. Two independent conditions:
+	 *
+	 *  - m_hasLostComponents. RealFlight already tells us the model broke up.
+	 *    The bridge has always parsed it (fa_communicator.cpp:592) and printed
+	 *    it as "the single most useful line this bridge can print" - and then
+	 *    acted on it nowhere. This is the place it was needed.
+	 *
+	 *  - A magnitude threshold rather than an equality. A resting accelerometer
+	 *    reads 1 g; anything near zero is either free fall or a dead model, and
+	 *    the finite-difference path gives the physically correct answer for
+	 *    BOTH, so a false positive here is harmless.
+	 *
+	 * The cost of getting this wrong was not the height estimate - baro and GPS
+	 * agreed to 0.008 m mean throughout. It was ATTITUDE. With |a| near zero the
+	 * gravity observation is nowhere near 1 g, so EKF2 rejected it on 100% of
+	 * samples (mean test ratio 25.6) and lost its only tilt-correction path.
+	 * Tilt error went from ~2 deg to 74.6 deg and stayed there for 34 s; the
+	 * EKF then rotated a correct static accel into NED, got -3.5 instead of
+	 * -9.81, and integrated the 6.3 m/s2 remainder into a phantom climb that
+	 * reset roughly once a second. That is the whole of the 100 vz / 58 z reset
+	 * episode, which is confined to t=20.8-76.4 - after attitude recovered
+	 * there were ZERO resets across 150 s and two complete VTOL transitions.
 	 */
-	const bool accel_absent = (fa.m_accelerationBodyAX_MPS2 == 0.0 &&
-				   fa.m_accelerationBodyAY_MPS2 == 0.0 &&
-				   fa.m_accelerationBodyAZ_MPS2 == 0.0);
+	const double accel_norm = std::sqrt(
+			fa.m_accelerationBodyAX_MPS2 * fa.m_accelerationBodyAX_MPS2 +
+			fa.m_accelerationBodyAY_MPS2 * fa.m_accelerationBodyAY_MPS2 +
+			fa.m_accelerationBodyAZ_MPS2 * fa.m_accelerationBodyAZ_MPS2);
+
+	const bool accel_absent = fa.m_hasLostComponents ||
+				  !std::isfinite(accel_norm) ||
+				  accel_norm < 0.05;
 
 	// ... but on the ground RF accel is garbage - finite-difference override
 	// (yields exactly (0,0,-g) at rest)
-	if (fa.m_isTouchingGround || accel_absent) {
-		// use the TRUE elapsed time: during a swallowed glitch dt is capped and
-		// would overstate the synthesised ground acceleration
-		Vector3d accel_ef = (velocity_ef - last_velocity_ef) / dt_true;
-		accel_ef.z() -= GRAVITY_MSS;
-		accel_body = q_ned.inverse() * accel_ef;	// R_ned_to_body * accel_ef
+	const bool use_finite_difference = fa.m_isTouchingGround || accel_absent;
+
+	if (use_finite_difference) {
+		/*
+		 * Differentiating velocity amplifies by 1/dt, so a tiny velocity step
+		 * across a short frame becomes an enormous acceleration. Measured: one
+		 * sample at t=30.7188 came out at 45.0 m/s2 - the only reading above
+		 * 40 in the entire log - right after a respawn, from a dt of about
+		 * 3 ms. It passed the 16 g sensor clamp below untouched.
+		 *
+		 * Two guards. Below MIN_DIFF_DT_S the quotient is noise amplification
+		 * rather than measurement, so hold the previous value instead. And the
+		 * result is bounded to 3 g: the 16 g clamp exists to match what a
+		 * Pixhawk can REPORT, which is the right bound for something measured
+		 * and far too loose for something we synthesised by division.
+		 */
+		const double MIN_DIFF_DT_S = 0.005;
+		const double SYNTH_LIMIT   = GRAVITY_MSS * 3.0;
+
+		if (dt_true >= MIN_DIFF_DT_S && have_last_velocity) {
+			Vector3d accel_ef = (velocity_ef - last_velocity_ef) / dt_true;
+			accel_ef.z() -= GRAVITY_MSS;
+			accel_body = q_ned.inverse() * accel_ef;	// R_ned_to_body * accel_ef
+
+			accel_body.x() = constrain(accel_body.x(), -SYNTH_LIMIT, SYNTH_LIMIT);
+			accel_body.y() = constrain(accel_body.y(), -SYNTH_LIMIT, SYNTH_LIMIT);
+			accel_body.z() = constrain(accel_body.z(), -SYNTH_LIMIT, SYNTH_LIMIT);
+
+		} else {
+			// No usable interval to differentiate over: report the aircraft at
+			// rest rather than a quotient dominated by 1/dt. For a stationary
+			// wreck - the case this branch exists for - this is also the right
+			// answer, and it keeps the gravity observation valid so EKF2 can
+			// still correct tilt.
+			accel_body = q_ned.inverse() * Vector3d(0.0, 0.0, -GRAVITY_MSS);
+		}
+	}
+
+	/*
+	 * Switching accel source mid-flight means the next finite difference would
+	 * span a discontinuity, so drop the history on the edge. invalidatePosition
+	 * Offset() already does this for a respawn (vehicle_state.h:84), but that
+	 * only runs on the reset button.
+	 */
+	if (use_finite_difference != last_used_finite_difference) {
+		have_last_velocity = false;
+		last_used_finite_difference = use_finite_difference;
 	}
 
 	// limit to 16 g to match pixhawk
