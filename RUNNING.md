@@ -640,7 +640,13 @@ Before this the model deliberately sees nothing.
 ```
 [flightaxis_bridge] exchanges=248.3/s loop=612.7/s avg=249.1 FPS rtf=1.00 glitches=0
 ```
-↑ Printed every 1000 bridge frames. Read it as:
+↑ Printed every 1000 bridge frames. This is the first line to read when a session
+misbehaves: it carries the exchange rate, the realtime factor and the glitch count together.
+If you are capturing a long run and want it out of the way, add `"SilenceFPS"` to `Options` in
+`models/<name>.json` — individual `glitch 0.62s` lines and the out-of-range `rtf` warning still
+print, so you keep the alarms and lose only the heartbeat.
+
+Read it as:
 
 | Field | Meaning |
 |---|---|
@@ -822,6 +828,49 @@ RealFlight took control back — someone hit the spacebar (reset), changed aircr
 scenery. The bridge re-injects the controller every 300 ms until it sticks and re-anchors the
 position offset. Expected and self-healing; if it loops forever, RealFlight has a modal dialog
 open or the model has no FlightAxis-controllable channels.
+
+### `Disarming denied: not landed` after a spacebar reset
+
+You crashed, pressed spacebar, the aircraft is sitting on the runway — and PX4 refuses to
+disarm. **Nothing is broken and there is nothing to configure.** Wait about 10–20 seconds and
+disarm again; in the default configuration PX4 will usually have disarmed itself before you
+get there.
+
+What is happening: the reset teleports the aircraft, and the bridge immediately re-anchors to
+the new position, so everything it sends is correct from the very next frame — position ~0,
+velocity ~0, rangefinder on the ground. What takes time is **EKF2 re-converging after a
+teleport**. A reset from 50 m looks to the estimator like an instantaneous 50 m position step;
+it rejects the innovation for several seconds, then does a height reset. Until the estimate
+catches up, `vehicle_land_detected.landed` and `.maybe_landed` are both false, and
+`Commander.cpp` refuses a non-forced disarm unless one of them is true.
+
+Measured against the mock (quad, reset from 50 m AGL):
+
+| time after reset | what PX4 thinks | explicit `disarm` |
+|---|---|---|
+| 0–7 s | EKF2 still rejecting the height step (`z` stuck ~25 m) | **denied** |
+| ~8 s | height reset lands, `maybe_landed` true | **accepted** |
+| ~12 s | `landed` true | accepted |
+| ~14 s | PX4 auto-disarms (`COM_DISARM_LAND`, default 2 s after landing) | — |
+
+Reset from a position far from the start point takes longer, because the horizontal estimate
+has to converge too — reset from 500 m out measured ~18 s rather than ~8 s.
+
+If you want to disarm *immediately* instead of waiting, do it the way the land detector allows:
+
+- **Be in Stabilized, Acro or Manual, not Altitude or Position.**
+  `MulticopterLandDetector::_get_ground_contact_state()` only ANDs in `_in_descend` when
+  `_flag_control_climb_rate_enabled` — i.e. in the altitude-controlled modes. In a manual
+  thrust mode, ground contact reduces to low throttle alone.
+- **Disarm from the transmitter, not from QGroundControl.** `Commander.cpp` permits a disarm
+  that is *not* landed when all of: rotary wing, manual thrust mode, `COM_DISARM_MAN` set
+  (default 1), **and the request came from the RC** — a stick gesture (throttle low + full left
+  yaw), an arm switch, or an arm button. A disarm from the QGC button or from the `commander`
+  console arrives with a different calling reason and can never take that path, which is why
+  the QGC button appears "stuck" while the transmitter works.
+
+So: throttle down, hold the disarm gesture on the transmitter, in Stabilized. That is the
+intended pilot-in-command path and it is not subject to the estimator settling at all.
 
 ### `physics time went backwards - RealFlight restart, re-basing`
 
