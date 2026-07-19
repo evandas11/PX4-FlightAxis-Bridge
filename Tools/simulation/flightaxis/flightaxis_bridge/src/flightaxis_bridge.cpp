@@ -794,6 +794,20 @@ int main(int argc, char **argv)
 	double channels[RF_CHANNELS];
 	double tx_channels[RF_CHANNELS];
 
+	// PX4_FA_DUMP_CHANNELS=<hz>, 0/unset = off. See the dump block in the loop.
+	// Seeded inverted so the first sample sets both ends rather than measuring
+	// travel against a 0.0 that was never on the wire.
+	const double dump_hz = envOrDefault("PX4_FA_DUMP_CHANNELS", 0.0);
+	const uint64_t dump_interval_us = (dump_hz > 0.0) ? (uint64_t)(1000000.0 / dump_hz) : 0;
+	uint64_t last_dump_us = 0;
+	double dump_min[RF_CHANNELS];
+	double dump_max[RF_CHANNELS];
+
+	for (int i = 0; i < RF_CHANNELS; i++) {
+		dump_min[i] =  1e9;
+		dump_max[i] = -1e9;
+	}
+
 	seedDisarmChannels(maps, nmaps, unmapped_default, channels);
 
 	// timing state
@@ -1024,6 +1038,54 @@ int main(int argc, char **argv)
 		}
 
 		buildChannels(vehicle, maps, nmaps, unmapped_default, options, channels, tx_channels);
+
+		/*
+		 * PX4_FA_DUMP_CHANNELS=<hz>: print what is actually on the wire.
+		 *
+		 * This exists because the one question this bridge cannot answer from
+		 * its own configuration is which RealFlight channel a given surface is
+		 * bound to. Everything on the PX4 side is checkable here - the JSON map,
+		 * the FUNC assignments, the actuator_outputs in the ulog - and all of it
+		 * can be correct while a surface still sits motionless, because the
+		 * RealFlight MODEL decides what channel N drives. A user whose elevator
+		 * does not move has no way to tell "the bridge is not sending it" from
+		 * "the bridge is sending it to a channel this model does not use", and
+		 * those two have opposite fixes.
+		 *
+		 * So this prints the value AND the per-channel travel since the dump
+		 * started. Travel is what actually answers the question: a channel that
+		 * is being driven has a span, a channel that is not is pinned. Move one
+		 * surface at a time and the row with the span is the channel it is on.
+		 *
+		 * Off unless the variable is set, and rate-limited, because it prints
+		 * every mapped channel and would otherwise bury the health messages
+		 * this bridge exists to surface.
+		 */
+		const uint64_t dump_now_us = (dump_interval_us > 0) ? micros() : 0;
+
+		if (dump_interval_us > 0 && dump_now_us - last_dump_us >= dump_interval_us) {
+			last_dump_us = dump_now_us;
+
+			for (int i = 0; i < RF_CHANNELS; i++) {
+				if (tx_channels[i] < dump_min[i]) {
+					dump_min[i] = tx_channels[i];
+				}
+
+				if (tx_channels[i] > dump_max[i]) {
+					dump_max[i] = tx_channels[i];
+				}
+			}
+
+			fprintf(stderr, "[flightaxis_bridge] channels (RF ch1-12), %s:\n",
+				vehicle.armed() ? "ARMED" : "disarmed - surfaces sit at their disarm value");
+
+			for (int i = 0; i < RF_CHANNELS; i++) {
+				const double span = dump_max[i] - dump_min[i];
+				fprintf(stderr, "    ch%-2d rf%-2d = %.3f  travel %.3f %s\n",
+					i + 1, i, tx_channels[i], span,
+					(span < 0.002) ? "<- not moving" : "");
+			}
+		}
 
 		// send selectedChannels=0 until PX4 is up (RealFlight holds neutral)
 		const uint32_t selectedChannels = vehicle.receivedFirstControls() ? 4095 : 0;
