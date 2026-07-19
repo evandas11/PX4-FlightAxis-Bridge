@@ -255,6 +255,25 @@ PX4_FLIGHTAXIS_IP=<windows-ip> make px4_sitl_nolockstep flightaxis_plane
 
 (also `flightaxis_quad`, `flightaxis_quadplane`, `flightaxis_heli`; QGC connects on UDP 14550)
 
+A real invocation, with the home position pinned to the field you actually fly at — this is
+the form worth keeping around, since the default home is in Zurich and everything on the QGC
+map hangs off it:
+
+```bash
+cd ~/PX4-Autopilot
+
+PX4_FLIGHTAXIS_IP=192.168.10.1 \
+PX4_HOME_LAT=-37.7304667 \
+PX4_HOME_LON=175.7435583 \
+PX4_HOME_ALT=40 \
+make px4_sitl_nolockstep flightaxis_quadplane
+```
+
+Stop it with Ctrl-C in that terminal: PX4 and the bridge both exit, and the bridge hands
+RealFlight back to your transmitter on the way out. If a previous session left stored
+parameters behind, delete `build/px4_sitl_nolockstep/rootfs/eeprom/parameters.bson` first —
+saved values silently outrank the airframe's defaults, including the channel assignments.
+
 ## RealFlight setup
 
 Once per RealFlight installation:
