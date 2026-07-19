@@ -5,10 +5,50 @@ Copyright © 2026 Evangels Brilliant Dasmasela.
 This project is released under the **GNU General Public License v3 or later**
 (see [LICENSE](LICENSE)).
 
-That copyright covers the original work in this repository — the bridge's main loop
-and channel mapping, the model JSONs, the airframes, the Python and shell tooling, the
-installer, and the documentation. It does not extend to the third-party code this
-project reuses or derives from; the table below records who holds what.
+## What you may do with it
+
+Use it, study it, change it, and pass it on — commercially or not, to as many people
+as you like. That is what GPLv3 grants, and nothing here narrows it.
+
+One obligation comes with it: if you distribute this bridge, or anything built from
+it, you must ship the corresponding source under GPLv3 too, so whoever receives it
+keeps the same freedoms. Running it privately, or modifying it for your own use,
+carries no such requirement.
+
+Installing it does not affect the licence of your PX4 checkout. The bridge is a
+separate executable that talks to PX4 over a MAVLink socket, built as an
+ExternalProject rather than linked into the PX4 binary — the same arrangement the
+FlightGear and JSBSim bridges use.
+
+## Work by Evangels Brilliant Dasmasela
+
+Original to this project, with no upstream counterpart:
+
+- `Tools/simulation/flightaxis/hitl_run.sh` — PX4 ships no HITL runner at all
+- `flightaxis_bridge/models/*.json` and the channel-map schema they define
+- `flightaxis_bridge/FA_check.py`, `flightaxis_bridge/get_FAbridge_params.py`
+- `install.sh`, `uninstall.sh`, `scripts/*` — target detection, the idempotent
+  CMakeLists splices, and the payload manifest
+- Every document in this repository
+
+Substantial original work inside files that began from an upstream source (see the
+provenance table for what each started as):
+
+- the transports, per-message decimation, `fields_updated` sub-rating, non-blocking
+  receive drain, HITL message profile and dead-link policy in `px4_communicator.*`
+- the absolute-clock design, realtime-factor monitor, reconnect and glitch handling
+  in `flightaxis_bridge.cpp`
+- the rangefinder path, sensor synthesis and datum handling in `vehicle_state.*`
+- the four airframes and their control-allocation and parameter configuration
+
+## Third-party notices — required, do not remove
+
+The section below is not a disclaimer of ownership; it is a licence obligation.
+BSD-3-Clause clause 1 requires that its copyright notices be retained in
+redistributions, and GPLv3 §5 requires preserving the notices on a derivative work.
+Removing them would make this repository non-compliant and would put its distributor
+at risk — so they stay, and they are what makes the copyright claim above credible
+rather than overbroad.
 
 ## Why GPLv3 and not BSD-3
 
@@ -69,14 +109,8 @@ Model JSONs, `FA_check.py`, `get_FAbridge_params.py`, `install.sh`, `uninstall.s
   BSD-3-Clause, © ThunderFly s.r.o. The integration template.
 - **PX4-Autopilot** — <https://github.com/PX4/PX4-Autopilot>, BSD-3-Clause.
 
-## What this means for you
+## Contributing
 
-You may use, study, modify and redistribute this bridge under GPLv3. If you
-distribute a modified version, or software that incorporates it, you must make
-the corresponding source available under the same terms.
-
-This licence covers **only the files in this repository**. It does not change the
-licence of PX4-Autopilot: the bridge is a standalone executable that talks to PX4
-over MAVLink on a TCP socket, exactly as the FlightGear and JSBSim bridges do, and
-it is compiled by PX4's build system as an ExternalProject rather than linked into
-the PX4 binary. Installing it does not relicense your PX4 checkout.
+Patches are welcome under the same terms. Contributors keep copyright in what they
+write; add yourself to the header of any file you substantially change, and to the
+list above if you add something original.
