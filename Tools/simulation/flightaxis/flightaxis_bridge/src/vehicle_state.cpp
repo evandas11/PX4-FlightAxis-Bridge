@@ -461,8 +461,10 @@ void VehicleState::setFAData(const FAState &fa, double dt_true)
 		const double MIN_DIFF_DT_S = 0.005;
 		const double SYNTH_LIMIT   = GRAVITY_MSS * 3.0;
 
-		if (dt_true >= MIN_DIFF_DT_S && have_last_velocity) {
-			Vector3d accel_ef = (velocity_ef - last_velocity_ef) / dt_true;
+		diff_accum_dt += dt_true;
+
+		if (have_last_velocity && diff_accum_dt >= MIN_DIFF_DT_S) {
+			Vector3d accel_ef = (velocity_ef - last_velocity_ef) / diff_accum_dt;
 			accel_ef.z() -= GRAVITY_MSS;
 			accel_body = q_ned.inverse() * accel_ef;	// R_ned_to_body * accel_ef
 
@@ -470,12 +472,24 @@ void VehicleState::setFAData(const FAState &fa, double dt_true)
 			accel_body.y() = constrain(accel_body.y(), -SYNTH_LIMIT, SYNTH_LIMIT);
 			accel_body.z() = constrain(accel_body.z(), -SYNTH_LIMIT, SYNTH_LIMIT);
 
+			// Re-anchor: the next window starts from here.
+			last_synth_accel_body = accel_body;
+			last_velocity_ef      = velocity_ef;
+			diff_accum_dt         = 0.0;
+			have_synth_accel      = true;
+
+		} else if (have_synth_accel) {
+			// Inside the window. RealFlight's frames are shorter than the
+			// interval this can be differentiated over, so most frames land
+			// here; hold the last result until the anchor has moved far enough
+			// to give a meaningful quotient.
+			accel_body = last_synth_accel_body;
+
 		} else {
-			// No usable interval to differentiate over: report the aircraft at
-			// rest rather than a quotient dominated by 1/dt. For a stationary
-			// wreck - the case this branch exists for - this is also the right
-			// answer, and it keeps the gravity observation valid so EKF2 can
-			// still correct tilt.
+			// Nothing measured yet: report the aircraft at rest. For a
+			// stationary wreck - the other case this branch exists for - that
+			// is also the right answer, and it keeps the gravity observation
+			// valid so EKF2 can still correct tilt.
 			accel_body = q_ned.inverse() * Vector3d(0.0, 0.0, -GRAVITY_MSS);
 		}
 	}
@@ -488,6 +502,8 @@ void VehicleState::setFAData(const FAState &fa, double dt_true)
 	 */
 	if (use_finite_difference != last_used_finite_difference) {
 		have_last_velocity = false;
+		diff_accum_dt = 0.0;
+		have_synth_accel = false;
 		last_used_finite_difference = use_finite_difference;
 	}
 
@@ -497,7 +513,8 @@ void VehicleState::setFAData(const FAState &fa, double dt_true)
 	accel_body.y() = constrain(accel_body.y(), -a_limit, a_limit);
 	accel_body.z() = constrain(accel_body.z(), -a_limit, a_limit);
 
-	last_velocity_ef = velocity_ef;
+	// last_velocity_ef is NOT advanced here: it anchors the accumulated
+	// differentiation window above and moves only when that window closes.
 
 	// Pitot airspeed: body-X component of (vel - wind); RF's m_airspeed_MPS
 	// is total TAS and lies during hover/harrier/knife-edge

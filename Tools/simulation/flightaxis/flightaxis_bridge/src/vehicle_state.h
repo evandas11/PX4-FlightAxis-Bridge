@@ -92,7 +92,13 @@ public:
 	// pre-reset flight velocity against zero across one frame - 30 m/s over
 	// 4 ms is 765 g, clipped to the 16 g limit on all three axes and fed
 	// straight into EKF2.
-	void invalidatePositionOffset() { offset_captured = false; have_last_velocity = false; }
+	void invalidatePositionOffset()
+	{
+		offset_captured = false;
+		have_last_velocity = false;
+		diff_accum_dt = 0.0;
+		have_synth_accel = false;
+	}
 
 	mavlink_hil_sensor_t getSensorMsg(int offset_us);
 	mavlink_hil_state_quaternion_t getStateQuatMsg(int offset_us);
@@ -203,7 +209,7 @@ private:
 	Eigen::Vector3d gyro;			// body rad/s
 	Eigen::Vector3d accel_body;		// specific force, m/s^2
 	Eigen::Vector3d velocity_ef;		// NED m/s
-	Eigen::Vector3d last_velocity_ef;	// NED m/s (for ground accel override)
+	Eigen::Vector3d last_velocity_ef;	// NED m/s, anchor for the ground accel override
 	Eigen::Vector3d wind_ef;		// NED m/s
 	Eigen::Vector3d position_ned;		// m, offset-corrected
 	Eigen::Vector3d position_offset;	// m, captured RF-world origin
@@ -215,6 +221,18 @@ private:
 	// difference would span a discontinuity, so the edge drops the velocity
 	// history. See the accel block in VehicleState::update().
 	bool last_used_finite_difference{false};
+
+	// The finite-difference override differentiates over an ACCUMULATED window
+	// rather than over one frame. RealFlight delivers frames about 4 ms apart,
+	// so a per-frame interval sits below the minimum this can be differentiated
+	// over safely; holding the anchor until enough time has passed keeps the
+	// quotient well conditioned without discarding the frames in between. The
+	// last result is held across those frames, because the alternative -
+	// reporting the aircraft at rest - tells EKF2 the ground roll is not
+	// accelerating, and it stops fusing GNSS velocity when the two disagree.
+	Eigen::Vector3d last_synth_accel_body{Eigen::Vector3d::Zero()};
+	double diff_accum_dt{0.0};
+	bool have_synth_accel{false};
 
 	// synthesized sensors
 	Eigen::Vector3d mag_ned;		// earth field at home, gauss
