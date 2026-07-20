@@ -301,7 +301,7 @@ console. **`SYS_HITL` is `@reboot_required` — reboot after setting it.**
 | `CBRK_SUPPLY_CHK` | `894281` | allow arming with no battery — **see §1** |
 | `COM_RC_IN_MODE` | `1` or `4` | no real RC transmitter attached |
 | `EKF2_MULTI_IMU` | `1` | The bridge sends `HIL_SENSOR` with `id = 0` only, so only IMU instance 0 is ever supplied; leaving this higher runs EKF instances on dead sensors (same as the SITL airframes) |
-| `SDLOG_MODE` | `4` | Optional, but it makes a log span several arm/disarm cycles instead of closing at the first disarm. `@reboot_required` |
+| `SDLOG_MODE` | `0` | The firmware default already, "when armed until disarm": one log file per flight. Nothing to set on a board — no startup script overrides it there, unlike SITL's `rcS`. `@reboot_required` |
 
 **Leave `EKF2_GPS_DELAY` at its firmware default.** The SITL airframes force it to `0`, but that
 value is SITL-specific and wrong on a board — HITL `HIL_GPS` arrives over a real link with real
@@ -388,8 +388,8 @@ dropped settings, identical in all four pairs:
   airframe in SITL. No such script exists on a board, and forcing 0 is actively wrong there: HITL
   GPS arrives over a real link with real latency, so it would mis-time EKF fusion.
 - `EKF2_MULTI_IMU 1` — same rationale; the firmware default is already 1.
-- `SDLOG_MODE 4` — "from first arm until shutdown" never closes the log, which risks a truncated
-  file on a power-cut with a real SD card.
+- `SDLOG_MODE 0` — existed only to countermand SITL's `rcS`, which sets 1 before the airframe is
+  sourced. No such script runs on a board, where the firmware default is already 0.
 - `SIM_BAT_ENABLE` — a SITL-only parameter that does not exist in a board build. See §6.4 for why
   HITL cannot have real battery telemetry at all.
 - `COM_FLTT_LOW_ACT 0` — SITL disables the low-flight-time action. Dropping it restores the

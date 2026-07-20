@@ -984,6 +984,29 @@ Working directories: instance 0 keeps `build/px4_sitl_nolockstep/rootfs` so exis
 parameters and logs stay put; instance *N* > 0 uses `build/px4_sitl_nolockstep/instance_N`,
 following PX4's own `Tools/simulation/sitl_multiple_run.sh`.
 
+**`PX4_FLIGHTAXIS_ROOTFS` overrides both**, and the axis it varies is the model rather than the
+instance:
+
+```bash
+PX4_FLIGHTAXIS_ROOTFS=~/sitl/fa-rootfs/quadplane \
+PX4_FLIGHTAXIS_IP=192.168.10.1 \
+  make px4_sitl_nolockstep flightaxis_quadplane
+```
+
+The working directory is where `parameters.bson`, dataman and `log/` all live, so pointing it
+per-model separates all three at once. Without it every model shares one of each: a quadplane
+mission is still loaded when you next start the plane and gets rejected by feasibility checking,
+and PX4 — seeing the saved `SYS_AUTOSTART` disagree with the model it is starting — runs
+`param reset_all`, which preserves `RC*`, `CAL_*` and `COM_FLTMODE*` but discards tuning.
+
+Do not reach for the instance mechanism to get this. `-i` is wired to `MAV_SYS_ID`, the simulator
+TCP port and every MAVLink UDP port, so using it to mean "model" burns a port range per airframe
+and misreports system IDs.
+
+The directory is created if missing and relative paths are absolutised before `px4` starts, so the
+same command opens a new one or resumes an existing one. A path outside the PX4 tree survives
+`make clean` and reinstalling; one under `build/` does not.
+
 A non-numeric `PX4_FLIGHTAXIS_INSTANCE` is rejected with an error rather than being silently
 truncated to 0 — which would otherwise produce a "second" instance that collides with the first.
 

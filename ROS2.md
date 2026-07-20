@@ -300,7 +300,7 @@ tuning (see `1201_flightaxis_quad`), is worth knowing about:
 | `EKF2_GPS_DELAY` | `0` | RealFlight free-runs and the synthesised GPS samples are current. Forced with `param set`, not `set-default` — `px4-rc.mavlinksim` runs after the airframe and would re-default it to 10 ms. |
 | `EKF2_MULTI_IMU` | `1` | The bridge only ever supplies IMU instance 0, so the two extra EKF instances `px4-rc.mavlinksim` asks for would run on dead sensors. Also forced with `param set`. |
 | `COM_RC_IN_MODE` | `4` | "Ignore any stick input" — the only value that skips the RC-loss failsafe. A headless ROS 2 run has no manual control source at all, so **this is what stops RC-loss failsafe from pre-empting your offboard session.** |
-| `SDLOG_MODE` | `4` | "From first arm until shutdown", so a log spans several arm/disarm cycles instead of closing at the first disarm. |
+| `SDLOG_MODE` | `0` | "When armed until disarm" — one bounded log file per flight. `rcS` sets 1, "from boot until disarm", which opens the log at boot and records the whole idle stretch before you ever arm, so the override back to PX4's own default is not redundant. |
 
 `COM_RC_IN_MODE 4` is the one with a behavioural consequence for offboard work: if you port
 these airframes or set the parameters by hand and leave it at the default of 1, an offboard

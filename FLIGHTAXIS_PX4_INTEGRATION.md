@@ -786,7 +786,7 @@ step with the matching `models/<name>.json` — an identity map (§5).
 # RealFlight free-runs (no lockstep), GPS samples arrive fresh.
 param set EKF2_GPS_DELAY 0
 param set EKF2_MULTI_IMU 1
-param set-default SDLOG_MODE 4
+param set-default SDLOG_MODE 0
 param set-default COM_RC_IN_MODE 4
 
 # ... 60 more lines: CA_* geometry, PWM_MAIN_FUNC* assignments, per-vehicle tuning ...
@@ -802,7 +802,7 @@ still wins. What each is for:
 |---|---|---|
 | `EKF2_GPS_DELAY` | `0` | RealFlight free-runs and the synthesised GPS samples are current, with none of the transport delay the 10 ms default compensates for. |
 | `EKF2_MULTI_IMU` | `1` | The bridge sends `HIL_SENSOR` with `id = 0` only, so `SimulatorMavlink` only ever fills IMU instance 0. `px4-rc.mavlinksim` asks for 3, leaving two EKF instances running on dead sensors. `0` is not an alternative — EKF2 clamps this to a minimum of 1 when `SENS_IMU_MODE` is 0. |
-| `SDLOG_MODE` | `4` | `rcS` sets 1, "from boot until disarm", which closes the log at the *first* disarm. A session spanning several arm/disarm cycles would then be mostly unlogged — including any groundtruth-versus-estimate comparison. 4 is "from first arm until shutdown". `@reboot_required`, so it has to be a startup default rather than a `pxh>` command. |
+| `SDLOG_MODE` | `0` | `rcS` sets 1, "from boot until disarm", which opens the log at boot and so records the whole idle stretch before you ever arm. 0 is "when armed until disarm": one bounded file per flight, nothing recorded while sitting at the `pxh>` prompt. It is PX4's own default, but the explicit line is still needed to undo `rcS`. `@reboot_required`, so it has to be a startup default rather than a `pxh>` command. |
 | `COM_RC_IN_MODE` | `4` | A headless run has no manual control source at all, and 4 ("ignore any stick input") is the only value that skips the RC-loss failsafe. `NAV_RCL_ACT` is deliberately left alone: it is unreachable once this is 4, and the value usually suggested for it is outside the parameter's declared range. |
 
 **Rotor geometry: the symmetry matters, the magnitudes do not.** PX4 normalises the multirotor mixing matrix by a scale derived from the mix
@@ -847,7 +847,7 @@ real numbers.
 | **Pressures sent in Pa** — MAVLink `HIL_SENSOR` wants hPa | `/100` on both `abs_pressure` and `diff_pressure` (§6) |
 | **`EKF2_GPS_DELAY` and `EKF2_MULTI_IMU` silently clobbered** — `px4-rc.mavlinksim` runs after the airframe and re-defaults both | use `param set`, not `param set-default`, for those two (§9) |
 | **RC-loss failsafe on a headless run** — no joystick, no RC, no manual control source at all | `COM_RC_IN_MODE 4`, the only value that skips the check (§9) |
-| **Log closes at the first disarm**, so a session spanning several arm/disarm cycles is mostly unlogged | `SDLOG_MODE 4` (§9) |
+| **Logging starts at boot, not at arm** — `rcS` overrides PX4's own `SDLOG_MODE` default to 1 before the airframe is sourced, so every log carries the idle stretch that precedes the first arm | `SDLOG_MODE 0` in the airframe, restoring the default of "when armed until disarm" (§9) |
 | **Heli swash mixing applied twice** — PX4's allocator mixes, and the RealFlight model's own CCPM mixes again; the two compose rather than cancel and roll/pitch cross-couple in flight, with nothing logged | put the mix in exactly one place: `HeliDemix` off in `heli.json` (default) and the RealFlight model wired non-mixed / direct-servo (§5) |
 | **Heli cyclic response is rotated** — `CA_SP0_ANG*` does not match the model's actual head, so a pitch command banks the aircraft | force 300/60/180 in `1203_flightaxis_heli` (120° head, odd servo aft, ArduPilot's default) and pin the arm lengths and `CA_MAX_SVO_THROW 0`; use 120/240/0 for an odd-servo-forward head. |
 | **Heli has no left yaw** — under `CA_AIRFRAME 10` the tail is a *motor* clamped to `[0,1]`, so the whole negative half of the yaw command is clipped and the tail sits on its lower stop | `CA_AIRFRAME 11` (tail Servo), with `rf3` `bipolar` and `disarm` 0.5 in `heli.json` (§5) |

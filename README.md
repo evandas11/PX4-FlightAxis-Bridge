@@ -266,9 +266,46 @@ make px4_sitl_nolockstep flightaxis_quadplane
 ```
 
 Stop it with Ctrl-C in that terminal: PX4 and the bridge both exit, and the bridge hands
-RealFlight back to your transmitter on the way out. If a previous session left stored
-parameters behind, delete `build/px4_sitl_nolockstep/rootfs/eeprom/parameters.bson` first —
-saved values silently outrank the airframe's defaults, including the channel assignments.
+RealFlight back to your transmitter on the way out.
+
+If a stored value seems to be overriding the airframe, reset that parameter rather than the
+store: `param show -c` marks explicitly saved values with `x +`, and those outrank the
+airframe's `param set-default`. `param reset PWM_MAIN_FUNC*` clears a specific family.
+Deleting `parameters.bson` also clears your radio calibration, sensor calibration and flight
+mode assignments, which nothing in the airframe will put back.
+
+### A working directory per model
+
+Every model shares one working directory by default, and so shares one `parameters.bson`,
+one dataman and one `log/`. Two consequences follow. Missions persist across models, so a
+quadplane mission is still loaded when you next start the plane and gets rejected by
+feasibility checking. And PX4 notices the saved `SYS_AUTOSTART` no longer matches the model
+it is starting, so it runs `param reset_all` — which keeps `RC*`, `CAL_*` and `COM_FLTMODE*`
+but discards tuning.
+
+`PX4_FLIGHTAXIS_ROOTFS` points the working directory somewhere else. Give each model its own
+and the two problems disappear together, because parameters, missions and logs all live
+beside each other:
+
+```bash
+cd ~/PX4-Autopilot
+
+PX4_FLIGHTAXIS_ROOTFS=~/sitl/fa-rootfs/quadplane \
+PX4_FLIGHTAXIS_IP=192.168.10.1 \
+make px4_sitl_nolockstep flightaxis_quadplane
+```
+
+The directory is created if it does not exist, so the same command starts a new model or
+resumes an existing one — there is nothing to set up first. A first run comes up on the
+airframe's defaults; every later run in that directory picks up whatever you have since
+tuned and saved, and whatever missions you have uploaded.
+
+The path is yours to choose. Somewhere outside the PX4 tree, as above, survives `make clean`
+and reinstalling; a path under `build/` does not. Relative paths are resolved before PX4
+starts, so `PX4_FLIGHTAXIS_ROOTFS=./fa-plane` behaves as you would expect.
+
+Leave the variable unset and nothing changes: instance 0 uses `build/px4_sitl_nolockstep/rootfs`
+as before, and additional instances use `build/px4_sitl_nolockstep/instance_<n>`.
 
 If PX4 refuses to start with `PX4 server already running for instance 0`, a previous run
 died without cleaning up. Remove `/tmp/px4_lock-0` and `/tmp/px4-sock-0`, and check for a

@@ -12,12 +12,11 @@
 # otherwise override the default back to 10 ms.
 param set EKF2_GPS_DELAY 0
 
-# rcS sets SDLOG_MODE 1 ("from boot until disarm"), which closes the log at the
-# FIRST disarm; the spec section 11 validation checklist spans several arm/disarm
-# cycles, so most of it -- including the groundtruth-vs-estimate check -- would
-# never reach a log. Mode 4 is "from 1st armed until shutdown". SDLOG_MODE is
+# rcS sets SDLOG_MODE 1 ("from boot until disarm"), which opens the log at boot
+# and so records the idle stretch before you ever arm. Mode 0 is "when armed
+# until disarm": one file per flight, nothing else. SDLOG_MODE is
 # @reboot_required, so this has to be a startup default, not a pxh> command.
-param set-default SDLOG_MODE 4
+param set-default SDLOG_MODE 0
 
 # The bridge supplies the battery from RealFlight's own model (pack voltage and
 # current draw, or fuel remaining on internal-combustion models), so PX4's
