@@ -265,7 +265,7 @@ Vector3d VehicleState::rotateWorld(const Vector3d &v) const
 			v.z());
 }
 
-void VehicleState::resetPositionOffset(const FAState &fa, bool latch_datum)
+void VehicleState::resetPositionOffset(const FAState &fa)
 {
 	// position NED: (N = RF_Y, E = RF_X, D = -altASL)
 	position_offset = Vector3d(fa.m_aircraftPositionY_MTR,
@@ -279,25 +279,33 @@ void VehicleState::resetPositionOffset(const FAState &fa, bool latch_datum)
 	 * makes PX4_HOME_YAW mean the same thing whatever the RF runway happens to
 	 * be aligned to.
 	 *
-	 * Re-derived on a respawn as well as at startup: a reset puts the model
-	 * back where it entered, and PX4 should see what it saw then - position and
-	 * heading both.
+	 * Derived ONCE, on the first capture of the session, and never again. The
+	 * position offset above is re-captured on every respawn - that is what puts
+	 * the model back at the point it entered, and it is what ArduPilot does
+	 * (SIM_FlightAxis.cpp: `if (position_offset.is_zero() || resetPressed)`).
+	 * This is not re-derived with it, and the asymmetry is the point: an offset
+	 * is an origin and may move, a rotation is the frame everything else is
+	 * expressed in.
 	 *
-	 * But ONCE per reset, on the final capture only, which is what `announce`
-	 * marks. The position offset above is refreshed on every frame of the
-	 * placement transient because refreshing it is free. Refreshing this is
-	 * not: the rotation defines the frame velocity_ef is expressed in, so
-	 * changing it between two frames leaves the on-ground accelerometer
+	 * Upstream never meets this problem because it has no rotation at all -
+	 * velocity_ef there is RealFlight's world velocity used raw. Here, changing
+	 * the rotation between two frames leaves the on-ground accelerometer
 	 * override differencing a velocity in the old frame against one in the new,
 	 * and it reads the rotation itself as acceleration. Measured, when this ran
-	 * every frame: a stationary model on the runway, GPS reporting 0.00 m/s,
-	 * and EKF2 dead-reckoning to 49.6 m/s and 121 m away.
+	 * per frame: a stationary model on the runway, GPS reporting 0.00 m/s, and
+	 * EKF2 dead-reckoning to 49.6 m/s and 121 m away.
+	 *
+	 * Holding it costs nothing that matters. A reset returns the model to where
+	 * it entered, so the rotation derived there is still the right one; and if
+	 * RealFlight ever places it somewhere else, PX4 seeing it somewhere else is
+	 * the honest answer rather than a frame quietly turning underneath it.
 	 */
-	if (!latch_datum) {
-		// position refreshed, frame left alone
+	if (datum_latched) {
+		// position refreshed above; the frame is left alone
 
 	} else if (std::isnan(home_yaw)) {
 		yaw_rot_rad = 0.0;
+		datum_latched = true;
 
 	} else {
 		Quaterniond q_rf(fa.m_orientationQuaternionW,
@@ -305,6 +313,7 @@ void VehicleState::resetPositionOffset(const FAState &fa, bool latch_datum)
 				 fa.m_orientationQuaternionX,
 				 -fa.m_orientationQuaternionZ);
 		q_rf.normalize();
+		datum_latched = true;
 		const double prev = yaw_rot_rad;
 		yaw_rot_rad = wrapPi(home_yaw * DEG2RAD - yawFromQuat(q_rf));
 
@@ -316,12 +325,10 @@ void VehicleState::resetPositionOffset(const FAState &fa, bool latch_datum)
 			diff_accum_dt = 0.0;
 		}
 
-		{
-			std::cerr << "[flightaxis_bridge] heading datum: RealFlight reports "
-				  << (RAD2DEG * yawFromQuat(q_rf)) << " deg, PX4_HOME_YAW asks for "
-				  << home_yaw << " deg -> rotating the RF world by "
-				  << (RAD2DEG * yaw_rot_rad) << " deg" << std::endl;
-		}
+		std::cerr << "[flightaxis_bridge] heading datum: RealFlight reports "
+			  << (RAD2DEG * yawFromQuat(q_rf)) << " deg, PX4_HOME_YAW asks for "
+			  << home_yaw << " deg -> rotating the RF world by "
+			  << (RAD2DEG * yaw_rot_rad) << " deg" << std::endl;
 	}
 
 	offset_captured = true;
@@ -366,7 +373,7 @@ void VehicleState::setFAData(const FAState &fa, double dt_true)
 	// An anchor still exists from the first frame: the window refreshes it, it
 	// does not delay it.
 	if (!offset_captured) {
-		resetPositionOffset(fa, false);
+		resetPositionOffset(fa);
 		recapture_left_s = RECAPTURE_WINDOW_S;
 
 	} else if (recapture_left_s > 0.0) {
@@ -375,7 +382,7 @@ void VehicleState::setFAData(const FAState &fa, double dt_true)
 		// Announce only the capture that stands: the window refreshes at the
 		// SOAP frame rate, so announcing each one would print a few hundred
 		// identical lines per respawn.
-		resetPositionOffset(fa, recapture_left_s <= 0.0);
+		resetPositionOffset(fa);
 	}
 
 	// Quaternion RF -> NED: q_ned = (w=W, x=RF_Y, y=RF_X, z=-RF_Z), then turned

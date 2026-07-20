@@ -82,7 +82,7 @@ public:
 	// captured together - and dropped together by invalidatePositionOffset(),
 	// so a RealFlight reset re-derives the rotation against the post-reset
 	// attitude instead of keeping one measured before the teleport.
-	void resetPositionOffset(const FAState &fa, bool latch_datum = true);
+	void resetPositionOffset(const FAState &fa);
 
 	// Drop the captured offset so the NEXT real frame re-anchors from a
 	// post-reset position (zeroing the position offset).
@@ -210,6 +210,7 @@ private:
 	// a taxiing aircraft is never re-anchored under itself.
 	static constexpr double RECAPTURE_WINDOW_S = 0.5;
 	double recapture_left_s{0.0};
+	bool datum_latched{false};
 
 	// physics time since epoch capture (us), mirrored from the main loop;
 	// getSensorMsg() / getDistanceSensorMsg() add offset_us on top
