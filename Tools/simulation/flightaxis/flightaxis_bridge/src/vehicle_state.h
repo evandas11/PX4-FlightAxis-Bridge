@@ -194,15 +194,23 @@ private:
 
 	// Heading anchor. home_yaw is the configured start heading (deg true), NAN
 	// when the feature is off. yaw_rot_rad is the rotation actually applied to
-	// the RF world, latched ONCE in resetPositionOffset() and held for the life
-	// of the session; it is 0 whenever home_yaw is NAN, so the unconfigured path
-	// costs nothing and changes nothing. It deliberately does NOT follow the
-	// position anchor, which is re-captured on every respawn: the anchor is an
-	// origin, the rotation is the frame itself, and moving a frame that PX4 has
-	// already converged on is not something the HIL interface can express.
+	// the RF world, derived in resetPositionOffset() alongside the position
+	// anchor and re-derived with it on a respawn; it is 0 whenever home_yaw is
+	// NAN, so the unconfigured path costs nothing and changes nothing.
 	double home_yaw;	// deg true, NAN = disabled
 	double yaw_rot_rad;	// applied RF-world -> true-north rotation
-	bool yaw_datum_latched{false};
+
+	// A respawn re-derives both the position anchor and the heading datum, but
+	// only once the model is standing still: RealFlight clears its reset flag
+	// before placement finishes, and a datum read mid-placement carries the
+	// attitude the crash left rather than the runway heading. SETTLE_HOLD_S of
+	// continuous stillness arms the capture; SETTLE_TIMEOUT_S caps the wait so
+	// a model that never reports itself still is still anchored.
+	static constexpr double SETTLE_SPEED_SQ  = 0.25;	// (0.5 m/s)^2
+	static constexpr double SETTLE_HOLD_S    = 0.25;
+	static constexpr double SETTLE_TIMEOUT_S = 5.0;
+	double settle_wait_s{0.0};
+	double settle_timeout_s{0.0};
 
 	// physics time since epoch capture (us), mirrored from the main loop;
 	// getSensorMsg() / getDistanceSensorMsg() add offset_us on top

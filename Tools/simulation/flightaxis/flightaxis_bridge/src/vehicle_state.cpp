@@ -279,28 +279,22 @@ void VehicleState::resetPositionOffset(const FAState &fa)
 	 * makes PX4_HOME_YAW mean the same thing whatever the RF runway happens to
 	 * be aligned to.
 	 *
-	 * Latched ONCE, on the first capture, and deliberately not redone when a
-	 * respawn brings us back here. The position anchor must be re-captured -
-	 * the aircraft has teleported and the old origin is meaningless - but the
-	 * world rotation may not be, because it defines the frame every other
-	 * quantity is already expressed in. Re-deriving it from wherever the model
-	 * happens to point after a reset rotates that frame underneath PX4:
-	 * attitude, velocity and position all move to the new frame on the next
-	 * message while the synthetic magnetic field, which is built from the home
-	 * location and never rotated, stays in the old one. EKF2 has by then
-	 * converged on the old rotation, so the two disagree by exactly the change,
-	 * mag fusion starts failing its innovation gate, and yaw - and the position
-	 * that is dead-reckoned through it - go with it.
+	 * Re-derived on a respawn as well as at startup, because a reset puts the
+	 * model back where it entered and PX4 should see the same thing it saw
+	 * then - position and heading both. The caller guarantees the model is
+	 * standing still before we get here, and that guarantee is what makes this
+	 * safe: read mid-placement, the attitude is whatever the crash left rather
+	 * than the runway heading, and latching that rotates the frame underneath
+	 * PX4. Attitude, velocity and position would all move to the new frame on
+	 * the next message while the synthetic magnetic field, built from the home
+	 * location and never rotated, stayed in the old one - mag and GNSS then
+	 * pull EKF2 in different directions and yaw goes, taking the position that
+	 * is dead-reckoned through it with it.
 	 */
-	if (yaw_datum_latched) {
-		// keep yaw_rot_rad
-
-	} else if (std::isnan(home_yaw)) {
+	if (std::isnan(home_yaw)) {
 		yaw_rot_rad = 0.0;
-		yaw_datum_latched = true;
 
 	} else {
-		yaw_datum_latched = true;
 		Quaterniond q_rf(fa.m_orientationQuaternionW,
 				 fa.m_orientationQuaternionY,
 				 fa.m_orientationQuaternionX,
@@ -336,8 +330,36 @@ void VehicleState::setFAData(const FAState &fa, double dt_true)
 	//
 	// This runs FIRST because it establishes yaw_rot_rad, and every conversion
 	// below is expressed in the rotated world. It depends on nothing but `fa`.
+	//
+	// Held back until the model is actually standing still on the runway.
+	// RealFlight clears m_resetButtonHasBeenPressed before it has finished
+	// placing the aircraft, and the bridge's own reinject calls ResetAircraft
+	// again on top, so the first frame that reaches here can still describe a
+	// model in mid-placement - the attitude it carries is whatever the crash
+	// left, not the runway heading. Anchoring position to that is survivable,
+	// since the error is one respawn's worth of metres; deriving the heading
+	// datum from it is not, because the datum defines the frame every later
+	// message is expressed in.
+	//
+	// ArduPilot sidesteps this by re-capturing on every frame while the flag
+	// is high, so its last capture is the settled one - but it has no heading
+	// datum to get wrong. Waiting for stillness gives the same guarantee for
+	// both quantities. The timeout is there so a model that never reports
+	// itself still (a boat, a hovering respawn) still gets an anchor.
 	if (!offset_captured) {
-		resetPositionOffset(fa);
+		const double speed_sq = fa.m_velocityWorldU_MPS * fa.m_velocityWorldU_MPS +
+					fa.m_velocityWorldV_MPS * fa.m_velocityWorldV_MPS +
+					fa.m_velocityWorldW_MPS * fa.m_velocityWorldW_MPS;
+		const bool still = fa.m_isTouchingGround && speed_sq < SETTLE_SPEED_SQ;
+
+		settle_wait_s = still ? (settle_wait_s + dt_true) : 0.0;
+		settle_timeout_s += dt_true;
+
+		if (settle_wait_s >= SETTLE_HOLD_S || settle_timeout_s >= SETTLE_TIMEOUT_S) {
+			resetPositionOffset(fa);
+			settle_wait_s = 0.0;
+			settle_timeout_s = 0.0;
+		}
 	}
 
 	// Quaternion RF -> NED: q_ned = (w=W, x=RF_Y, y=RF_X, z=-RF_Z), then turned
