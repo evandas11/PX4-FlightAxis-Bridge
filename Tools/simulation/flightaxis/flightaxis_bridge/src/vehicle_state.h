@@ -82,7 +82,7 @@ public:
 	// captured together - and dropped together by invalidatePositionOffset(),
 	// so a RealFlight reset re-derives the rotation against the post-reset
 	// attitude instead of keeping one measured before the teleport.
-	void resetPositionOffset(const FAState &fa);
+	void resetPositionOffset(const FAState &fa, bool announce = true);
 
 	// Drop the captured offset so the NEXT real frame re-anchors from a
 	// post-reset position (zeroing the position offset).
@@ -200,17 +200,16 @@ private:
 	double home_yaw;	// deg true, NAN = disabled
 	double yaw_rot_rad;	// applied RF-world -> true-north rotation
 
-	// A respawn re-derives both the position anchor and the heading datum, but
-	// only once the model is standing still: RealFlight clears its reset flag
-	// before placement finishes, and a datum read mid-placement carries the
-	// attitude the crash left rather than the runway heading. SETTLE_HOLD_S of
-	// continuous stillness arms the capture; SETTLE_TIMEOUT_S caps the wait so
-	// a model that never reports itself still is still anchored.
-	static constexpr double SETTLE_SPEED_SQ  = 0.25;	// (0.5 m/s)^2
-	static constexpr double SETTLE_HOLD_S    = 0.25;
-	static constexpr double SETTLE_TIMEOUT_S = 5.0;
-	double settle_wait_s{0.0};
-	double settle_timeout_s{0.0};
+	// A respawn re-derives both the position anchor and the heading datum, and
+	// keeps re-deriving them for this long afterwards with the last value
+	// standing. RealFlight clears its reset flag before placement has settled,
+	// so a single capture on the first frame can read a model still in motion;
+	// refreshing across the transient lands on the placed aircraft without
+	// requiring it to be stationary, which is how ArduPilot's every-frame
+	// re-capture behaves. Long enough to outlast placement, short enough that
+	// a taxiing aircraft is never re-anchored under itself.
+	static constexpr double RECAPTURE_WINDOW_S = 0.5;
+	double recapture_left_s{0.0};
 
 	// physics time since epoch capture (us), mirrored from the main loop;
 	// getSensorMsg() / getDistanceSensorMsg() add offset_us on top

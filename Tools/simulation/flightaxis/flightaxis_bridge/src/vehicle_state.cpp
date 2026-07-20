@@ -265,7 +265,7 @@ Vector3d VehicleState::rotateWorld(const Vector3d &v) const
 			v.z());
 }
 
-void VehicleState::resetPositionOffset(const FAState &fa)
+void VehicleState::resetPositionOffset(const FAState &fa, bool announce)
 {
 	// position NED: (N = RF_Y, E = RF_X, D = -altASL)
 	position_offset = Vector3d(fa.m_aircraftPositionY_MTR,
@@ -302,10 +302,12 @@ void VehicleState::resetPositionOffset(const FAState &fa)
 		q_rf.normalize();
 		yaw_rot_rad = wrapPi(home_yaw * DEG2RAD - yawFromQuat(q_rf));
 
-		std::cerr << "[flightaxis_bridge] heading datum: RealFlight reports "
-			  << (RAD2DEG * yawFromQuat(q_rf)) << " deg, PX4_HOME_YAW asks for "
-			  << home_yaw << " deg -> rotating the RF world by "
-			  << (RAD2DEG * yaw_rot_rad) << " deg" << std::endl;
+		if (announce) {
+			std::cerr << "[flightaxis_bridge] heading datum: RealFlight reports "
+				  << (RAD2DEG * yawFromQuat(q_rf)) << " deg, PX4_HOME_YAW asks for "
+				  << home_yaw << " deg -> rotating the RF world by "
+				  << (RAD2DEG * yaw_rot_rad) << " deg" << std::endl;
+		}
 	}
 
 	offset_captured = true;
@@ -331,35 +333,35 @@ void VehicleState::setFAData(const FAState &fa, double dt_true)
 	// This runs FIRST because it establishes yaw_rot_rad, and every conversion
 	// below is expressed in the rotated world. It depends on nothing but `fa`.
 	//
-	// Held back until the model is actually standing still on the runway.
-	// RealFlight clears m_resetButtonHasBeenPressed before it has finished
-	// placing the aircraft, and the bridge's own reinject calls ResetAircraft
-	// again on top, so the first frame that reaches here can still describe a
-	// model in mid-placement - the attitude it carries is whatever the crash
-	// left, not the runway heading. Anchoring position to that is survivable,
-	// since the error is one respawn's worth of metres; deriving the heading
-	// datum from it is not, because the datum defines the frame every later
-	// message is expressed in.
+	// Re-derived on every frame for a short window after the anchor is dropped,
+	// with the last value standing - which is how ArduPilot survives the same
+	// transient: it re-captures the offset on every frame while RealFlight's
+	// reset flag is high, so whatever it holds when the flag clears is the
+	// placed aircraft, moving or not. This bridge cannot capture during that
+	// window, because the main loop skips setFAData() while the flag is high,
+	// so it keeps re-deriving for RECAPTURE_WINDOW_S afterwards instead.
 	//
-	// ArduPilot sidesteps this by re-capturing on every frame while the flag
-	// is high, so its last capture is the settled one - but it has no heading
-	// datum to get wrong. Waiting for stillness gives the same guarantee for
-	// both quantities. The timeout is there so a model that never reports
-	// itself still (a boat, a hovering respawn) still gets an anchor.
+	// The window matters more here than it does upstream. RealFlight clears
+	// the flag before placement has finished settling and the bridge's own
+	// reinject calls ResetAircraft again on top, so a single capture on the
+	// first frame can land mid-placement. For position that costs a few
+	// metres. For the heading datum it rotates the frame every later message
+	// is expressed in, while the synthetic magnetic field - built from the
+	// home location, never rotated - stays behind in the old one.
+	//
+	// An anchor still exists from the first frame: the window refreshes it, it
+	// does not delay it.
 	if (!offset_captured) {
-		const double speed_sq = fa.m_velocityWorldU_MPS * fa.m_velocityWorldU_MPS +
-					fa.m_velocityWorldV_MPS * fa.m_velocityWorldV_MPS +
-					fa.m_velocityWorldW_MPS * fa.m_velocityWorldW_MPS;
-		const bool still = fa.m_isTouchingGround && speed_sq < SETTLE_SPEED_SQ;
+		resetPositionOffset(fa, false);
+		recapture_left_s = RECAPTURE_WINDOW_S;
 
-		settle_wait_s = still ? (settle_wait_s + dt_true) : 0.0;
-		settle_timeout_s += dt_true;
+	} else if (recapture_left_s > 0.0) {
+		recapture_left_s -= dt_true;
 
-		if (settle_wait_s >= SETTLE_HOLD_S || settle_timeout_s >= SETTLE_TIMEOUT_S) {
-			resetPositionOffset(fa);
-			settle_wait_s = 0.0;
-			settle_timeout_s = 0.0;
-		}
+		// Announce only the capture that stands: the window refreshes at the
+		// SOAP frame rate, so announcing each one would print a few hundred
+		// identical lines per respawn.
+		resetPositionOffset(fa, recapture_left_s <= 0.0);
 	}
 
 	// Quaternion RF -> NED: q_ned = (w=W, x=RF_Y, y=RF_X, z=-RF_Z), then turned
