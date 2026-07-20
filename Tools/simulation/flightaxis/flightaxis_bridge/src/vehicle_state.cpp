@@ -354,34 +354,20 @@ void VehicleState::setFAData(const FAState &fa, double dt_true)
 	// This runs FIRST because it establishes yaw_rot_rad, and every conversion
 	// below is expressed in the rotated world. It depends on nothing but `fa`.
 	//
-	// Re-derived on every frame for a short window after the anchor is dropped,
-	// with the last value standing - which is how ArduPilot survives the same
-	// transient: it re-captures the offset on every frame while RealFlight's
-	// reset flag is high, so whatever it holds when the flag clears is the
-	// placed aircraft, moving or not. This bridge cannot capture during that
-	// window, because the main loop skips setFAData() while the flag is high,
-	// so it keeps re-deriving for RECAPTURE_WINDOW_S afterwards instead.
+	// Captured once per reset, not refreshed afterwards. A window that kept
+	// re-capturing looked harmless - it only moves an origin - but position is
+	// the ONLY quantity the offset applies to. Velocity and the acceleration
+	// derived from it are sent raw, so while the offset was being pinned to the
+	// live position PX4 received a vehicle that was stationary and accelerating
+	// at the same time. Measured: ten seconds of specific force averaging
+	// 12.2 m/s2 against gravity's 9.81, peaking at the 3 g synthetic limit,
+	// with GPS steady at 0.00 m/s throughout - and EKF2 integrating the
+	// difference to 29 m/s.
 	//
-	// The window matters more here than it does upstream. RealFlight clears
-	// the flag before placement has finished settling and the bridge's own
-	// reinject calls ResetAircraft again on top, so a single capture on the
-	// first frame can land mid-placement. For position that costs a few
-	// metres. For the heading datum it rotates the frame every later message
-	// is expressed in, while the synthetic magnetic field - built from the
-	// home location, never rotated - stays behind in the old one.
-	//
-	// An anchor still exists from the first frame: the window refreshes it, it
-	// does not delay it.
+	// ArduPilot has the same single capture and applies the offset after the
+	// accelerometer work for the same reason (SIM_FlightAxis.cpp: the
+	// position_offset assignment sits below the accel block, not above it).
 	if (!offset_captured) {
-		resetPositionOffset(fa);
-		recapture_left_s = RECAPTURE_WINDOW_S;
-
-	} else if (recapture_left_s > 0.0) {
-		recapture_left_s -= dt_true;
-
-		// Announce only the capture that stands: the window refreshes at the
-		// SOAP frame rate, so announcing each one would print a few hundred
-		// identical lines per respawn.
 		resetPositionOffset(fa);
 	}
 

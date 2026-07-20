@@ -200,16 +200,8 @@ private:
 	double home_yaw;	// deg true, NAN = disabled
 	double yaw_rot_rad;	// applied RF-world -> true-north rotation
 
-	// A respawn re-derives both the position anchor and the heading datum, and
-	// keeps re-deriving them for this long afterwards with the last value
-	// standing. RealFlight clears its reset flag before placement has settled,
-	// so a single capture on the first frame can read a model still in motion;
-	// refreshing across the transient lands on the placed aircraft without
-	// requiring it to be stationary, which is how ArduPilot's every-frame
-	// re-capture behaves. Long enough to outlast placement, short enough that
-	// a taxiing aircraft is never re-anchored under itself.
-	static constexpr double RECAPTURE_WINDOW_S = 0.5;
-	double recapture_left_s{0.0};
+	// The heading datum is derived on the first capture of the session only;
+	// respawns re-capture the position offset and leave the frame alone.
 	bool datum_latched{false};
 
 	// physics time since epoch capture (us), mirrored from the main loop;
