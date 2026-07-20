@@ -364,25 +364,6 @@ magnetometer and gyro *ids* but no offsets and reports `Compass 0 fault`, and th
 **Vehicle Setup → Sensors**, compass then gyroscope — and it is stored in that working
 directory for good, and is what every later directory seeds from.
 
-#### PX4's in-flight sensor learning is turned off for you
-
-The four shipped airframes set `SENS_IMU_AUTOCAL`, `SENS_MAG_AUTOCAL` and `IMU_GYRO_CAL_EN`
-to `0`. All three default to `1`, and on a real aircraft that is correct: the sensors drift,
-PX4 learns the bias in flight and saves it. Here every sensor is synthesised from RealFlight's
-state and has no bias to find, so what PX4 learns instead is its own estimator transients —
-and it writes them to `parameters.bson` as permanent calibration.
-
-Measured in one session: an accelerometer offset moving from zero to
-`+0.308, -0.173, +0.040 m/s²`. A 0.36 m/s² bias dead-reckons to roughly 21 m/s over a minute,
-which presents as the aircraft wandering across the QGC map while it sits perfectly still in
-RealFlight. The offsets accumulate across sessions rather than resetting with each run, so the
-symptom looks intermittent and unrelated to whatever was last changed.
-
-Nothing to do for a new working directory. If you have flown one before this was set — the
-giveaway is `ACC 0 offset committed` in the console — the saved offsets are still there and
-outrank the airframe; clearing them is in
-[RUNNING.md §7](RUNNING.md#7-troubleshooting) under the sensor-learning entry.
-
 #### Stored values against the airframe's defaults
 
 If a stored value seems to be overriding the airframe, reset that parameter rather than the
