@@ -295,6 +295,24 @@ directory is created if it is missing, so the first run comes up on the airframe
 and every later run picks up whatever you have tuned, saved and uploaded since. Stop with
 Ctrl-C; tomorrow, run the same line again.
 
+Three things end up in there, and they are the three that make the separation worth having:
+
+```
+~/sitl/fa-rootfs/quadplane/
+├── eeprom/parameters.bson    # tuning, calibration, flight modes
+├── dataman                   # missions, geofence, rally points
+└── log/                      # flight logs
+```
+
+Give every model one and they stop reaching into each other's:
+
+```bash
+PX4_FLIGHTAXIS_ROOTFS=~/sitl/fa-rootfs/plane      ... flightaxis_plane
+PX4_FLIGHTAXIS_ROOTFS=~/sitl/fa-rootfs/quad       ... flightaxis_quad
+PX4_FLIGHTAXIS_ROOTFS=~/sitl/fa-rootfs/quadplane  ... flightaxis_quadplane
+PX4_FLIGHTAXIS_ROOTFS=~/sitl/fa-rootfs/heli       ... flightaxis_heli
+```
+
 Leave the line out and the model runs in `build/px4_sitl_nolockstep/rootfs` instead — the
 directory every model shares if it is not given one of its own. Nothing else about the
 invocation changes:
