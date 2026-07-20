@@ -6,7 +6,9 @@ launch with one `make` command.
 
 ```bash
 # RealFlight running on a Windows box (RealFlight Link enabled in RealFlight settings)
-PX4_FLIGHTAXIS_IP=192.168.10.1 make px4_sitl_nolockstep flightaxis_plane
+PX4_FLIGHTAXIS_IP=192.168.10.1 \
+PX4_HOME_LAT=-37.7304917 PX4_HOME_LON=175.7433944 PX4_HOME_ALT=48.0 PX4_HOME_YAW=235 \
+make px4_sitl_nolockstep flightaxis_plane
 # QGC connects on UDP 14550 as usual
 ```
 
@@ -242,17 +244,8 @@ apply as written (see spec §3).
 
 ### Run it
 
-Both methods end in the same place — from your PX4 tree:
-
-```bash
-PX4_FLIGHTAXIS_IP=<windows-ip> make px4_sitl_nolockstep flightaxis_plane
-```
-
-(also `flightaxis_quad`, `flightaxis_quadplane`, `flightaxis_heli`; QGC connects on UDP 14550)
-
-A real invocation, with the home position pinned to the field you actually fly at and the
-aircraft started on the runway heading — this is the form worth keeping around, since the
-default home is in Zurich and everything on the QGC map hangs off it:
+Both methods end in the same place. Use this form — the home position pinned to the field
+you actually fly at, and the aircraft started on the runway heading:
 
 ```bash
 cd ~/PX4-Autopilot
@@ -261,9 +254,16 @@ PX4_FLIGHTAXIS_IP=192.168.10.1 \
 PX4_HOME_LAT=-37.7304917 \
 PX4_HOME_LON=175.7433944 \
 PX4_HOME_ALT=48.0 \
-PX4_HOME_YAW=205 \
-make px4_sitl_nolockstep flightaxis_quadplane
+PX4_HOME_YAW=235 \
+make px4_sitl_nolockstep flightaxis_plane
 ```
+
+(also `flightaxis_quad`, `flightaxis_quadplane`, `flightaxis_heli`; QGC connects on UDP 14550)
+
+Only `PX4_FLIGHTAXIS_IP` is strictly required, but leaving the rest out puts home at PX4's
+default in Zurich while RealFlight flies you around a field on the other side of the world.
+Everything on the QGC map hangs off that origin, and `PX4_HOME_YAW` is what lines the runway
+up with the heading you see in the simulator, so it is worth setting all five every time.
 
 Stop it with Ctrl-C in that terminal: PX4 and the bridge both exit, and the bridge hands
 RealFlight back to your transmitter on the way out.
@@ -287,11 +287,18 @@ but discards tuning.
 and the two problems disappear together, because parameters, missions and logs all live
 beside each other:
 
+It is one more line on the invocation above — the home position still has to be set every
+run, since it is read at startup and not stored anywhere:
+
 ```bash
 cd ~/PX4-Autopilot
 
 PX4_FLIGHTAXIS_ROOTFS=~/sitl/fa-rootfs/quadplane \
 PX4_FLIGHTAXIS_IP=192.168.10.1 \
+PX4_HOME_LAT=-37.7304917 \
+PX4_HOME_LON=175.7433944 \
+PX4_HOME_ALT=48.0 \
+PX4_HOME_YAW=235 \
 make px4_sitl_nolockstep flightaxis_quadplane
 ```
 
@@ -299,6 +306,10 @@ The directory is created if it does not exist, so the same command starts a new 
 resumes an existing one — there is nothing to set up first. A first run comes up on the
 airframe's defaults; every later run in that directory picks up whatever you have since
 tuned and saved, and whatever missions you have uploaded.
+
+The directory name is yours, not the model's, so two configurations of one aircraft are just
+two directories — `~/sitl/fa-rootfs/heli-3d` and `~/sitl/fa-rootfs/heli-scale` both run
+`make px4_sitl_nolockstep flightaxis_heli` and keep separate parameters.
 
 The path is yours to choose. Somewhere outside the PX4 tree, as above, survives `make clean`
 and reinstalling; a path under `build/` does not. Relative paths are resolved before PX4

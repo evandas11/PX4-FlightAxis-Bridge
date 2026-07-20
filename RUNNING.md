@@ -299,8 +299,16 @@ Do this once per aircraft in RealFlight's aircraft editor:
 
 ```bash
 cd ~/PX4-Autopilot
-PX4_FLIGHTAXIS_IP=192.168.10.1 make px4_sitl_nolockstep flightaxis_plane
+PX4_FLIGHTAXIS_IP=192.168.10.1 \
+PX4_HOME_LAT=-37.7304917 \
+PX4_HOME_LON=175.7433944 \
+PX4_HOME_ALT=48.0 \
+PX4_HOME_YAW=235 \
+make px4_sitl_nolockstep flightaxis_plane
 ```
+
+Substitute your own field's coordinates and the runway heading you start on; see
+[Home position and heading](#3-home-position-and-heading) for what each one does.
 
 Airframe: `1200_flightaxis_plane` (`SYS_AUTOSTART` 1200, `CA_AIRFRAME 1`).
 Channel map: `models/plane.json`. Options: `ResetPosition` + `SilenceFPS` (bitmask **9** = 1 | 8).
@@ -352,7 +360,12 @@ and `NAV_ACC_RAD 15` means waypoints are considered hit from 15 m out.
 
 ```bash
 cd ~/PX4-Autopilot
-PX4_FLIGHTAXIS_IP=192.168.10.1 make px4_sitl_nolockstep flightaxis_quad
+PX4_FLIGHTAXIS_IP=192.168.10.1 \
+PX4_HOME_LAT=-37.7304917 \
+PX4_HOME_LON=175.7433944 \
+PX4_HOME_ALT=48.0 \
+PX4_HOME_YAW=235 \
+make px4_sitl_nolockstep flightaxis_quad
 ```
 
 Airframe: `1201_flightaxis_quad` (`SYS_AUTOSTART` 1201, `CA_AIRFRAME 0`, quad X).
@@ -398,7 +411,12 @@ then switch to **Position** and hover hands-off to confirm EKF position hold.
 
 ```bash
 cd ~/PX4-Autopilot
-PX4_FLIGHTAXIS_IP=192.168.10.1 make px4_sitl_nolockstep flightaxis_quadplane
+PX4_FLIGHTAXIS_IP=192.168.10.1 \
+PX4_HOME_LAT=-37.7304917 \
+PX4_HOME_LON=175.7433944 \
+PX4_HOME_ALT=48.0 \
+PX4_HOME_YAW=235 \
+make px4_sitl_nolockstep flightaxis_quadplane
 ```
 
 Airframe: `1202_flightaxis_quadplane` (`SYS_AUTOSTART` 1202, `CA_AIRFRAME 2`, standard VTOL,
@@ -489,7 +507,12 @@ forward transition drops the aircraft.
 
 ```bash
 cd ~/PX4-Autopilot
-PX4_FLIGHTAXIS_IP=192.168.10.1 make px4_sitl_nolockstep flightaxis_heli
+PX4_FLIGHTAXIS_IP=192.168.10.1 \
+PX4_HOME_LAT=-37.7304917 \
+PX4_HOME_LON=175.7433944 \
+PX4_HOME_ALT=48.0 \
+PX4_HOME_YAW=235 \
+make px4_sitl_nolockstep flightaxis_heli
 ```
 
 Airframe: `1203_flightaxis_heli` (`SYS_AUTOSTART` 1203, `CA_AIRFRAME 11` = "Helicopter
@@ -990,8 +1013,13 @@ instance:
 ```bash
 PX4_FLIGHTAXIS_ROOTFS=~/sitl/fa-rootfs/quadplane \
 PX4_FLIGHTAXIS_IP=192.168.10.1 \
+PX4_HOME_LAT=-37.7304917 PX4_HOME_LON=175.7433944 \
+PX4_HOME_ALT=48.0 PX4_HOME_YAW=235 \
   make px4_sitl_nolockstep flightaxis_quadplane
 ```
+
+The home variables are unaffected by the working directory — they are read at startup and
+stored nowhere, so they belong on every invocation regardless.
 
 The working directory is where `parameters.bson`, dataman and `log/` all live, so pointing it
 per-model separates all three at once. Without it every model shares one of each: a quadplane

@@ -88,8 +88,16 @@ MicroXRCEAgent udp4 -p 8888
 **Terminal 2 — RealFlight + PX4:**
 
 ```bash
-PX4_FLIGHTAXIS_IP=192.168.10.1 make px4_sitl_nolockstep flightaxis_quad
+PX4_FLIGHTAXIS_IP=192.168.10.1 \
+PX4_HOME_LAT=-37.7304917 \
+PX4_HOME_LON=175.7433944 \
+PX4_HOME_ALT=48.0 \
+PX4_HOME_YAW=235 \
+make px4_sitl_nolockstep flightaxis_quad
 ```
+
+The home variables are read by the bridge at startup and stored nowhere, so they belong on
+every run; substitute your own field. See RUNNING.md §3.
 
 **Terminal 3 — ROS 2:**
 

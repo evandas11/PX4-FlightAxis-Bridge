@@ -494,7 +494,11 @@ Run against the board:
 
 ```bash
 # USB, quad model, RealFlight on this machine
-./Tools/simulation/flightaxis/hitl_run.sh quad "$PWD" "$PWD/build/px4_sitl_nolockstep"
+PX4_HOME_LAT=-37.7304917 \
+PX4_HOME_LON=175.7433944 \
+PX4_HOME_ALT=48.0 \
+PX4_HOME_YAW=235 \
+  ./Tools/simulation/flightaxis/hitl_run.sh quad "$PWD" "$PWD/build/px4_sitl_nolockstep"
 
 # explicit device
 ./Tools/simulation/flightaxis/hitl_run.sh quad "$PWD" "$PWD/build/px4_sitl_nolockstep" /dev/ttyUSB0
@@ -503,6 +507,9 @@ Run against the board:
 PX4_FLIGHTAXIS_IP=192.168.1.50 \
   ./Tools/simulation/flightaxis/hitl_run.sh plane "$PWD" "$PWD/build/px4_sitl_nolockstep"
 ```
+
+The `PX4_HOME_*` variables are the bridge's, not the runner's, and mean here exactly what they
+mean in SITL — the two shortened examples above omit them only to keep the varying part visible.
 
 There is also a make-style target, though see the caveat below:
 
