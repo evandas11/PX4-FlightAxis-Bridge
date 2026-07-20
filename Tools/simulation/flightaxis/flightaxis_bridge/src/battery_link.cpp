@@ -375,6 +375,31 @@ void BatteryLink::update(const FAState &fa, uint64_t now_us)
 		_last_voltage_v = voltage_v;
 		_last_remaining = remaining;
 
+	} else if (_source == Source::Fuel && !(std::isfinite(fuel_oz) && fuel_oz >= 0.0)) {
+		/*
+		 * Latched fuel, but THIS frame's tank reading is a sentinel (-1) or
+		 * garbage. The electric branch above holds for the same reason, but the
+		 * condition here is deliberately NARROWER than `fuel_plausible`.
+		 *
+		 * `fuel_plausible` also rejects a tank at or near zero, and that is a
+		 * real reading, not a bad one: an empty tank is precisely the state the
+		 * fuel failsafe exists to act on, and holding it would report flying
+		 * time remaining on an aircraft whose engine is about to stop. Only a
+		 * negative or non-finite value is physically impossible; running one
+		 * through the fraction below clamps `remaining` to 0, which PX4 latches
+		 * to CRITICAL and never lowers.
+		 *
+		 * _fuel_last_oz is deliberately NOT updated from here either, so a
+		 * sentinel cannot be mistaken for the step change that re-arms the tank
+		 * reference.
+		 */
+		source    = Source::Fuel;
+		voltage_v = SYNTHETIC_V;
+		current_a = 0.0;
+		cells     = SYNTHETIC_CELLS;
+		batt_type = MAV_BATTERY_TYPE_UNKNOWN;
+		remaining = _last_remaining;
+
 	} else if (_source == Source::Fuel) {
 		// ---- Internal combustion --------------------------------------------
 		// This is the case the spec's pitfalls ledger flags: RealFlight's IC
@@ -539,6 +564,24 @@ void BatteryLink::update(const FAState &fa, uint64_t now_us)
 		}
 
 		fprintf(stderr, "[flightaxis_bridge] battery source: %s\n", name);
+
+		/*
+		 * FlightAxis names the field m-fuelRemaining-OZ, but nothing upstream
+		 * consumes it - ArduPilot parses the key and never reads it - so the
+		 * unit is asserted by the name alone. It does not matter to the code
+		 * below, which divides by the largest value it has seen and is
+		 * therefore correct whether RealFlight reports ounces, percent or a
+		 * 0..1 fraction. It does matter to anyone reading the number, so print
+		 * the raw reading alongside the reference it is being measured against:
+		 * a full tank showing 100.0 or 1.000 settles the question in one flight.
+		 */
+		if (source == Source::Fuel) {
+			fprintf(stderr, "[flightaxis_bridge]   tank: %.3f raw (m-fuelRemaining-OZ), "
+				"reference %.3f -> %.0f%%\n",
+				fuel_oz, _fuel_full_oz,
+				(_fuel_full_oz > 0.0) ? 100.0 * remaining : 100.0);
+		}
+
 		_reported = source;
 	}
 
