@@ -303,6 +303,8 @@ void VehicleState::setFAData(const FAState &fa, double dt_true)
 		dt_true = 0.001;
 	}
 
+	anchor_seeded_this_frame = false;
+
 	// Re-anchor whenever there is no valid anchor. This is deliberately the
 	// ONLY condition: m_resetButtonHasBeenPressed is NOT checked here, because
 	// this function is unreachable while that flag is set - the bridge's main
@@ -344,9 +346,15 @@ void VehicleState::setFAData(const FAState &fa, double dt_true)
 					   fa.m_velocityWorldV_MPS,
 					   fa.m_velocityWorldW_MPS));
 
+	// Seeding the anchor also restarts the accumulated differentiation window:
+	// the time that elapsed before the anchor existed did not span it, and
+	// crediting it would divide this frame's velocity delta by roughly twice
+	// the interval it actually covers.
 	if (!have_last_velocity) {
 		last_velocity_ef = velocity_ef;
 		have_last_velocity = true;
+		diff_accum_dt = 0.0;
+		anchor_seeded_this_frame = true;
 	}
 
 	// Position NED: (N=RF_Y, E=RF_X, D=-altASL), minus captured offset
@@ -444,6 +452,23 @@ void VehicleState::setFAData(const FAState &fa, double dt_true)
 	// (yields exactly (0,0,-g) at rest)
 	const bool use_finite_difference = fa.m_isTouchingGround || accel_absent;
 
+	/*
+	 * Switching accel source means the next difference would span a
+	 * discontinuity, so the history goes on the edge. This runs BEFORE the
+	 * block below rather than after it: clearing the state afterwards would
+	 * let the transition frame itself difference against a stale anchor, and
+	 * cost a second frame of fabricated at-rest before the window reopens.
+	 * invalidatePositionOffset() does the same for a respawn.
+	 */
+	if (use_finite_difference != last_used_finite_difference) {
+		last_velocity_ef = velocity_ef;
+		have_last_velocity = true;
+		diff_accum_dt = 0.0;
+		have_synth_accel = false;
+		anchor_seeded_this_frame = true;
+		last_used_finite_difference = use_finite_difference;
+	}
+
 	if (use_finite_difference) {
 		/*
 		 * Differentiating velocity amplifies by 1/dt, so a tiny velocity step
@@ -461,7 +486,11 @@ void VehicleState::setFAData(const FAState &fa, double dt_true)
 		const double MIN_DIFF_DT_S = 0.005;
 		const double SYNTH_LIMIT   = GRAVITY_MSS * 3.0;
 
-		diff_accum_dt += dt_true;
+		// Not on the frame that seeded the anchor: that interval elapsed
+		// before the anchor existed and does not span the difference.
+		if (!anchor_seeded_this_frame) {
+			diff_accum_dt += dt_true;
+		}
 
 		if (have_last_velocity && diff_accum_dt >= MIN_DIFF_DT_S) {
 			Vector3d accel_ef = (velocity_ef - last_velocity_ef) / diff_accum_dt;
@@ -492,19 +521,6 @@ void VehicleState::setFAData(const FAState &fa, double dt_true)
 			// valid so EKF2 can still correct tilt.
 			accel_body = q_ned.inverse() * Vector3d(0.0, 0.0, -GRAVITY_MSS);
 		}
-	}
-
-	/*
-	 * Switching accel source mid-flight means the next finite difference would
-	 * span a discontinuity, so drop the history on the edge. invalidatePosition
-	 * Offset() already does this for a respawn (vehicle_state.h:84), but that
-	 * only runs on the reset button.
-	 */
-	if (use_finite_difference != last_used_finite_difference) {
-		have_last_velocity = false;
-		diff_accum_dt = 0.0;
-		have_synth_accel = false;
-		last_used_finite_difference = use_finite_difference;
 	}
 
 	// limit to 16 g to match pixhawk

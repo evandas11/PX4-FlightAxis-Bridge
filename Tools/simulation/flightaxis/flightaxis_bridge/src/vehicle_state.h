@@ -234,6 +234,10 @@ private:
 	double diff_accum_dt{0.0};
 	bool have_synth_accel{false};
 
+	// Set when this frame seeded the anchor, so the window does not accumulate
+	// an interval that elapsed before the anchor existed.
+	bool anchor_seeded_this_frame{false};
+
 	// synthesized sensors
 	Eigen::Vector3d mag_ned;		// earth field at home, gauss
 	Eigen::Vector3d mag_body;		// gauss
