@@ -272,40 +272,13 @@ void VehicleState::resetPositionOffset(const FAState &fa)
 				   fa.m_aircraftPositionX_MTR,
 				   -fa.m_altitudeASL_MTR);
 
-	/*
-	 * Heading datum. home_yaw is where the model should point; RealFlight has
-	 * just told us where it does point, and the difference is the rotation the
-	 * RF world needs. Deriving it here rather than from a fixed number is what
-	 * makes PX4_HOME_YAW mean the same thing whatever the RF runway happens to
-	 * be aligned to.
-	 *
-	 * Derived ONCE, on the first capture of the session, and never again. The
-	 * position offset above is re-captured on every respawn - that is what puts
-	 * the model back at the point it entered, and it is what ArduPilot does
-	 * (SIM_FlightAxis.cpp: `if (position_offset.is_zero() || resetPressed)`).
-	 * This is not re-derived with it, and the asymmetry is the point: an offset
-	 * is an origin and may move, a rotation is the frame everything else is
-	 * expressed in.
-	 *
-	 * Upstream never meets this problem because it has no rotation at all -
-	 * velocity_ef there is RealFlight's world velocity used raw. Here, changing
-	 * the rotation between two frames leaves the on-ground accelerometer
-	 * override differencing a velocity in the old frame against one in the new,
-	 * and it reads the rotation itself as acceleration. Measured, when this ran
-	 * per frame: a stationary model on the runway, GPS reporting 0.00 m/s, and
-	 * EKF2 dead-reckoning to 49.6 m/s and 121 m away.
-	 *
-	 * Holding it costs nothing that matters. A reset returns the model to where
-	 * it entered, so the rotation derived there is still the right one; and if
-	 * RealFlight ever places it somewhere else, PX4 seeing it somewhere else is
-	 * the honest answer rather than a frame quietly turning underneath it.
-	 */
-	if (datum_latched) {
-		// position refreshed above; the frame is left alone
-
-	} else if (std::isnan(home_yaw)) {
+	// Heading datum. home_yaw is where the model should point; RealFlight has
+	// just told us where it does point, and the difference is the rotation the
+	// RF world needs. Deriving it here rather than from a fixed number is what
+	// makes PX4_HOME_YAW mean the same thing whatever the RF runway happens to
+	// be aligned to.
+	if (std::isnan(home_yaw)) {
 		yaw_rot_rad = 0.0;
-		datum_latched = true;
 
 	} else {
 		Quaterniond q_rf(fa.m_orientationQuaternionW,
@@ -313,17 +286,7 @@ void VehicleState::resetPositionOffset(const FAState &fa)
 				 fa.m_orientationQuaternionX,
 				 -fa.m_orientationQuaternionZ);
 		q_rf.normalize();
-		datum_latched = true;
-		const double prev = yaw_rot_rad;
 		yaw_rot_rad = wrapPi(home_yaw * DEG2RAD - yawFromQuat(q_rf));
-
-		// The anchor velocity was captured in the old frame. Keeping it across
-		// a rotation change is the manufactured-acceleration case above.
-		if (yaw_rot_rad != prev) {
-			have_last_velocity = false;
-			have_synth_accel = false;
-			diff_accum_dt = 0.0;
-		}
 
 		std::cerr << "[flightaxis_bridge] heading datum: RealFlight reports "
 			  << (RAD2DEG * yawFromQuat(q_rf)) << " deg, PX4_HOME_YAW asks for "
@@ -353,23 +316,8 @@ void VehicleState::setFAData(const FAState &fa, double dt_true)
 	//
 	// This runs FIRST because it establishes yaw_rot_rad, and every conversion
 	// below is expressed in the rotated world. It depends on nothing but `fa`.
-	//
-	// Captured once per reset, not refreshed afterwards. A window that kept
-	// re-capturing looked harmless - it only moves an origin - but position is
-	// the ONLY quantity the offset applies to. Velocity and the acceleration
-	// derived from it are sent raw, so while the offset was being pinned to the
-	// live position PX4 received a vehicle that was stationary and accelerating
-	// at the same time. Measured: ten seconds of specific force averaging
-	// 12.2 m/s2 against gravity's 9.81, peaking at the 3 g synthetic limit,
-	// with GPS steady at 0.00 m/s throughout - and EKF2 integrating the
-	// difference to 29 m/s.
-	//
-	// ArduPilot has the same single capture and applies the offset after the
-	// accelerometer work for the same reason (SIM_FlightAxis.cpp: the
-	// position_offset assignment sits below the accel block, not above it).
 	if (!offset_captured) {
 		resetPositionOffset(fa);
-		respawn_freeze_left_s = RESPAWN_FREEZE_S;
 	}
 
 	// Quaternion RF -> NED: q_ned = (w=W, x=RF_Y, y=RF_X, z=-RF_Z), then turned
@@ -583,46 +531,6 @@ void VehicleState::setFAData(const FAState &fa, double dt_true)
 
 	// last_velocity_ef is NOT advanced here: it anchors the accumulated
 	// differentiation window above and moves only when that window closes.
-
-	/*
-	 * RESPAWN FREEZE.
-	 *
-	 * RealFlight teleports the model back to where it entered and then takes a
-	 * moment to settle it: dropped onto the gear, bouncing, sliding. Passing
-	 * that through is what kept breaking. The values are individually honest
-	 * but collectively incoherent once the position offset has been re-anchored
-	 * to the new origin - PX4 was told the aircraft was at home and stationary
-	 * while the acceleration derived from the same frames said otherwise, and
-	 * EKF2 integrated the difference. Worse, PX4's in-flight sensor learning
-	 * takes the transient for a real bias and COMMITS it: measured, an
-	 * accelerometer offset of -0.219 m/s2 saved after a respawn, which then
-	 * corrupts flights that involve no respawn at all.
-	 *
-	 * So for a short window the aircraft is reported the way RealFlight is
-	 * drawing it - parked at the entry point. Position is already home, because
-	 * the offset was just captured there; velocity and angular rate are zero;
-	 * specific force is gravity alone. Four quantities that agree with each
-	 * other and with the screen, which is what "the aircraft has been reset"
-	 * actually means to an estimator.
-	 *
-	 * Attitude is NOT frozen: it is the one thing RealFlight has right
-	 * immediately, and holding a stale one would fight the magnetometer.
-	 *
-	 * The velocity history goes with it, so the first real frame after the
-	 * window differences against a velocity from the same frame rather than
-	 * against zero.
-	 */
-	if (respawn_freeze_left_s > 0.0) {
-		respawn_freeze_left_s -= dt_true;
-
-		velocity_ef.setZero();
-		gyro.setZero();
-		accel_body = q_ned.inverse() * Vector3d(0.0, 0.0, -GRAVITY_MSS);
-
-		have_last_velocity = false;
-		have_synth_accel = false;
-		diff_accum_dt = 0.0;
-	}
 
 	// Pitot airspeed: body-X component of (vel - wind); RF's m_airspeed_MPS
 	// is total TAS and lies during hover/harrier/knife-edge

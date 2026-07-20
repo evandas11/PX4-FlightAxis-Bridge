@@ -194,23 +194,11 @@ private:
 
 	// Heading anchor. home_yaw is the configured start heading (deg true), NAN
 	// when the feature is off. yaw_rot_rad is the rotation actually applied to
-	// the RF world, derived in resetPositionOffset() alongside the position
-	// anchor and re-derived with it on a respawn; it is 0 whenever home_yaw is
-	// NAN, so the unconfigured path costs nothing and changes nothing.
+	// the RF world, derived once per anchor in resetPositionOffset() and valid
+	// only while offset_captured is true; it is 0 whenever home_yaw is NAN, so
+	// the unconfigured path costs nothing and changes nothing.
 	double home_yaw;	// deg true, NAN = disabled
 	double yaw_rot_rad;	// applied RF-world -> true-north rotation
-
-	// The heading datum is derived on the first capture of the session only;
-	// respawns re-capture the position offset and leave the frame alone.
-	bool datum_latched{false};
-
-	// How long after a respawn the aircraft is reported parked rather than
-	// having RealFlight's placement transient passed through. Long enough to
-	// outlast the drop and bounce, short enough that it cannot mask real
-	// motion: a pilot who respawns and immediately flies loses a fifth of a
-	// second of it.
-	static constexpr double RESPAWN_FREEZE_S = 0.2;
-	double respawn_freeze_left_s{0.0};
 
 	// physics time since epoch capture (us), mirrored from the main loop;
 	// getSensorMsg() / getDistanceSensorMsg() add offset_us on top
