@@ -418,7 +418,7 @@ static void seedDisarmChannels(const ChannelMap *maps, int nmaps, double unmappe
  */
 static void buildChannels(const VehicleState &veh, const ChannelMap *maps, int nmaps,
 			  double unmapped_default, uint32_t options, double channels[RF_CHANNELS],
-			  double out[RF_CHANNELS], bool force_disarmed)
+			  double out[RF_CHANNELS])
 {
 	bool mapped[RF_CHANNELS] = {};
 
@@ -435,16 +435,7 @@ static void buildChannels(const VehicleState &veh, const ChannelMap *maps, int n
 	}
 
 	const bool have_controls = veh.receivedFirstControls();
-	/*
-	 * force_disarmed short-circuits the arming state while the session is being
-	 * torn down for a restart. PX4 needs a few hundred milliseconds to act on
-	 * the disarm command and publish outputs that reflect it, and until then it
-	 * is still commanding whatever it was: reset a model at full throttle and
-	 * the prop keeps turning, so it rolls forward off the runway before it
-	 * spools down. Nothing PX4 says after a teleport is worth relaying - the
-	 * aircraft it was flying no longer exists.
-	 */
-	const bool armed = have_controls && veh.armed() && !force_disarmed;
+	const bool armed = have_controls && veh.armed();
 	const mavlink_hil_actuator_controls_t &c = veh.lastControls();
 
 	for (int i = 0; i < nmaps; i++) {
@@ -870,18 +861,6 @@ int main(int argc, char **argv)
 
 	const uint64_t RESET_RETRY_WINDOW_US   = 5000000;
 	const uint64_t RESET_RETRY_INTERVAL_US = 200000;
-	// Set when a restart has been requested: the loop then runs on only until
-	// PX4 closes the link, so its last frames still have sensors to consume.
-	const uint64_t SHUTDOWN_WAIT_US = 8000000;
-	uint64_t shutdown_deadline_us = 0;
-
-	// Set the moment a respawn is seen; the throttle is already at its disarm
-	// value by then, and this is how long the model is given to actually stop
-	// before it is re-placed. A quarter second covers a large electric prop
-	// windmilling down and is short enough not to read as a hang.
-	const uint64_t PROP_SETTLE_US = 250000;
-	uint64_t settle_until_us = 0;
-
 	uint64_t reset_retry_until_us = 0;
 	uint64_t reset_retry_next_us  = 0;
 
@@ -1096,21 +1075,11 @@ int main(int argc, char **argv)
 		// stop - which also stops hammering RealFlight with SOAP requests.
 		// See the dead-link policy block in px4_communicator.h.
 		if (px4.LinkLost()) {
-			if (shutdown_deadline_us != 0) {
-				// Expected: this is PX4 acting on the shutdown we asked for.
-				// Leave with the code the runner restarts on, not the one it
-				// treats as the session ending.
-				cerr << "[flightaxis_bridge]   PX4 is down - restarting" << endl;
-				fa.releaseController();
-				return EXIT_RESTART_REQUESTED;
-			}
-
 			cerr << "[flightaxis_bridge] PX4 link lost - shutting down" << endl;
 			break;
 		}
 
-		buildChannels(vehicle, maps, nmaps, unmapped_default, options, channels, tx_channels,
-			      shutdown_deadline_us != 0 || settle_until_us != 0);
+		buildChannels(vehicle, maps, nmaps, unmapped_default, options, channels, tx_channels);
 
 		/*
 		 * PX4_FA_DUMP_CHANNELS=<hz>: print what is actually on the wire.
@@ -1272,29 +1241,7 @@ int main(int argc, char **argv)
 		 * glitch compensator has just swallowed a long network stall and a
 		 * legitimate frame really does span two seconds of flight.
 		 */
-		/*
-		 * Second half of a respawn teardown. The throttle went to its disarm
-		 * value on the frame the teleport was seen; this is where the model has
-		 * finished spooling down, so it can be placed properly and PX4 told to
-		 * go. Doing it in that order is the point: the pilot's own reset landed
-		 * while the prop was still turning, which is what let the aircraft roll
-		 * away from where it was put.
-		 */
-		if (settle_until_us != 0 && micros() >= settle_until_us) {
-			settle_until_us = 0;
-
-			fa.resetAircraft();
-
-			if (battery.active() && !battery.requestReboot()) {
-				cerr << "[flightaxis_bridge]   WARNING: could not send the"
-				     << " shutdown request. If PX4 keeps running with"
-				     << " \"Broken pipe\" warnings, Ctrl-C the session." << endl;
-			}
-
-			shutdown_deadline_us = micros() + SHUTDOWN_WAIT_US;
-		}
-
-		if (have_last_position && shutdown_deadline_us == 0 && settle_until_us == 0) {
+		if (have_last_position) {
 			const double dx = state.m_aircraftPositionX_MTR - last_position_x;
 			const double dy = state.m_aircraftPositionY_MTR - last_position_y;
 			const double dz = state.m_altitudeASL_MTR - last_position_z;
@@ -1357,22 +1304,15 @@ int main(int argc, char **argv)
 					// few seconds from now the request was refused, and because
 					// the runner is blocked on it in the foreground nothing here
 					// can recover that - say so rather than leave a silent hang.
-					/*
-					 * Throttle first, placement second.
-					 *
-					 * The pilot's reset happened with the throttle still up, so
-					 * RealFlight applied that thrust to the model it had just
-					 * placed and it rolled away - how far depends on how much
-					 * propulsion the aircraft has. The bridge only learns about
-					 * the respawn afterwards, so it cannot prevent that; what it
-					 * can do is stop the prop, let RealFlight see it stopped,
-					 * and then place the model again itself.
-					 *
-					 * buildChannels() drops every mapped slot to its disarm
-					 * value from this frame on, so the wait below is the model
-					 * spooling down, not a fixed guess at how long PX4 takes.
-					 */
-					settle_until_us = micros() + PROP_SETTLE_US;
+					if (battery.active() && !battery.requestReboot()) {
+						cerr << "[flightaxis_bridge]   WARNING: could not send the"
+						     << " shutdown request. If PX4 keeps running with"
+						     << " \"Broken pipe\" warnings, Ctrl-C the session."
+						     << endl;
+					}
+
+					fa.releaseController();
+					return EXIT_RESTART_REQUESTED;
 				}
 
 				reset_retry_until_us = micros() + RESET_RETRY_WINDOW_US;
@@ -1404,22 +1344,6 @@ int main(int argc, char **argv)
 			} else if (now_us >= reset_retry_next_us && battery.active()) {
 				battery.requestPositionReset(home_lat, home_lon, 0.5, now_us);
 				reset_retry_next_us = now_us + RESET_RETRY_INTERVAL_US;
-			}
-		}
-
-		if (shutdown_deadline_us != 0) {
-			if (px4.LinkLost()) {
-				cerr << "[flightaxis_bridge]   PX4 is down - restarting" << endl;
-				fa.releaseController();
-				return EXIT_RESTART_REQUESTED;
-			}
-
-			if (micros() >= shutdown_deadline_us) {
-				cerr << "[flightaxis_bridge]   PX4 did not shut down within "
-				     << (SHUTDOWN_WAIT_US / 1000000) << " s - leaving anyway."
-				     << " Ctrl-C if it keeps running." << endl;
-				fa.releaseController();
-				return EXIT_RESTART_REQUESTED;
 			}
 		}
 
