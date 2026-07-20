@@ -834,6 +834,20 @@ int main(int argc, char **argv)
 	// reinject throttle (wall clock): startController() is three SOAP round-trips
 	// including ResetAircraft, so it must not run once per loop iteration
 	const uint64_t REINJECT_INTERVAL_US = 300000;	// 300 ms
+
+	/*
+	 * A frame is a teleport when the aircraft moved further than the velocity
+	 * it reported could carry it. The margin absorbs the discretisation of a
+	 * position sampled at one instant against a velocity sampled at another;
+	 * the floor keeps a stationary model, whose reachable distance is zero,
+	 * from tripping on numerical noise in its own coordinates.
+	 */
+	const double TELEPORT_MARGIN  = 4.0;
+	const double TELEPORT_FLOOR_M = 10.0;
+
+	double last_position_x = 0.0, last_position_y = 0.0, last_position_z = 0.0;
+	double last_position_t = 0.0;
+	bool have_last_position = false;
 	uint64_t last_reinject_us = 0;
 
 	// FPS reporting
@@ -1186,6 +1200,53 @@ int main(int argc, char **argv)
 			cerr << "[flightaxis_bridge] first HIL_ACTUATOR_CONTROLS received, enabling channels" << endl;
 			announced_first_controls = true;
 		}
+
+		/*
+		 * TELEPORT DETECTION.
+		 *
+		 * m_resetButtonHasBeenPressed does NOT fire when the pilot presses
+		 * spacebar. Measured, on two respawns in one session: the reported
+		 * position moved 92.3 m and 120.9 m in a single frame while the flag
+		 * stayed 0 both times. Whatever that flag reports - an aircraft change,
+		 * a transmitter button - it is not the reset the pilot actually uses,
+		 * so a bridge that waits for it never learns the aircraft moved and
+		 * PX4 keeps flying the old trajectory.
+		 *
+		 * The discontinuity itself is the signal, and it is unambiguous.
+		 * Frames arrive about 4 ms apart, so 92 m in one of them is 23 km/s.
+		 * Comparing against the distance the reported velocity could actually
+		 * cover - rather than a fixed threshold - keeps this correct when the
+		 * glitch compensator has just swallowed a long network stall and a
+		 * legitimate frame really does span two seconds of flight.
+		 */
+		if (have_last_position) {
+			const double dx = state.m_aircraftPositionX_MTR - last_position_x;
+			const double dy = state.m_aircraftPositionY_MTR - last_position_y;
+			const double dz = state.m_altitudeASL_MTR - last_position_z;
+			const double moved = std::sqrt(dx * dx + dy * dy + dz * dz);
+
+			const double speed = std::sqrt(
+				state.m_velocityWorldU_MPS * state.m_velocityWorldU_MPS +
+				state.m_velocityWorldV_MPS * state.m_velocityWorldV_MPS +
+				state.m_velocityWorldW_MPS * state.m_velocityWorldW_MPS);
+
+			// Physics interval for THIS frame. Computed here rather than reused
+			// from the clock handling further down, which has not run yet.
+			const double frame_dt = state.m_currentPhysicsTime_SEC - last_position_t;
+			const double reachable = TELEPORT_MARGIN * speed * frame_dt + TELEPORT_FLOOR_M;
+
+			if (moved > reachable) {
+				cerr << "[flightaxis_bridge] aircraft teleported " << moved
+				     << " m (RealFlight reset) - re-anchoring" << endl;
+				vehicle.invalidatePositionOffset();
+			}
+		}
+
+		last_position_t = state.m_currentPhysicsTime_SEC;
+		last_position_x = state.m_aircraftPositionX_MTR;
+		last_position_y = state.m_aircraftPositionY_MTR;
+		last_position_z = state.m_altitudeASL_MTR;
+		have_last_position = true;
 
 		// spacebar reset or aircraft change inside RealFlight: re-inject and re-anchor
 		if (!state.m_flightAxisControllerIsActive || state.m_resetButtonHasBeenPressed) {
