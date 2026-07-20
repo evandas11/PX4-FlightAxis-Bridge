@@ -136,6 +136,21 @@ box running RealFlight.** Substitute your own: the variable is
 (same-host case, §1.6). Find the right value with §1.2 and prove it is reachable with §1.5
 *before* launching anything.
 
+**The commands below all run in the shared working directory**, `build/px4_sitl_nolockstep/rootfs`,
+which every model uses unless given one of its own. That is fine for one model. Fly a second and
+the two share `parameters.bson`, dataman and `log/`: PX4 sees the saved `SYS_AUTOSTART` disagree
+with the model it is starting and runs `param reset_all`, which keeps `RC*`, `CAL_*` and
+`COM_FLTMODE*` but drops the tuning; and the mission left over from the first is still loaded for
+the second. Add one line to any command here to avoid both:
+
+```bash
+PX4_FLIGHTAXIS_ROOTFS=~/sitl/fa-rootfs/plane \
+```
+
+The directory is created if missing and seeded with the calibration you already have, and the
+same command then serves every later run — there is no separate first-run form. Full
+explanation in [*A working directory per model*](README.md#a-working-directory-per-model).
+
 Each section below is self-contained: launch command, airframe, RealFlight model preparation,
 channel table, QGC check, gotchas, and a first-flight check for that vehicle. The
 model-preparation steps immediately below apply to all four.
