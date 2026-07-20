@@ -272,15 +272,32 @@ void VehicleState::resetPositionOffset(const FAState &fa)
 				   fa.m_aircraftPositionX_MTR,
 				   -fa.m_altitudeASL_MTR);
 
-	// Heading datum. home_yaw is where the model should point; RealFlight has
-	// just told us where it does point, and the difference is the rotation the
-	// RF world needs. Deriving it here rather than from a fixed number is what
-	// makes PX4_HOME_YAW mean the same thing whatever the RF runway happens to
-	// be aligned to.
-	if (std::isnan(home_yaw)) {
+	/*
+	 * Heading datum, latched ONCE per session.
+	 *
+	 * The position offset above IS re-captured on every respawn - that is what
+	 * puts the model back at the point it entered, and it is what ArduPilot
+	 * does. This is not re-derived with it, and the asymmetry is the point: an
+	 * offset is an origin and may move, a rotation is the frame every other
+	 * quantity is expressed in. Re-deriving it turns that frame underneath an
+	 * estimator that has already converged on the old one, while the synthetic
+	 * magnetic field - built from the home location, never rotated - stays
+	 * behind. Measured, the first time a respawn was actually detected rather
+	 * than silently missed: two teleports, then Compass 0 fault five times and
+	 * horizontal position unstable twice.
+	 *
+	 * Nothing is lost. A reset returns the model to where it entered, so the
+	 * rotation derived there is still the right one for it.
+	 */
+	if (datum_latched) {
+		// Position re-anchored above; the frame is deliberately left alone.
+
+	} else if (std::isnan(home_yaw)) {
 		yaw_rot_rad = 0.0;
+		datum_latched = true;
 
 	} else {
+		datum_latched = true;
 		Quaterniond q_rf(fa.m_orientationQuaternionW,
 				 fa.m_orientationQuaternionY,
 				 fa.m_orientationQuaternionX,

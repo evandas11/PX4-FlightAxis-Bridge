@@ -199,6 +199,7 @@ private:
 	// the unconfigured path costs nothing and changes nothing.
 	double home_yaw;	// deg true, NAN = disabled
 	double yaw_rot_rad;	// applied RF-world -> true-north rotation
+	bool datum_latched{false};	// derived once per session, never on a respawn
 
 	// physics time since epoch capture (us), mirrored from the main loop;
 	// getSensorMsg() / getDistanceSensorMsg() add offset_us on top
