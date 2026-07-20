@@ -265,7 +265,7 @@ Vector3d VehicleState::rotateWorld(const Vector3d &v) const
 			v.z());
 }
 
-void VehicleState::resetPositionOffset(const FAState &fa, bool announce)
+void VehicleState::resetPositionOffset(const FAState &fa, bool latch_datum)
 {
 	// position NED: (N = RF_Y, E = RF_X, D = -altASL)
 	position_offset = Vector3d(fa.m_aircraftPositionY_MTR,
@@ -279,19 +279,24 @@ void VehicleState::resetPositionOffset(const FAState &fa, bool announce)
 	 * makes PX4_HOME_YAW mean the same thing whatever the RF runway happens to
 	 * be aligned to.
 	 *
-	 * Re-derived on a respawn as well as at startup, because a reset puts the
-	 * model back where it entered and PX4 should see the same thing it saw
-	 * then - position and heading both. The caller guarantees the model is
-	 * standing still before we get here, and that guarantee is what makes this
-	 * safe: read mid-placement, the attitude is whatever the crash left rather
-	 * than the runway heading, and latching that rotates the frame underneath
-	 * PX4. Attitude, velocity and position would all move to the new frame on
-	 * the next message while the synthetic magnetic field, built from the home
-	 * location and never rotated, stayed in the old one - mag and GNSS then
-	 * pull EKF2 in different directions and yaw goes, taking the position that
-	 * is dead-reckoned through it with it.
+	 * Re-derived on a respawn as well as at startup: a reset puts the model
+	 * back where it entered, and PX4 should see what it saw then - position and
+	 * heading both.
+	 *
+	 * But ONCE per reset, on the final capture only, which is what `announce`
+	 * marks. The position offset above is refreshed on every frame of the
+	 * placement transient because refreshing it is free. Refreshing this is
+	 * not: the rotation defines the frame velocity_ef is expressed in, so
+	 * changing it between two frames leaves the on-ground accelerometer
+	 * override differencing a velocity in the old frame against one in the new,
+	 * and it reads the rotation itself as acceleration. Measured, when this ran
+	 * every frame: a stationary model on the runway, GPS reporting 0.00 m/s,
+	 * and EKF2 dead-reckoning to 49.6 m/s and 121 m away.
 	 */
-	if (std::isnan(home_yaw)) {
+	if (!latch_datum) {
+		// position refreshed, frame left alone
+
+	} else if (std::isnan(home_yaw)) {
 		yaw_rot_rad = 0.0;
 
 	} else {
@@ -300,9 +305,18 @@ void VehicleState::resetPositionOffset(const FAState &fa, bool announce)
 				 fa.m_orientationQuaternionX,
 				 -fa.m_orientationQuaternionZ);
 		q_rf.normalize();
+		const double prev = yaw_rot_rad;
 		yaw_rot_rad = wrapPi(home_yaw * DEG2RAD - yawFromQuat(q_rf));
 
-		if (announce) {
+		// The anchor velocity was captured in the old frame. Keeping it across
+		// a rotation change is the manufactured-acceleration case above.
+		if (yaw_rot_rad != prev) {
+			have_last_velocity = false;
+			have_synth_accel = false;
+			diff_accum_dt = 0.0;
+		}
+
+		{
 			std::cerr << "[flightaxis_bridge] heading datum: RealFlight reports "
 				  << (RAD2DEG * yawFromQuat(q_rf)) << " deg, PX4_HOME_YAW asks for "
 				  << home_yaw << " deg -> rotating the RF world by "

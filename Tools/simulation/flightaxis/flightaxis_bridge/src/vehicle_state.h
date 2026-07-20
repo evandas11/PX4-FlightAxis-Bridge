@@ -82,7 +82,7 @@ public:
 	// captured together - and dropped together by invalidatePositionOffset(),
 	// so a RealFlight reset re-derives the rotation against the post-reset
 	// attitude instead of keeping one measured before the teleport.
-	void resetPositionOffset(const FAState &fa, bool announce = true);
+	void resetPositionOffset(const FAState &fa, bool latch_datum = true);
 
 	// Drop the captured offset so the NEXT real frame re-anchors from a
 	// post-reset position (zeroing the position offset).
