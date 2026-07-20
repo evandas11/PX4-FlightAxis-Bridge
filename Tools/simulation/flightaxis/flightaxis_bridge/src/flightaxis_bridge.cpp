@@ -418,7 +418,7 @@ static void seedDisarmChannels(const ChannelMap *maps, int nmaps, double unmappe
  */
 static void buildChannels(const VehicleState &veh, const ChannelMap *maps, int nmaps,
 			  double unmapped_default, uint32_t options, double channels[RF_CHANNELS],
-			  double out[RF_CHANNELS])
+			  double out[RF_CHANNELS], bool force_disarmed)
 {
 	bool mapped[RF_CHANNELS] = {};
 
@@ -435,7 +435,16 @@ static void buildChannels(const VehicleState &veh, const ChannelMap *maps, int n
 	}
 
 	const bool have_controls = veh.receivedFirstControls();
-	const bool armed = have_controls && veh.armed();
+	/*
+	 * force_disarmed short-circuits the arming state while the session is being
+	 * torn down for a restart. PX4 needs a few hundred milliseconds to act on
+	 * the disarm command and publish outputs that reflect it, and until then it
+	 * is still commanding whatever it was: reset a model at full throttle and
+	 * the prop keeps turning, so it rolls forward off the runway before it
+	 * spools down. Nothing PX4 says after a teleport is worth relaying - the
+	 * aircraft it was flying no longer exists.
+	 */
+	const bool armed = have_controls && veh.armed() && !force_disarmed;
 	const mavlink_hil_actuator_controls_t &c = veh.lastControls();
 
 	for (int i = 0; i < nmaps; i++) {
@@ -1093,7 +1102,8 @@ int main(int argc, char **argv)
 			break;
 		}
 
-		buildChannels(vehicle, maps, nmaps, unmapped_default, options, channels, tx_channels);
+		buildChannels(vehicle, maps, nmaps, unmapped_default, options, channels, tx_channels,
+			      shutdown_deadline_us != 0);
 
 		/*
 		 * PX4_FA_DUMP_CHANNELS=<hz>: print what is actually on the wire.
