@@ -1007,33 +1007,18 @@ Working directories: instance 0 keeps `build/px4_sitl_nolockstep/rootfs` so exis
 parameters and logs stay put; instance *N* > 0 uses `build/px4_sitl_nolockstep/instance_N`,
 following PX4's own `Tools/simulation/sitl_multiple_run.sh`.
 
-**`PX4_FLIGHTAXIS_ROOTFS` overrides both**, and the axis it varies is the model rather than the
-instance:
+`PX4_FLIGHTAXIS_ROOTFS` overrides both, and it is the right tool when you want to separate
+**models** rather than instances — see
+[*A working directory per model*](README.md#a-working-directory-per-model) in README.md for
+that.
 
-```bash
-PX4_FLIGHTAXIS_ROOTFS=~/sitl/fa-rootfs/quadplane \
-PX4_FLIGHTAXIS_IP=192.168.10.1 \
-PX4_HOME_LAT=-37.7304917 PX4_HOME_LON=175.7433944 \
-PX4_HOME_ALT=48.0 PX4_HOME_YAW=235 \
-  make px4_sitl_nolockstep flightaxis_quadplane
-```
-
-The home variables are unaffected by the working directory — they are read at startup and
-stored nowhere, so they belong on every invocation regardless.
-
-The working directory is where `parameters.bson`, dataman and `log/` all live, so pointing it
-per-model separates all three at once. Without it every model shares one of each: a quadplane
-mission is still loaded when you next start the plane and gets rejected by feasibility checking,
-and PX4 — seeing the saved `SYS_AUTOSTART` disagree with the model it is starting — runs
-`param reset_all`, which preserves `RC*`, `CAL_*` and `COM_FLTMODE*` but discards tuning.
-
-Do not reach for the instance mechanism to get this. `-i` is wired to `MAV_SYS_ID`, the simulator
-TCP port and every MAVLink UDP port, so using it to mean "model" burns a port range per airframe
-and misreports system IDs.
-
-The directory is created if missing and relative paths are absolutised before `px4` starts, so the
-same command opens a new one or resumes an existing one. A path outside the PX4 tree survives
-`make clean` and reinstalling; one under `build/` does not.
+The two are not interchangeable. `-i` is wired to `MAV_SYS_ID`, the simulator TCP port and
+every MAVLink UDP port, so using it to mean "model" burns a port range per airframe and
+misreports system IDs. `PX4_FLIGHTAXIS_ROOTFS` touches none of those — it moves only the
+working directory, so it composes with `PX4_FLIGHTAXIS_INSTANCE` rather than competing with
+it. Set both and you get instance *N*'s ports with your chosen directory — but give each
+instance a different one, since two concurrent instances pointed at the same directory would
+be writing one `parameters.bson` and one dataman between them.
 
 A non-numeric `PX4_FLIGHTAXIS_INSTANCE` is rejected with an error rather than being silently
 truncated to 0 — which would otherwise produce a "second" instance that collides with the first.
@@ -1256,9 +1241,11 @@ Channel 2: func: 101, ...         <-- function 101 now assigned TWICE
 
 Aileron left is no longer produced by any output, and RealFlight channel 1 receives the throttle.
 No error, no warning. Check with `param show PWM_MAIN_FUNC*` (SITL) or `param show HIL_ACT_FUNC*`
-(HITL) and look for the `+` marker. To clear it, either `param reset PWM_MAIN_FUNC*` and reboot,
-or delete the SITL rootfs (`rm -rf build/px4_sitl_nolockstep/rootfs`); on a real board use
-QGC's **Tools → Reset all parameters** and re-select the airframe.
+(HITL) and look for the `+` marker. To clear it, `param reset PWM_MAIN_FUNC*` and reboot — that
+is enough, and it touches nothing else. Deleting the working directory also works and is a much
+blunter instrument: it takes your radio calibration, sensor calibration and flight-mode
+assignments with it, and no airframe file will put those back. On a real board, QGC's
+**Tools → Reset all parameters** followed by re-selecting the airframe has the same cost.
 
 ### Aircraft resets or teleports
 

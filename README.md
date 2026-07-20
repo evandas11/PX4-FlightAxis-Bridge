@@ -276,19 +276,7 @@ mode assignments, which nothing in the airframe will put back.
 
 ### A working directory per model
 
-Every model shares one working directory by default, and so shares one `parameters.bson`,
-one dataman and one `log/`. Two consequences follow. Missions persist across models, so a
-quadplane mission is still loaded when you next start the plane and gets rejected by
-feasibility checking. And PX4 notices the saved `SYS_AUTOSTART` no longer matches the model
-it is starting, so it runs `param reset_all` — which keeps `RC*`, `CAL_*` and `COM_FLTMODE*`
-but discards tuning.
-
-`PX4_FLIGHTAXIS_ROOTFS` points the working directory somewhere else. Give each model its own
-and the two problems disappear together, because parameters, missions and logs all live
-beside each other:
-
-It is one more line on the invocation above — the home position still has to be set every
-run, since it is read at startup and not stored anywhere:
+Add one line, `PX4_FLIGHTAXIS_ROOTFS`, and that model gets its own directory:
 
 ```bash
 cd ~/PX4-Autopilot
@@ -302,21 +290,38 @@ PX4_HOME_YAW=235 \
 make px4_sitl_nolockstep flightaxis_quadplane
 ```
 
-The directory is created if it does not exist, so the same command starts a new model or
-resumes an existing one — there is nothing to set up first. A first run comes up on the
-airframe's defaults; every later run in that directory picks up whatever you have since
-tuned and saved, and whatever missions you have uploaded.
+**There is no separate first-run command.** That is the whole invocation, every time. The
+directory is created if it is missing, so the first run comes up on the airframe's defaults
+and every later run picks up whatever you have tuned, saved and uploaded since. Stop with
+Ctrl-C; tomorrow, run the same line again.
 
-The directory name is yours, not the model's, so two configurations of one aircraft are just
-two directories — `~/sitl/fa-rootfs/heli-3d` and `~/sitl/fa-rootfs/heli-scale` both run
-`make px4_sitl_nolockstep flightaxis_heli` and keep separate parameters.
+Leave the line out and the model runs in `build/px4_sitl_nolockstep/rootfs` instead — the
+directory every model shares if it is not given one of its own. Nothing else about the
+invocation changes:
 
-The path is yours to choose. Somewhere outside the PX4 tree, as above, survives `make clean`
-and reinstalling; a path under `build/` does not. Relative paths are resolved before PX4
-starts, so `PX4_FLIGHTAXIS_ROOTFS=./fa-plane` behaves as you would expect.
+| | |
+|---|---|
+| Run in the shared directory | omit `PX4_FLIGHTAXIS_ROOTFS` |
+| Run in its own directory | set `PX4_FLIGHTAXIS_ROOTFS` |
 
-Leave the variable unset and nothing changes: instance 0 uses `build/px4_sitl_nolockstep/rootfs`
-as before, and additional instances use `build/px4_sitl_nolockstep/instance_<n>`.
+Pick one and apply it to every model. Sharing is what costs you: the working directory holds
+`parameters.bson`, dataman and `log/`, so models that share one share all three. A quadplane
+mission is still loaded when you next start the plane and gets rejected by feasibility
+checking; and PX4, seeing the saved `SYS_AUTOSTART` disagree with the model it is starting,
+runs `param reset_all` — which keeps `RC*`, `CAL_*` and `COM_FLTMODE*` but discards tuning.
+Give one model its own directory and leave the rest sharing, and the rest still do this to
+each other.
+
+The path is yours, and it is not tied to the model name: two configurations of one aircraft
+are just two directories — `~/sitl/fa-rootfs/heli-3d` and `~/sitl/fa-rootfs/heli-scale` both
+run `make px4_sitl_nolockstep flightaxis_heli` and keep separate parameters. Somewhere
+outside the PX4 tree, as above, survives `make clean` and reinstalling; a path under `build/`
+does not. Relative paths are resolved before PX4 starts, so `PX4_FLIGHTAXIS_ROOTFS=./fa-plane`
+behaves as you would expect.
+
+Multi-instance is unaffected: the variable moves the working directory and nothing else, so it
+composes with `PX4_FLIGHTAXIS_INSTANCE`, and leaving it unset gives the per-instance defaults
+exactly as before — see [RUNNING.md §6](RUNNING.md#6-multiple-instances).
 
 If PX4 refuses to start with `PX4 server already running for instance 0`, a previous run
 died without cleaning up. Remove `/tmp/px4_lock-0` and `/tmp/px4-sock-0`, and check for a
