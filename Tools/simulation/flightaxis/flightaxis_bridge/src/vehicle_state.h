@@ -204,6 +204,14 @@ private:
 	// respawns re-capture the position offset and leave the frame alone.
 	bool datum_latched{false};
 
+	// How long after a respawn the aircraft is reported parked rather than
+	// having RealFlight's placement transient passed through. Long enough to
+	// outlast the drop and bounce, short enough that it cannot mask real
+	// motion: a pilot who respawns and immediately flies loses a fifth of a
+	// second of it.
+	static constexpr double RESPAWN_FREEZE_S = 0.2;
+	double respawn_freeze_left_s{0.0};
+
 	// physics time since epoch capture (us), mirrored from the main loop;
 	// getSensorMsg() / getDistanceSensorMsg() add offset_us on top
 	uint64_t time_usec;

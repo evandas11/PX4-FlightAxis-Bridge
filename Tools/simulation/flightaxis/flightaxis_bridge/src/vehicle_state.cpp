@@ -369,6 +369,7 @@ void VehicleState::setFAData(const FAState &fa, double dt_true)
 	// position_offset assignment sits below the accel block, not above it).
 	if (!offset_captured) {
 		resetPositionOffset(fa);
+		respawn_freeze_left_s = RESPAWN_FREEZE_S;
 	}
 
 	// Quaternion RF -> NED: q_ned = (w=W, x=RF_Y, y=RF_X, z=-RF_Z), then turned
@@ -582,6 +583,46 @@ void VehicleState::setFAData(const FAState &fa, double dt_true)
 
 	// last_velocity_ef is NOT advanced here: it anchors the accumulated
 	// differentiation window above and moves only when that window closes.
+
+	/*
+	 * RESPAWN FREEZE.
+	 *
+	 * RealFlight teleports the model back to where it entered and then takes a
+	 * moment to settle it: dropped onto the gear, bouncing, sliding. Passing
+	 * that through is what kept breaking. The values are individually honest
+	 * but collectively incoherent once the position offset has been re-anchored
+	 * to the new origin - PX4 was told the aircraft was at home and stationary
+	 * while the acceleration derived from the same frames said otherwise, and
+	 * EKF2 integrated the difference. Worse, PX4's in-flight sensor learning
+	 * takes the transient for a real bias and COMMITS it: measured, an
+	 * accelerometer offset of -0.219 m/s2 saved after a respawn, which then
+	 * corrupts flights that involve no respawn at all.
+	 *
+	 * So for a short window the aircraft is reported the way RealFlight is
+	 * drawing it - parked at the entry point. Position is already home, because
+	 * the offset was just captured there; velocity and angular rate are zero;
+	 * specific force is gravity alone. Four quantities that agree with each
+	 * other and with the screen, which is what "the aircraft has been reset"
+	 * actually means to an estimator.
+	 *
+	 * Attitude is NOT frozen: it is the one thing RealFlight has right
+	 * immediately, and holding a stale one would fight the magnetometer.
+	 *
+	 * The velocity history goes with it, so the first real frame after the
+	 * window differences against a velocity from the same frame rather than
+	 * against zero.
+	 */
+	if (respawn_freeze_left_s > 0.0) {
+		respawn_freeze_left_s -= dt_true;
+
+		velocity_ef.setZero();
+		gyro.setZero();
+		accel_body = q_ned.inverse() * Vector3d(0.0, 0.0, -GRAVITY_MSS);
+
+		have_last_velocity = false;
+		have_synth_accel = false;
+		diff_accum_dt = 0.0;
+	}
 
 	// Pitot airspeed: body-X component of (vel - wind); RF's m_airspeed_MPS
 	// is total TAS and lies during hover/harrier/knife-edge
