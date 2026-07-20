@@ -362,38 +362,24 @@ magnetometer and gyro *ids* but no offsets and reports `Compass 0 fault`, and th
 **Vehicle Setup → Sensors**, compass then gyroscope — and it is stored in that working
 directory for good, and is what every later directory seeds from.
 
-#### Turn PX4's in-flight sensor learning off
+#### PX4's in-flight sensor learning is turned off for you
 
-Do this before the first flight in a working directory. `SENS_IMU_AUTOCAL`, `SENS_MAG_AUTOCAL`
-and `IMU_GYRO_CAL_EN` all default to `1`, and on a real aircraft that is correct: the sensors
-drift, PX4 learns the bias in flight and saves it. Here the sensors are synthesised from
-RealFlight's state and have no bias to learn, so what PX4 learns instead is its own estimator
-transients — and it writes them to `parameters.bson` as permanent calibration.
+The four shipped airframes set `SENS_IMU_AUTOCAL`, `SENS_MAG_AUTOCAL` and `IMU_GYRO_CAL_EN`
+to `0`. All three default to `1`, and on a real aircraft that is correct: the sensors drift,
+PX4 learns the bias in flight and saves it. Here every sensor is synthesised from RealFlight's
+state and has no bias to find, so what PX4 learns instead is its own estimator transients —
+and it writes them to `parameters.bson` as permanent calibration.
 
 Measured in one session: an accelerometer offset moving from zero to
 `+0.308, -0.173, +0.040 m/s²`. A 0.36 m/s² bias dead-reckons to roughly 21 m/s over a minute,
 which presents as the aircraft wandering across the QGC map while it sits perfectly still in
-RealFlight. Because the offsets accumulate across sessions rather than resetting with each run,
-the symptom looks intermittent and unrelated to whatever was last changed.
+RealFlight. The offsets accumulate across sessions rather than resetting with each run, so the
+symptom looks intermittent and unrelated to whatever was last changed.
 
-At the `pxh>` prompt:
-
-```
-param set SENS_IMU_AUTOCAL 0
-param set SENS_MAG_AUTOCAL 0
-param set IMU_GYRO_CAL_EN 0
-param reset CAL_ACC0_XOFF CAL_ACC0_YOFF CAL_ACC0_ZOFF
-param reset CAL_GYRO0_XOFF CAL_GYRO0_YOFF CAL_GYRO0_ZOFF
-param reset CAL_MAG0_XOFF CAL_MAG0_YOFF CAL_MAG0_ZOFF
-param save
-```
-
-Then restart PX4: the offsets are read at boot, so clearing them takes effect on the next one.
-
-**Reset only the `*OFF` parameters, named individually as above.** `param reset CAL_ACC0_*`
-would also clear `CAL_ACC0_ID`, and without an id PX4 reports the sensor as uncalibrated
-entirely — a worse state than the one being fixed, and one that needs a full QGC sensor
-calibration to leave.
+Nothing to do for a new working directory. If you have flown one before this was set — the
+giveaway is `ACC 0 offset committed` in the console — the saved offsets are still there and
+outrank the airframe; clearing them is in
+[RUNNING.md §7](RUNNING.md#7-troubleshooting) under the sensor-learning entry.
 
 #### Stored values against the airframe's defaults
 
@@ -485,10 +471,24 @@ each other.
 
 The path is yours, and it is not tied to the model name: two configurations of one aircraft
 are just two directories — `~/sitl/fa-rootfs/heli-3d` and `~/sitl/fa-rootfs/heli-scale` both
-run `make px4_sitl_nolockstep flightaxis_heli` and keep separate parameters. Somewhere
-outside the PX4 tree, as above, survives `make clean` and reinstalling; a path under `build/`
-does not. Relative paths are resolved before PX4 starts, so `PX4_FLIGHTAXIS_ROOTFS=./fa-plane`
-behaves as you would expect.
+run `make px4_sitl_nolockstep flightaxis_heli` and keep separate parameters. Relative paths
+are resolved before PX4 starts, so `PX4_FLIGHTAXIS_ROOTFS=./fa-plane` behaves as you would
+expect.
+
+Inside or outside the PX4 tree both work, and the difference is what happens when you clean
+the build:
+
+```bash
+# Outside the PX4 tree. Survives `make clean`, `rm -rf build/` and reinstalling,
+# so saved parameters, missions and logs outlive the build directory.
+PX4_FLIGHTAXIS_ROOTFS=~/sitl/fa-rootfs/plane
+
+# Inside it. Cleaned away with the build - which is what you want for a scratch
+# directory, and what you do not want for one you have tuned.
+PX4_FLIGHTAXIS_ROOTFS=~/PX4-Autopilot/build/px4_sitl_nolockstep/rootfs_plane
+```
+
+`make` still has to be run from the PX4 tree either way; only the working directory moves.
 
 Multi-instance is unaffected: the variable moves the working directory and nothing else, so it
 composes with `PX4_FLIGHTAXIS_INSTANCE`, and leaving it unset gives the per-instance defaults
@@ -515,8 +515,15 @@ automatic reset after a crash — force-disarms and reboots PX4; `sitl_run.sh` b
 bridge back up together in the same terminal:
 
 ```bash
+cd ~/PX4-Autopilot
+
 PX4_FLIGHTAXIS_RESTART_ON_RESET=1 \
+PX4_FLIGHTAXIS_ROOTFS=~/sitl/fa-rootfs/plane \
 PX4_FLIGHTAXIS_IP=192.168.10.1 \
+PX4_HOME_LAT=-37.7304917 \
+PX4_HOME_LON=175.7433944 \
+PX4_HOME_ALT=48.0 \
+PX4_HOME_YAW=235 \
 make px4_sitl_nolockstep flightaxis_plane
 ```
 
@@ -524,6 +531,11 @@ make px4_sitl_nolockstep flightaxis_plane
 |---|---|
 | Unset, or any other value | one run per invocation — the historical behaviour, and the default |
 | `1` | PX4 and the bridge restart on every respawn |
+
+**Bring the aircraft to rest first.** Throttle to zero and disarm, then press spacebar. The
+bridge only learns about a respawn once RealFlight has already moved the model, so a reset
+taken at power puts the aircraft on the runway with the prop still turning and it rolls away
+before anything here can intervene — how far depends on how much propulsion the model has.
 
 **How the bridge notices.** Not from `m_resetButtonHasBeenPressed`: that field does not fire on
 a spacebar respawn. Instrumented over two respawns in one session, the reported position jumped

@@ -18,6 +18,19 @@ param set EKF2_GPS_DELAY 0
 # @reboot_required, so this has to be a startup default, not a pxh> command.
 param set-default SDLOG_MODE 0
 
+# PX4 learns accelerometer, gyro and magnetometer offsets in flight and COMMITS
+# them as permanent calibration. On a real aircraft that tracks a bias that
+# genuinely drifts. Here every sensor is synthesised from RealFlight's state and
+# has no bias to find, so what gets learned is the estimator's own transients -
+# and then saved, so the next flight starts from them. Measured: an accelerometer
+# offset going from zero to 0.36 m/s2 within a single session, which dead-reckons
+# to roughly 21 m/s in a minute and reads as the aircraft wandering in QGC while
+# it sits still in RealFlight. It survives restarts, so the symptom looks
+# unrelated to whatever was last changed.
+param set-default SENS_IMU_AUTOCAL 0
+param set-default SENS_MAG_AUTOCAL 0
+param set-default IMU_GYRO_CAL_EN 0
+
 # The bridge supplies the battery from RealFlight's own model (pack voltage and
 # current draw, or fuel remaining on internal-combustion models), so PX4's
 # synthetic battery must be switched off or the two publishers alternate on the
