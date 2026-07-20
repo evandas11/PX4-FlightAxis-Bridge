@@ -1096,23 +1096,7 @@ int main(int argc, char **argv)
 		// stop - which also stops hammering RealFlight with SOAP requests.
 		// See the dead-link policy block in px4_communicator.h.
 		if (px4.LinkLost()) {
-			if (settle_until_us != 0 && micros() >= settle_until_us) {
-			settle_until_us = 0;
-
-			// Prop is down. Put the model back where the reset meant to leave
-			// it, then hand PX4 its shutdown.
-			fa.resetAircraft();
-
-			if (battery.active() && !battery.requestReboot()) {
-				cerr << "[flightaxis_bridge]   WARNING: could not send the"
-				     << " shutdown request. If PX4 keeps running with"
-				     << " \"Broken pipe\" warnings, Ctrl-C the session." << endl;
-			}
-
-			shutdown_deadline_us = micros() + SHUTDOWN_WAIT_US;
-		}
-
-		if (shutdown_deadline_us != 0) {
+			if (shutdown_deadline_us != 0) {
 				// Expected: this is PX4 acting on the shutdown we asked for.
 				// Leave with the code the runner restarts on, not the one it
 				// treats as the session ending.
@@ -1288,6 +1272,28 @@ int main(int argc, char **argv)
 		 * glitch compensator has just swallowed a long network stall and a
 		 * legitimate frame really does span two seconds of flight.
 		 */
+		/*
+		 * Second half of a respawn teardown. The throttle went to its disarm
+		 * value on the frame the teleport was seen; this is where the model has
+		 * finished spooling down, so it can be placed properly and PX4 told to
+		 * go. Doing it in that order is the point: the pilot's own reset landed
+		 * while the prop was still turning, which is what let the aircraft roll
+		 * away from where it was put.
+		 */
+		if (settle_until_us != 0 && micros() >= settle_until_us) {
+			settle_until_us = 0;
+
+			fa.resetAircraft();
+
+			if (battery.active() && !battery.requestReboot()) {
+				cerr << "[flightaxis_bridge]   WARNING: could not send the"
+				     << " shutdown request. If PX4 keeps running with"
+				     << " \"Broken pipe\" warnings, Ctrl-C the session." << endl;
+			}
+
+			shutdown_deadline_us = micros() + SHUTDOWN_WAIT_US;
+		}
+
 		if (have_last_position && shutdown_deadline_us == 0 && settle_until_us == 0) {
 			const double dx = state.m_aircraftPositionX_MTR - last_position_x;
 			const double dy = state.m_aircraftPositionY_MTR - last_position_y;
@@ -1367,22 +1373,6 @@ int main(int argc, char **argv)
 					 * spooling down, not a fixed guess at how long PX4 takes.
 					 */
 					settle_until_us = micros() + PROP_SETTLE_US;
-
-					/*
-					 * Do NOT leave yet. PX4 takes a moment to act on the
-					 * shutdown, and walking out first is what produced the
-					 * teardown noise: it writes to a socket nobody is reading
-					 * ("Failed sending mavlink message: Broken pipe") and its
-					 * sensor topics starve ("BARO #0 failed: TIMEOUT!"). Neither
-					 * breaks anything, but both read as failures in a console a
-					 * pilot is watching.
-					 *
-					 * Keep the exchange running normally instead, and let the
-					 * loop end when PX4 closes the link. The deadline is a
-					 * backstop for a shutdown that was refused; the message says
-					 * so rather than exiting quietly on a PX4 that is still up.
-					 */
-					shutdown_deadline_us = micros() + SHUTDOWN_WAIT_US;
 				}
 
 				reset_retry_until_us = micros() + RESET_RETRY_WINDOW_US;
