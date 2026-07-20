@@ -77,6 +77,18 @@ public:
     // Startup sequence, exact order: RestoreOriginalControllerDevice -> (ResetAircraft if
     // resetPosition) -> InjectUAVControllerInterface. Returns true on success.
     bool startController(bool resetPosition);
+
+    /*
+     * Send ResetAircraft on its own, without the surrounding startup sequence.
+     *
+     * Used to re-place the model after a respawn has already been detected. The
+     * pilot's own reset happened while the throttle was still up, so RealFlight
+     * applied that thrust to the freshly placed aircraft and it rolled away
+     * before the bridge could learn anything had happened. Cutting the throttle
+     * first and then resetting again puts it back with the prop already
+     * stopped, which is the state a reset is supposed to produce.
+     */
+    bool resetAircraft();
     // Shutdown counterpart of startController(): deselect our channels and send
     // RestoreOriginalControllerDevice, so RealFlight hands the model back to the
     // physical transmitter instead of leaving our injected controller attached

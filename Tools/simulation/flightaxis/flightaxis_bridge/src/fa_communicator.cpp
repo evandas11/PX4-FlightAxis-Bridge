@@ -681,6 +681,18 @@ bool FACommunicator::startController(bool resetPosition)
     return true;
 }
 
+bool FACommunicator::resetAircraft()
+{
+    int fd = soapRequestStart("ResetAircraft", soap_body_reset);
+
+    if (fd < 0) {
+        return false;
+    }
+
+    reportStartupReply("ResetAircraft", soapRequestEnd(fd, 1000));
+    return true;
+}
+
 /*
   Shutdown counterpart of startController().
 
