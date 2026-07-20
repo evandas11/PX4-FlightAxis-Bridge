@@ -861,6 +861,11 @@ int main(int argc, char **argv)
 
 	const uint64_t RESET_RETRY_WINDOW_US   = 5000000;
 	const uint64_t RESET_RETRY_INTERVAL_US = 200000;
+	// Set when a restart has been requested: the loop then runs on only until
+	// PX4 closes the link, so its last frames still have sensors to consume.
+	const uint64_t SHUTDOWN_WAIT_US = 8000000;
+	uint64_t shutdown_deadline_us = 0;
+
 	uint64_t reset_retry_until_us = 0;
 	uint64_t reset_retry_next_us  = 0;
 
@@ -1311,8 +1316,22 @@ int main(int argc, char **argv)
 						     << endl;
 					}
 
-					fa.releaseController();
-					return EXIT_RESTART_REQUESTED;
+					/*
+					 * Do NOT leave yet. PX4 takes a moment to act on the
+					 * shutdown, and walking out first is what produced the
+					 * teardown noise: it writes to a socket nobody is reading
+					 * ("Failed sending mavlink message: Broken pipe") and its
+					 * sensor topics starve ("BARO #0 failed: TIMEOUT!"). Neither
+					 * breaks anything, but both read as failures in a console a
+					 * pilot is watching.
+					 *
+					 * Keep the exchange running normally instead, and let the
+					 * loop end when PX4 closes the link. The deadline is a
+					 * backstop for a shutdown that was refused; the message says
+					 * so rather than exiting quietly on a PX4 that is still up.
+					 */
+					shutdown_deadline_us = micros() + SHUTDOWN_WAIT_US;
+					continue;
 				}
 
 				reset_retry_until_us = micros() + RESET_RETRY_WINDOW_US;
@@ -1344,6 +1363,22 @@ int main(int argc, char **argv)
 			} else if (now_us >= reset_retry_next_us && battery.active()) {
 				battery.requestPositionReset(home_lat, home_lon, 0.5, now_us);
 				reset_retry_next_us = now_us + RESET_RETRY_INTERVAL_US;
+			}
+		}
+
+		if (shutdown_deadline_us != 0) {
+			if (px4.LinkLost()) {
+				cerr << "[flightaxis_bridge]   PX4 is down - restarting" << endl;
+				fa.releaseController();
+				return EXIT_RESTART_REQUESTED;
+			}
+
+			if (micros() >= shutdown_deadline_us) {
+				cerr << "[flightaxis_bridge]   PX4 did not shut down within "
+				     << (SHUTDOWN_WAIT_US / 1000000) << " s - leaving anyway."
+				     << " Ctrl-C if it keeps running." << endl;
+				fa.releaseController();
+				return EXIT_RESTART_REQUESTED;
 			}
 		}
 

@@ -1243,6 +1243,11 @@ time jump — the EKF stays healthy). Isolated glitches are normal. A **rising c
 problem**, essentially always WiFi. Move to wired (§1.4). Also check the Windows box is not
 swapping, alt-tabbed into something heavy, or throttling RealFlight in the background.
 
+One glitch line immediately after a restart under `PX4_FLIGHTAXIS_RESTART_ON_RESET` is the
+restart itself, not the network: RealFlight's physics clock runs on while PX4 is down, so the
+first frames of the new session span that gap. It is swallowed exactly as any other glitch is,
+and the count does not keep climbing.
+
 ### Silent hang at `waiting for PX4 on TCP 4560 ...`
 
 The bridge is in `accept()` and PX4 never connected. Causes:
