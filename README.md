@@ -296,7 +296,7 @@ PX4_HOME_LAT=-37.7304917 \
 PX4_HOME_LON=175.7433944 \
 PX4_HOME_ALT=48.0 \
 PX4_HOME_YAW=235 \
-make px4_sitl_nolockstep flightaxis_plane
+make px4_sitl_nolockstep flightaxis_quadplane
 ```
 
 (also `flightaxis_quad`, `flightaxis_quadplane`, `flightaxis_heli`; QGC connects on UDP 14550)
@@ -398,13 +398,13 @@ Add one line, `PX4_FLIGHTAXIS_ROOTFS`, and that model gets its own directory:
 ```bash
 cd ~/PX4-Autopilot
 
-PX4_FLIGHTAXIS_ROOTFS=~/sitl/fa-rootfs/quadplane \
+PX4_FLIGHTAXIS_ROOTFS=~/sitl/PX4/Plane \
 PX4_FLIGHTAXIS_IP=192.168.10.1 \
 PX4_HOME_LAT=-37.7304917 \
 PX4_HOME_LON=175.7433944 \
 PX4_HOME_ALT=48.0 \
 PX4_HOME_YAW=235 \
-make px4_sitl_nolockstep flightaxis_quadplane
+make px4_sitl_nolockstep flightaxis_plane
 ```
 
 **There is no separate first-run command.** That is the whole invocation, every time. The
