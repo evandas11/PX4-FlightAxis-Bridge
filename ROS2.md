@@ -167,7 +167,7 @@ sensor_gyro             1380 Hz     distance_sensor                       20 Hz
 rpm                     1380 Hz     vehicle_attitude_groundtruth          50 Hz
 sensor_combined          204 Hz     vehicle_local_position_groundtruth    50 Hz
 vehicle_attitude         204 Hz     vehicle_global_position_groundtruth   50 Hz
-battery_status           100 Hz     vehicle_angular_velocity_groundtruth  50 Hz
+battery_status             2 Hz     vehicle_angular_velocity_groundtruth  50 Hz
 vehicle_local_position   100 Hz
 ```
 
@@ -183,6 +183,10 @@ vehicle_local_position   100 Hz
 > 50 Hz, differential pressure 50 Hz.** Accel and gyro are never masked and still follow the
 > frame rate. Expect those three topics at their sub-rates, not at the IMU rate; the surplus
 > was being dropped by `VehicleAirData` anyway, after inflating every ulog for nothing.
+>
+> `battery_status` is corrected too. The 100 Hz in the original capture was PX4's own
+> `battery_simulator`; the airframes now set `SIM_BAT_ENABLE 0` and the topic comes from the
+> bridge's separate UDP link at its `SEND_INTERVAL_US = 500000` — **2 Hz** (see below).
 
 The accompanying values are what a stationary aircraft should show: accel `z = -9.804 m/s²`,
 gyro ≈ 0, baro 95599 Pa at 488 m, mag consistent with the Zurich default home position,
@@ -309,6 +313,7 @@ tuning (see `1201_flightaxis_quad`), is worth knowing about:
 | `EKF2_MULTI_IMU` | `1` | The bridge only ever supplies IMU instance 0, so the two extra EKF instances `px4-rc.mavlinksim` asks for would run on dead sensors. Also forced with `param set`. |
 | `COM_RC_IN_MODE` | `4` | "Ignore any stick input" — the only value that skips the RC-loss failsafe. A headless ROS 2 run has no manual control source at all, so **this is what stops RC-loss failsafe from pre-empting your offboard session.** |
 | `SDLOG_MODE` | `0` | "When armed until disarm" — one bounded log file per flight. `rcS` sets 1, "from boot until disarm", which opens the log at boot and records the whole idle stretch before you ever arm, so the override back to PX4's own default is not redundant. |
+| `SENS_IMU_AUTOCAL`, `SENS_MAG_AUTOCAL`, `IMU_GYRO_CAL_EN` | `0` | PX4 learns accel, gyro and mag offsets in flight and commits them as permanent calibration. Every sensor here is synthesised from RealFlight's state and has no bias to find, so what gets learned is the estimator's own transients — and then saved, so the next run starts from them. **This is the one that will waste your afternoon:** it survives restarts, so a position that drifts in `vehicle_local_position` while the aircraft sits still in RealFlight looks unrelated to whatever you changed last. Set as `set-default`, so a working directory flown before this landed keeps its learned offsets until you clear them (RUNNING.md §7). |
 
 `COM_RC_IN_MODE 4` is the one with a behavioural consequence for offboard work: if you port
 these airframes or set the parameters by hand and leave it at the default of 1, an offboard
@@ -368,6 +373,21 @@ uORB → DDS → ROS 2.
 - ~100 Hz ceiling on every topic (§5).
 - Ground truth and `vehicle_angular_velocity` not exposed without editing `dds_topics.yaml` (§4).
 - `px4_msgs` must match v1.16 or topics fail silently (§2).
+- **A RealFlight respawn restarts PX4, and so ends the DDS session.** This is the default. When
+  the pilot presses spacebar the bridge sees the model teleport, force-disarms, and exits so the
+  runner can bring PX4 and the bridge back up. The reason is that a respawn leaves EKF2 holding a
+  converged solution for a flight that no longer exists: it reads the position step as a lying
+  GPS rather than a moved aircraft, rejects it and dead-reckons, and the aircraft drifts across
+  the map while it sits on the runway. A new estimator is the only thing that fixes that.
+  **The consequence for ROS 2 is a hard discontinuity:** the uXRCE-DDS client goes down and comes
+  back, every topic drops out for the gap, the log file changes, and your node must reconnect,
+  re-arm and re-establish its setpoint stream rather than assuming continuity across a reset.
+  Design the offboard node to tolerate PX4 disappearing.
+- `PX4_FLIGHTAXIS_RESTART_ON_RESET=0` opts out, keeping one continuous session across a respawn.
+  That preserves the DDS connection but leaves you with the diverged estimate above — the bridge
+  falls back to re-anchoring its position offset and asking PX4 for an external position reset,
+  which EKF2 gates on dead-reckoning or being on the ground without GNSS fusion and so may refuse
+  at the moment of the teleport and accept some seconds later.
 
 ---
 

@@ -197,7 +197,7 @@ param set-default RWTO_PSP 8
 #   controls[1] = 203 Servo 3     elevator        [-1,1] -> plane.json rf1 (RF ch2)
 #   controls[2] = 101 Motor 1     throttle        [0,1]  -> plane.json rf2 (RF ch3)
 #   controls[3] = 204 Servo 4     rudder          [-1,1] -> plane.json rf3 (RF ch4)
-#   controls[4] = 202 Servo 2     aileron right   [-1,1] -> RF ch5, unmapped (see plane.json)
+#   controls[4] = 202 Servo 2     aileron right   [-1,1] -> plane.json rf4 (RF ch5)
 param set-default CA_AIRFRAME 1
 
 param set-default CA_ROTOR_COUNT 1

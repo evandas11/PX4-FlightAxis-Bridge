@@ -151,8 +151,8 @@ The directory is created if missing and seeded with the calibration you already 
 same command then serves every later run — there is no separate first-run form. Full
 explanation in [*A working directory per model*](README.md#a-working-directory-per-model).
 
-**Switching from one vehicle to another** is that same rootfs argument plus two manual steps, in
-this order:
+**Switching from one vehicle to another** is that same rootfs argument plus two manual steps —
+three things in all, in this order:
 
 1. **Ctrl-C the running target.** The bridge exits with PX4; there is nothing else to stop.
 2. **Load the matching aircraft in RealFlight.** The bridge does not choose the model — it drives
@@ -298,8 +298,8 @@ model or with `CA_SP0_ANG*`. The tail servo is the one heli channel a plain reve
 
 | Layer | Limit | Where |
 |---|---|---|
-| **RealFlight FlightAxis SOAP** | **12** ← *binding* | `ExchangeData` sends exactly 12 `<item>` values (`fa_communicator.cpp:204-217`). ArduPilot does the same: `float scaled_servos[12]` (`SIM_FlightAxis.cpp:329`). |
-| Bridge channel array | 12 | `RF_CHANNELS = 12` (`flightaxis_bridge.cpp:109`); `exchangeData` clamps to 12 (`fa_communicator.cpp:772-775`); `selectedChannels = 4095` = `0xFFF` = 12 bits (`flightaxis_bridge.cpp:932`). |
+| **RealFlight FlightAxis SOAP** | **12** ← *binding* | `ExchangeData` sends exactly 12 `<item>` values (`fa_communicator.cpp:205-216`). ArduPilot does the same: `float scaled_servos[12]` (`SIM_FlightAxis.cpp:329`). |
+| Bridge channel array | 12 | `RF_CHANNELS = 12` (`flightaxis_bridge.cpp:113`); `exchangeData` clamps to 12 (`fa_communicator.cpp:772-775`); `selectedChannels = 4095` = `0xFFF` = 12 bits (`flightaxis_bridge.cpp:1133`). |
 | Model JSON validator | 12 | `RF_CHANNELS = 12`, `PX4_CONTROLS = 16` (`get_FAbridge_params.py:63-64`). |
 | MAVLink `HIL_ACTUATOR_CONTROLS` | 16 | `float controls[16]` — protocol-fixed. |
 | PX4 `actuator_outputs` | 16 | `NUM_ACTUATOR_OUTPUTS = 16` (`msg/ActuatorOutputs.msg:2`). |
@@ -508,12 +508,20 @@ Give those rows an explicit `disarm` (0.5 for a bipolar servo, 0.0 for a motor).
 and the bridge will not start; see [When to re-enable `HeliDemix`](#when-to-re-enable-helidemix)
 for why the combination fails silently.
 
-**Gotcha — transition.** The airframe sets `VT_F_TRANS_THR 0.75`, `VT_FWD_THRUST_EN 4`,
-`FW_AIRSPD_MAX 25`. Transition needs the pusher to actually accelerate the model. These values
-assume an airframe whose pusher can reach `VT_ARSP_TRANS` in level flight within
-`VT_F_TRANS_DUR`; if your RealFlight model is appreciably draggier, or light enough that the
-lift motors hold it below that airspeed, transition will stall or never complete. Tune
-`VT_F_TRANS_DUR` / `VT_ARSP_TRANS` for your model rather than assuming the defaults fit.
+**Gotcha — transition.** The front-transition block is the one place this airframe departs
+furthest from the stock standard-VTOL it started from, because the inherited values were tuned
+for a deliberately over-powered simulated pusher. It sets `VT_F_TRANS_THR 1.0` (full pusher —
+the firmware default, in place of the reference airframe's 0.75), `VT_PSHER_SLEW 1.0` (full
+throttle reached in 1 s rather than 3), `VT_ARSP_BLEND 8` / `VT_ARSP_TRANS 13` (a 5 m/s
+lift-motor handoff window ending at a real flying speed rather than a 2 m/s window ending at
+`FW_AIRSPD_MIN`), and `VT_F_TR_OL_TM 8` / `VT_TRANS_TIMEOUT 20` for the timeout budget. Also
+`VT_FWD_THRUST_EN 4` and `FW_AIRSPD_MAX 25`.
+
+Transition still needs the pusher to actually accelerate *your* model to `VT_ARSP_TRANS` before
+`VT_F_TR_OL_TM` expires. If your RealFlight model is appreciably draggier, or light enough that
+the lift motors hold it below that airspeed, the transition times out and quad-chutes. Tune
+`VT_ARSP_TRANS` and the two timeout values for your model rather than assuming these fit; the
+airframe file states the reasoning for each so you can see what you are moving away from.
 
 **Gotcha — there is no motor-failure detection.** The airframe used to carry `FD_ACT_EN 0`,
 inherited from a stock PX4 standard-VTOL airframe along with a comment claiming SITL reports
@@ -809,8 +817,15 @@ position, velocity and wind — so heading and direction of travel stay consiste
 contradiction. Body-frame sensors (accelerometer, gyro) and all Down components are untouched.
 GPS, baro, mag and COG follow for free, each being derived from something already rotated.
 
-The heading datum is latched alongside the position anchor and dropped with it, so a reset in
-RealFlight re-derives it against the post-reset attitude and your requested heading survives.
+**The heading datum is latched once per session and is deliberately *not* re-derived on a
+respawn**, which is where it parts company with the position anchor: the anchor is an origin and
+may move, the rotation is the frame every other quantity is expressed in. Re-deriving it would
+turn that frame underneath an estimator that has already converged on the old one, while the
+synthetic magnetic field — built from the home location and never rotated — stayed behind.
+Measured, the first time a respawn was detected rather than silently missed: two teleports, then
+`Compass 0 fault` five times and horizontal position unstable twice. Nothing is lost by keeping
+it, because a reset returns the model to where it entered and the rotation derived there is still
+the right one for it.
 
 Leaving it unset rotates nothing — that is the historical behaviour, and also what ArduPilot does:
 it accepts a heading as the 4th field of `--custom-location`, but `SIM_FlightAxis` overwrites the
@@ -983,10 +998,16 @@ transport the line reads `battery telemetry disabled on <transport>` instead —
 
 ```
 [flightaxis_bridge] connecting to RealFlight at 192.168.10.1:18083
+[flightaxis_bridge] starting controller at 192.168.10.1
 [flightaxis_bridge] controller injected, aircraft reset
 ```
 ↑ The UAV controller interface was injected into RealFlight and (because `ResetPosition` is set)
-the aircraft was reset to the runway. RealFlight's own controls are now overridden by PX4.
+the aircraft was reset to the runway. RealFlight's own controls are now overridden by PX4. The
+`starting controller` line is printed at the top of the three-request startup sequence
+(`RestoreOriginalControllerDevice` → `ResetAircraft` → `InjectUAVControllerInterface`), so it also
+appears on every later re-injection. The SOAP replies are not checked for faults — an "already
+injected" fault means success — but a *missing* or unrecognised reply gets its own warning, which
+is a fault: see §7.
 
 ```
 [flightaxis_bridge] heading datum: RealFlight reports 12.4 deg, PX4_HOME_YAW asks for 235 deg -> rotating the RF world by 222.6 deg
@@ -1062,12 +1083,56 @@ Not part of a healthy start, but expected the moment you press spacebar in RealF
 ```
 [flightaxis_bridge] aircraft teleported 111.0 m (RealFlight reset) - re-anchoring
 ```
-↑ The bridge noticed the respawn and re-captured the position anchor. With
-`PX4_FLIGHTAXIS_RESTART_ON_RESET=1` (§6.1) a second line follows —
-`restarting PX4 (PX4_FLIGHTAXIS_RESTART_ON_RESET is set)` — and the run comes back from the
-beginning. Without it, expect PX4 to keep flying the old trajectory for a while: see
+↑ The bridge noticed the respawn and re-captured the position anchor. By default this is followed
+by a restart (next section). Under `PX4_FLIGHTAXIS_RESTART_ON_RESET=0` it is not, and you should
+then expect PX4 to keep flying the old trajectory for a while: see
 [`aircraft teleported N m (RealFlight reset) - re-anchoring`](#aircraft-teleported-n-m-realflight-reset---re-anchoring)
 in §7 for why.
+
+### The restart sequence, after a respawn
+
+Unless you set `PX4_FLIGHTAXIS_RESTART_ON_RESET=0` (§6.1), the teleport line above is followed by
+a teardown and a second, complete start. **This is the normal path**, and it is noisier than it
+looks like it should be, so here it is in full:
+
+```
+[flightaxis_bridge] aircraft teleported 111.0 m (RealFlight reset) - re-anchoring
+[flightaxis_bridge]   restarting PX4 (PX4_FLIGHTAXIS_RESTART_ON_RESET is set)
+[flightaxis_bridge] controller released - RealFlight is back on the original transmitter
+```
+↑ The bridge force-disarms PX4 (`MAV_CMD_COMPONENT_ARM_DISARM` with the force magic, so it works
+in flight), waits 300 ms for that to land, asks for a **shutdown** rather than a reboot, hands
+RealFlight back to its transmitter and returns exit code 42. It does **not** print its usual
+`exiting` line — that belongs to the ordinary exit path, and this one returns before it.
+
+Read `is set` in that second line loosely: the message predates the option becoming the default,
+and you will see it without having set anything.
+
+```
+Failed sending mavlink message: Broken pipe
+    ... about twenty of these ...
+    ... then a pair of sensor TIMEOUT! errors from PX4 ...
+[sitl_run] RealFlight reset - restarting PX4 and the bridge
+```
+↑ **Expected, and cosmetic.** PX4 takes a moment to go down, and in that moment it is still
+streaming MAVLink into a socket whose far end has already closed, and its sensor topics have
+already stopped being fed. The `TIMEOUT!` lines arrive `ERROR`-coloured and read like a fault;
+they are the simulator link ending, not a sensor problem. Nothing here needs acting on — the line
+that matters is the last one, from `sitl_run.sh`, which is the loop going round. Quieting this
+noise has been attempted and reverted: every version that printed less also broke the teardown,
+in one case leaving RealFlight handed back to the transmitter with the throttle still up. A noisy
+exit is preferred to a clever one.
+
+After that the whole of §5 replays from the top: a fresh bridge, a fresh PX4, a new
+`SYS_AUTOSTART` line, and an estimator with no state — which is the entire point of the option.
+One `glitch` line just after the restart is the gap itself, not the network (§7).
+
+If PX4 does *not* go down, the bridge says so rather than leaving a silent hang:
+
+```
+[flightaxis_bridge]   WARNING: could not send the shutdown request. If PX4 keeps running with
+"Broken pipe" warnings, Ctrl-C the session.
+```
 
 ### Before you fly, check in QGC
 
@@ -1155,23 +1220,37 @@ Note `PX4_HOME_*` must be set on the **bridge** process, not on `px4`.
 
 Prepended to the make command like every other variable here:
 
+**This is on by default.** A respawn restarts PX4 and the bridge unless you say otherwise, so
+none of the launch commands in §2 mention it. The variable exists to turn it *off*:
+
 ```bash
-PX4_FLIGHTAXIS_RESTART_ON_RESET=1 \
+PX4_FLIGHTAXIS_RESTART_ON_RESET=0 \
 PX4_FLIGHTAXIS_IP=192.168.10.1 \
 make px4_sitl_nolockstep flightaxis_plane
 ```
 
-What it is for, and why a restart is the answer rather than a workaround, is in
-[Restarting on a RealFlight respawn](README.md#restarting-on-a-realflight-respawn). What running
-with it costs:
+Why a restart is the answer rather than a workaround is in
+[Restarting on a RealFlight respawn](README.md#restarting-on-a-realflight-respawn); the short
+version is that EKF2 cannot be talked out of a converged solution, so a respawn without a restart
+leaves the aircraft drifting across the QGC map while it sits on the RealFlight runway (§7). What
+running with the default costs:
 
-- **It is off unless the value is exactly `1`.** Unset, empty, `0`, `true`, `yes` — all leave the
-  historical single-run behaviour. Both the bridge and `sitl_run.sh` test for the literal `1`.
+- **To disable it, use exactly `0`.** Unset, empty, `1`, `true`, `yes` — all restart. The two ends
+  test the value slightly differently: `sitl_run.sh` compares against the literal string `0`,
+  while the bridge only looks at the first character, so a value like `0x` would stop the bridge
+  restarting without stopping the script from looping. There is no reason to write anything but
+  `0`.
 - **`pxh>` keeps working across restarts.** PX4 stays in the foreground of `sitl_run.sh`'s loop,
-  so the prompt returns with the new PX4. This is also why the *bridge* reboots PX4 rather than
+  so the prompt returns with the new PX4. This is also why the *bridge* takes PX4 down rather than
   the script killing it: a script blocked on a foreground process cannot act.
-- **Each respawn costs a few seconds** — force-disarm, reboot, both processes back up, EKF2
-  re-converging from nothing.
+- **Each respawn costs a few seconds** — force-disarm, shutdown, both processes back up, EKF2
+  re-converging from nothing. It is a **shutdown**, not a reboot: `px4_reboot_request()` is
+  compiled only on NuttX, so a reboot request on POSIX is accepted and then does nothing, leaving
+  PX4 running with no simulator attached. The bridge asks for `MAV_CMD_PREFLIGHT_REBOOT_SHUTDOWN`
+  with param1 = 2.
+- **The teardown is noisy** — roughly twenty `Failed sending mavlink message: Broken pipe` lines
+  and a pair of sensor `TIMEOUT!` errors while PX4 goes down. Expected; see
+  [The restart sequence](#the-restart-sequence-after-a-respawn) in §5.
 - **The log is closed and a new one opened**, so a session with three respawns leaves four flight
   logs rather than one (§7, *Where the logs land*).
 - **The ground station reconnects.** QGC drops the vehicle and picks it up again; a MAVSDK or ROS 2
@@ -1180,8 +1259,10 @@ with it costs:
   out of the loop and reports exactly as it did before. The bridge signals the deliberate case with
   exit code 42, which is the only thing `sitl_run.sh` loops on.
 
-Leave it off if you would rather keep a session alive across a respawn and accept the estimator
-divergence described in §7.
+Set it to `0` if you would rather keep a session alive across a respawn and accept the estimator
+divergence described in §7 — which is a reasonable trade when you are debugging something that
+takes a while to reach and a respawn was incidental, and a poor one when you actually intend to
+keep flying afterwards.
 
 ---
 
@@ -1200,9 +1281,23 @@ Wired link up? Confirm independently with `nc -zv <ip> 18083`.
 The JSON is malformed, missing, or uses a name the flattener does not know. It prints the
 specific cause on stderr:
 
-- `get_FAbridge_params: unknown option '<x>'` — only `ResetPosition`, `Rev4Servos`, `HeliDemix`,
-  `SilenceFPS` are valid.
-- `get_FAbridge_params: unknown scale '<x>'` — only `unipolar` and `bipolar`.
+- `unknown option '<x>'` — only `ResetPosition`, `Rev4Servos`, `HeliDemix`, `SilenceFPS` are
+  valid.
+- `Channels[N] unknown scale '<x>'` — only `unipolar` and `bipolar`.
+- `unknown key '<x>' in ...` — a top-level or per-row key it does not consume, with a
+  did-you-mean for a case-only miss. Free-form notes are still allowed: any key ending in
+  `Comment` is ignored, which is how the shipped models annotate themselves.
+- `'rf' is mapped twice: Channels[i] and Channels[j] ...` — the same duplicate the bridge refuses
+  (below), caught earlier so that the failure is visible rather than swallowed by backgrounding.
+- `'HeliDemix' and 'Rev4Servos' cannot both be set: ...` — refused outright; see
+  [When to re-enable `HeliDemix`](#when-to-re-enable-helidemix).
+- `rf<N> ... but <option> rewrites that slot every frame` — a hold-last row on a slot `HeliDemix`
+  or `Rev4Servos` transforms. Give it an explicit `disarm`.
+
+One message from the same script is a **warning, not an error**, and does not stop the run:
+`Channels[N] (rfM) has no "disarm" key, so it holds its last armed value when disarmed.` No
+shipped model can produce it — all four state a `disarm` on every row — so seeing it means the
+JSON has been edited.
 
 Reproduce it directly:
 
@@ -1227,6 +1322,11 @@ or `bad channel map: PX4 control index px4[3] is mapped twice …`. The bridge r
 either, deliberately: a duplicate `rf` would silently last-wins, and a duplicate `px4` is almost
 always a typo. Fix the model JSON; the message names both offending entries.
 
+Under `make` you will normally see the flattener's version of this instead — `'rf' is mapped
+twice: Channels[1] and Channels[3] both use rf 2` — because it validates the same thing before
+anything is started. The bridge's message is what you get when launching the bridge by hand
+(§6, *Launching by hand*), where a bad argv reaches it directly.
+
 You may also see `bad channel map: expected N args, got M` — the argv from the flattener was
 truncated, which usually means the JSON was edited while running.
 
@@ -1234,17 +1334,35 @@ truncated, which usually means the JSON was edited while running.
 
 RealFlight is running its physics faster or slower than realtime. PX4's controllers and EKF
 assume wall-clock. Set the multiplier back to 1.0 in RealFlight. The warning repeats with the
-FPS line until you do.
+FPS line until you do — and unlike that line it is **not** silenced by `SilenceFPS`, so the
+shipped models still show it.
+
+### `WARNING: realtime factor 0.82 (physics s per wall s)`
+
+**A different fault from the one above, and the more insidious of the two.** That one is
+RealFlight's self-reported *setting*; this one fires when RealFlight reports 1.0 and the machine
+simply cannot keep up. The message spells out the consequence: PX4 timestamps the SITL sensor
+stream with its own clock on arrival, so it integrates more (or less) real time than the physics
+covers, and the aircraft flies in slow motion — or fast — while every sensor value still looks
+entirely correct. Velocities, accelerations and every control loop are scaled wrong.
+
+Printed at most once every 5 s while `rtf` sits outside 0.95–1.05, and **not** silenced by
+`SilenceFPS`. The remedy is the machine, not the configuration: reduce RealFlight's graphics load,
+close other applications, and check the same things as [Low `avg=` FPS](#low-avg-fps) below.
 
 ### `glitch 0.62s` / `glitches=` climbing
 
-A physics-time discontinuity larger than 50 ms was detected and swallowed (so PX4 never sees a
-time jump — the EKF stays healthy). Isolated glitches are normal. A **rising count is a network
-problem**, essentially always WiFi. Move to wired (§1.4). Also check the Windows box is not
-swapping, alt-tabbed into something heavy, or throttling RealFlight in the background.
+A forward physics-time discontinuity between 50 ms and 2 s was detected and swallowed (so PX4
+never sees a time jump — the EKF stays healthy). Isolated glitches are normal. A **rising count is
+a network problem**, essentially always WiFi. Move to wired (§1.4). Also check the Windows box is
+not swapping, alt-tabbed into something heavy, or throttling RealFlight in the background.
 
-One glitch line immediately after a restart under `PX4_FLIGHTAXIS_RESTART_ON_RESET` is the
-restart itself, not the network: RealFlight's physics clock runs on while PX4 is down, so the
+The 2 s ceiling matters: a jump larger than that is passed through rather than swallowed and does
+not increment the counter, so a very long stall shows up as an EKF disturbance with no `glitch`
+line to explain it. A physics clock that has stopped advancing altogether is handled elsewhere
+again — see [`Preflight Fail: Airspeed selector module down`](#preflight-fail-airspeed-selector-module-down).
+
+One glitch line immediately after a respawn restart (§6.1) is the restart itself, not the network: RealFlight's physics clock runs on while PX4 is down, so the
 first frames of the new session span that gap. It is swallowed exactly as any other glitch is,
 and the count does not keep climbing.
 
@@ -1307,7 +1425,13 @@ compensator has just swallowed a network stall and a legitimate frame really doe
 flight. (The flag is still checked, for the aircraft-change case it does catch — see the
 reinjection entry above.)
 
-**What happens next, and why the aircraft keeps flying in QGC.** The position anchor is
+**What happens next.** By default, a restart: the bridge force-disarms PX4, shuts it down and
+exits 42, and `sitl_run.sh` brings both back — see
+[The restart sequence](#the-restart-sequence-after-a-respawn) in §5 for the console output, and
+§6.1 for what it costs. That is the end of it, and the rest of this entry describes the run you
+get with `PX4_FLIGHTAXIS_RESTART_ON_RESET=0`.
+
+**Why the aircraft keeps flying in QGC when you disable the restart.** The position anchor is
 re-captured, so PX4 receives the model back at the point it entered — everything the bridge sends
 is correct from the next frame. PX4 does not believe it. EKF2 has converged state from the flight
 just ended and reads a hundred-metre step as a lying GPS rather than a moved aircraft, so it
@@ -1321,8 +1445,9 @@ instant of a respawn neither holds, so it is refused; the gate may open a second
 the rejected position has pushed the estimator into dead reckoning, which is why the offer is kept
 open. It is a recovery in seconds when it works, and it does not always work.
 
-**The definite answer is `PX4_FLIGHTAXIS_RESTART_ON_RESET=1`** (§6.1): a restart gives the run an
-estimator with no state, and an estimator with no state accepts whatever it is given. Background in
+**Which is why the restart is the default** (§6.1): it gives the run an estimator with no state,
+and an estimator with no state accepts whatever it is given. If you turned it off and this is what
+you are looking at, turning it back on is the fix. Background in
 [Restarting on a RealFlight respawn](README.md#restarting-on-a-realflight-respawn).
 
 If you are waiting the divergence out instead, the related symptom is
@@ -1336,6 +1461,22 @@ causes account for nearly all of it: RealFlight has a **modal dialog** open (it 
 the controller while one is up), or the loaded model has **no FlightAxis-controllable channels**.
 The bridge keeps retrying and pumps HEARTBEAT to PX4 meanwhile, so it will pick up the moment you
 dismiss the dialog.
+
+### `WARNING: no reply to InjectUAVControllerInterface from <ip>:18083`
+
+Also `WARNING: short/unrecognised reply to <request> from <ip>:18083 (N bytes)`, and both end
+`startup may be incomplete`. `<request>` is one of the three the startup sequence sends:
+`RestoreOriginalControllerDevice`, `ResetAircraft`, `InjectUAVControllerInterface`.
+
+These are diagnostics on a path that otherwise ignores its replies on purpose — a SOAP *fault*
+from RealFlight is routinely success ("already injected"), so faults are not checked. A **missing**
+reply is a different thing: the request never reached RealFlight, or something between the two
+(a proxy, NAT, or a firewall with an idle timeout) dropped the connection. Before these lines
+existed that failure produced no output at all.
+
+Startup continues regardless, so treat them as an explanation rather than a stop: if the aircraft
+then does not respond to PX4, this is why, and the causes are the ones in §1.3 and §1.4 rather
+than anything in the model JSON.
 
 ### `connect to <ip>:18083 failed - is RealFlight running with FlightAxis Link enabled?`
 
@@ -1356,9 +1497,19 @@ RealFlight build is the thing that changed.
 ### `PX4 Communicator: send to PX4 failed (N consecutive)`
 
 A `send()` to the PX4 MAVLink socket failed, with the errno appended; logged once and then at most
-once a second. An isolated one is a transient. A count that climbs means the PX4 side has stopped
-draining or is on its way out — 100 consecutive failures is one of the conditions that declares
-the link lost, so this usually precedes `PX4 link lost - shutting down` above.
+once a second. An isolated one is a transient, and the recovery says so —
+`PX4 Communicator: send recovered after N failures`. A count that climbs means the PX4 side has
+stopped draining or is on its way out — 100 consecutive failures is one of the conditions that
+declares the link lost, so this usually precedes `PX4 link lost - shutting down` above.
+
+### `PX4 Communicator: PX4 link is DEAD (<reason>)`
+
+The moment the link is declared lost, printed once and naming the reason: a fatal `send()` errno
+(`Broken pipe`, `Connection reset by peer`, …), or `too many consecutive send failures` after the
+100 above. The bridge then stops sending anything further and shuts down on the next loop
+iteration, which is where
+[`PX4 link lost - shutting down`](#px4-link-lost---shutting-down) comes from. The two lines are
+one event; the diagnosis is in this one, the consequence in that one.
 
 ### `*** RealFlight model has LOST COMPONENTS (crash/breakup) ***`
 
@@ -1618,7 +1769,7 @@ The giveaway in the console is:
 INFO  [vehicle_imu] ACC 0 offset committed: ...
 ```
 
-`SENS_IMU_AUTOCAL`, `SENS_MAG_AUTOCAL` and `IMU_GYRO_CAL_EN` all default to `1`. On a real
+`SENS_IMU_AUTOCAL`, `SENS_MAG_AUTOCAL` and `IMU_GYRO_CAL_EN` default to `1` in firmware. On a real
 aircraft that is right — the sensors drift and PX4 learns the bias in flight. Here the sensors are
 synthesised from RealFlight's state and have no bias to learn, so what PX4 learns instead is its
 own estimator transients, and it **commits them to `parameters.bson` as permanent calibration**.
@@ -1626,12 +1777,16 @@ Measured in one session: an accelerometer offset going from zero to
 `+0.308, -0.173, +0.040 m/s²`. Because it accumulates across sessions rather than resetting with
 each run, the symptom looks intermittent and unrelated to whatever was last changed.
 
-At the `pxh>` prompt:
+**All four airframes now `param set-default` those three to `0`**, so a working directory used
+only since then cannot acquire this. There is nothing to type and nothing to remember; if you want
+to confirm it, `param show SENS_IMU_AUTOCAL` at the `pxh>` prompt.
+
+What the airframe cannot undo is an offset **already saved** in a directory that was flown before
+it. A `set-default` stops the learning; it does not clear what the learning wrote. So the recovery
+below is for exactly that case — an existing working directory carrying committed offsets — and
+for no other. At the `pxh>` prompt:
 
 ```
-param set SENS_IMU_AUTOCAL 0
-param set SENS_MAG_AUTOCAL 0
-param set IMU_GYRO_CAL_EN 0
 param reset CAL_ACC0_XOFF CAL_ACC0_YOFF CAL_ACC0_ZOFF
 param reset CAL_GYRO0_XOFF CAL_GYRO0_YOFF CAL_GYRO0_ZOFF
 param reset CAL_MAG0_XOFF CAL_MAG0_YOFF CAL_MAG0_ZOFF
@@ -1640,6 +1795,12 @@ param save
 
 Then restart PX4 — the offsets are read at boot, so clearing them takes effect on the next one.
 It is a per-working-directory fix, so repeat it in each `PX4_FLIGHTAXIS_ROOTFS` (§2 preamble).
+
+If a directory *also* has one of the three learning parameters explicitly saved to `1` — which
+takes a deliberate `param set` or a QGC change, since a `set-default` that was never touched is
+not persisted — the airframe's `0` loses to it, exactly as described under
+[a *saved* `PWM_MAIN_FUNC*`](#first-suspect-a-saved-pwm_main_func-from-an-older-install) above.
+`param reset SENS_IMU_AUTOCAL SENS_MAG_AUTOCAL IMU_GYRO_CAL_EN` puts the airframe back in charge.
 
 ⚠️ **Reset only the `*OFF` parameters, named individually as above.** `param reset CAL_ACC0_*`
 would also clear `CAL_ACC0_ID`, and without an id PX4 reports the sensor as **uncalibrated** — a
@@ -1790,6 +1951,12 @@ something to fix on the ground rather than fly around.
    approximately `(0, 0, -9.81)` with **zero jitter** (proves the ground-contact override);
    `listener sensor_gyro` → zero. QGC heading matches the RealFlight compass. Pitch the model
    nose-up 90° in RealFlight — QGC attitude must follow cleanly with no singularity.
+
+   On the ground the accelerometer is not RealFlight's — it is differentiated from velocity,
+   because RealFlight's own body accelerations are unusable there. The differentiation runs over
+   an **accumulated** window of at least 5 ms, and RealFlight's frames arrive about 4 ms apart, so
+   most frames repeat the previous result rather than computing a new one. Expect the value to
+   update in steps while taxiing (step 3). That is the window, not a stalled sensor.
 2. **Rates.** Roll right → `p > 0`. Pull up → `q > 0`. Yaw right → `r > 0`. (Only yaw is negated
    from RealFlight; if two axes are wrong, the conversion is wrong, not your model.)
 3. **Taxi.** Drive north, then east. Local position N/E and velocity vN/vE must track, and the
@@ -1798,9 +1965,12 @@ something to fix on the ground rather than fly around.
    own `m_airspeed` does not.
 5. **EKF.** Fly a manual circuit. Innovations bounded throughout; compare groundtruth against
    estimate in the ulog afterwards.
-6. **Resilience.** Press spacebar in RealFlight (bridge must re-inject and re-offset). Change
-   aircraft in RealFlight (must auto-restart). Unplug the network for 1 s (glitch counter++, no
-   EKF time-jump fault). Kill the bridge mid-flight (PX4 must hit its sensor-timeout failsafe,
-   not hang).
+6. **Resilience.** Press spacebar in RealFlight — the bridge must announce the teleport and
+   re-anchor (§7). Change aircraft in RealFlight — the bridge must re-inject the controller and
+   carry on; PX4 is still running the *old* airframe at that point, so restart it afterwards
+   (§2). Unplug the network for 1 s (glitch counter++, no EKF time-jump fault). Kill the bridge
+   mid-flight — PX4 must fail its arming checks and let EKF2 time its sources out rather than
+   hang. There is no single "sensor timeout failsafe" to watch for: what actually trips is the
+   per-sensor 1 s freshness requirement in the arming checks and EKF2's own per-source timeouts.
 
 Only after 1–4 pass is it reasonable to trust an autonomous mission.

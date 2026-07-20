@@ -32,10 +32,14 @@ battery link of any kind.
 Reworked substantially inside files that started from an upstream source — see the
 provenance table for what each began as: the transports, per-message decimation,
 `fields_updated` sub-rating and dead-link policy in `px4_communicator.*`; the
-absolute-clock design, realtime-factor monitor and reconnect handling in
-`flightaxis_bridge.cpp`; the rangefinder path and sensor synthesis in
-`vehicle_state.*`; and the four airframes with their control-allocation and
-parameter configuration.
+absolute-clock design, realtime-factor monitor, reconnect handling and the
+respawn response in `flightaxis_bridge.cpp` — upstream re-captures the position
+offset when the reset flag is set, and everything built around that here
+(detecting the respawn from the teleport instead, waiting for the model to
+settle, cutting the throttle, asking EKF2 to reset its position, and the
+restart-on-respawn path) has no upstream counterpart; the rangefinder path and
+sensor synthesis in `vehicle_state.*`; and the four airframes with their
+control-allocation and parameter configuration.
 
 ## Third-party notices — required, do not remove
 
@@ -66,10 +70,10 @@ it verbatim in their own header. Two files come from upstream sources that ship
 them *without* any header notice — `cmake/FindMAVLink.cmake`, taken verbatim from
 PX4-FlightGear-Bridge, and `Tools/simulation/flightaxis/sitl_run.sh`, which began
 as PX4's FlightGear runner but has since been rewritten far enough that only 21
-of its 177 lines still match upstream. We have not added a notice to either,
-because inventing a copyright line that the copyright holder never wrote would
-misstate the provenance. Their origin and licence are recorded in the table below
-instead, which is where you should look for those two.
+of its lines still match upstream — under a tenth of the file. We have not
+added a notice to either, because inventing a copyright line that the copyright
+holder never wrote would misstate the provenance. Their origin and licence are
+recorded in the table below instead, which is where you should look for those two.
 
 ## Provenance by file
 

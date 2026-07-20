@@ -87,6 +87,7 @@ Tools/simulation/flightaxis/
         ├── fa_communicator.{h,cpp}      # SOAP client, socket and reconnect logic (§8.1)
         ├── vehicle_state.{h,cpp}        # RF→NED conversions (§6) + sensor synthesis
         ├── px4_communicator.{h,cpp}     # HIL link: TCP 4560 for SITL, serial/UDP for HITL
+        ├── battery_link.{h,cpp}         # RealFlight pack/tank → BATTERY_STATUS on UDP 14580+i
         └── geo_mag_declination.{h,cpp}  # WMM tables — verbatim upstream, see COPYRIGHT.md
 
 src/modules/simulation/simulator_mavlink/
@@ -300,7 +301,8 @@ make px4_sitl_nolockstep flightaxis_plane
 
 (also `flightaxis_quad`, `flightaxis_quadplane`, `flightaxis_heli`; QGC connects on UDP 14550)
 
-Only `PX4_FLIGHTAXIS_IP` is strictly required, but leaving the rest out puts home at PX4's
+`PX4_FLIGHTAXIS_IP` defaults to `127.0.0.1`, so it can be left out only when RealFlight is on
+this same machine; anything else and it is required. Leaving the rest out puts home at PX4's
 default in Zurich while RealFlight flies you around a field on the other side of the world.
 Everything on the QGC map hangs off that origin, and `PX4_HOME_YAW` is what lines the runway
 up with the heading you see in the simulator, so it is worth setting all five every time.
@@ -417,10 +419,15 @@ Three things end up in there, and they are the three that make the separation wo
 ├── parameters.bson           # tuning, calibration, flight modes
 ├── parameters_backup.bson    # PX4's own copy, restored if the primary is unreadable
 ├── dataman                   # missions, geofence, rally points
-├── log/                      # flight logs
+├── log/                      # flight logs, one file per flight
 ├── etc -> …/build/px4_sitl_nolockstep/etc    # symlinks back into the build tree
 └── test_data -> …/PX4-Autopilot/test_data
 ```
+
+`log/` fills one file per flight rather than one per boot: all four airframes set
+`SDLOG_MODE 0` ("when armed until disarm"), against rcS's own `1` ("from boot until disarm"),
+which would otherwise record every idle stretch before you ever armed. It is
+`@reboot_required`, so it is a startup default and not something to change at the `pxh>` prompt.
 
 `parameters.bson` holds only what has actually been set — a fresh fixed-wing directory is
 around twenty entries. Every parameter compiled into the firmware still *appears* in QGC and
@@ -510,14 +517,13 @@ anything; it only lets a second instance start alongside the first. Also check f
 
 ### Restarting on a RealFlight respawn
 
-Add one line, `PX4_FLIGHTAXIS_RESTART_ON_RESET=1`, and a RealFlight respawn — spacebar, or the
-automatic reset after a crash — force-disarms and reboots PX4; `sitl_run.sh` brings PX4 and the
-bridge back up together in the same terminal:
+A RealFlight respawn — spacebar, or the automatic reset after a crash — force-disarms PX4 and
+then shuts it down; `sitl_run.sh` brings PX4 and the bridge back up together in the same
+terminal. This happens on its own, with nothing to add to the command:
 
 ```bash
 cd ~/PX4-Autopilot
 
-PX4_FLIGHTAXIS_RESTART_ON_RESET=1 \
 PX4_FLIGHTAXIS_ROOTFS=~/sitl/fa-rootfs/plane \
 PX4_FLIGHTAXIS_IP=192.168.10.1 \
 PX4_HOME_LAT=-37.7304917 \
@@ -527,10 +533,14 @@ PX4_HOME_YAW=235 \
 make px4_sitl_nolockstep flightaxis_plane
 ```
 
+`PX4_FLIGHTAXIS_RESTART_ON_RESET` turns it off if you need the old behaviour:
+
 | | |
 |---|---|
-| Unset, or any other value | one run per invocation — the historical behaviour, and the default |
-| `1` | PX4 and the bridge restart on every respawn |
+| Unset — the default | PX4 and the bridge restart on every respawn |
+| `0` | one run per invocation; a respawn leaves the session running, with the consequences below |
+
+Any other value leaves the restart on.
 
 **Bring the aircraft to rest first.** Throttle to zero and disarm, then press spacebar. The
 bridge only learns about a respawn once RealFlight has already moved the model, so a reset
@@ -555,6 +565,15 @@ told the model is back at the point it entered the world. The heading datum is *
 — it is latched once per session, because it defines the frame every other quantity is expressed
 in (see [Home position and heading](#home-position-and-heading)).
 
+**And what it does when the restart is disabled.** The bridge additionally asks PX4 to reset its
+position outright — `MAV_CMD_EXTERNAL_POSITION_ESTIMATE` carrying the home coordinates and a
+claimed 0.5 m accuracy, a sub-metre figure being what makes EKF2 treat the message as a hard
+reset rather than one more fusion update. It is offered every 200 ms for five seconds rather
+than fired once: at the instant of the respawn the vehicle is airborne and still fusing GNSS, so
+the request comes back `TEMPORARILY_REJECTED`, and the state EKF2 will accept it in — dead
+reckoning, or on the ground and not fusing GNSS — arrives a second or two later, once the
+rejected position has pushed the estimator there itself.
+
 **Why a restart is on offer at all.** Re-anchoring makes the bridge report the model at home
 again; it does not make PX4 believe it. A freshly started session is always correct because an
 estimator with no state accepts whatever it is given. A respawn is not, because EKF2 has
@@ -566,13 +585,19 @@ There is no way to bypass the estimator in PX4 SITL. ArduPilot has one — `EKFT
 backend that takes the simulator's state as the answer, which is why the same respawn is seamless
 there. PX4's equivalent exists only in HITL, where `mavlink_receiver` publishes
 `HIL_STATE_QUATERNION` straight onto `vehicle_attitude` and `vehicle_local_position`; in SITL
-that same message reaches `_gpos_ground_truth_pub` and nothing else. A restart is therefore the
-blunt instrument, and it is the only one.
+that same message reaches `_gpos_ground_truth_pub` and nothing else. The position-reset request
+above is a negotiation with EKF2 and depends on it entering a state where it will listen; a
+restart does not negotiate, and that is the whole of the difference between them.
 
-**What it costs**, which is why it is off by default: a gap of a few seconds while both sides
-come back, a new log file per respawn, and a ground-station reconnect each time. PX4 stays in
+**What it costs.** A gap of a few seconds while both sides come back, a new log file per
+respawn, and a ground-station reconnect each time; teardown also prints a burst of `Broken pipe`
+lines and a pair of sensor `TIMEOUT!` errors, which are expected and not faults. PX4 stays in
 the foreground throughout, so the `pxh>` prompt survives the loop and Ctrl-C still ends the
-session.
+session. [RUNNING.md §6.1](RUNNING.md#61-px4_flightaxis_restart_on_reset) goes through the whole
+list.
+
+Under HITL, set it to `0`: `hitl_run.sh` runs the bridge with no restart loop around it, so a
+respawn would end the session and leave the board in HIL — see [HITL.md](HITL.md).
 
 ### Finding which RealFlight channel a surface is on
 
@@ -664,7 +689,7 @@ variable:
 | `PX4_HOME_YAW` | unset — RealFlight's world used as-is |
 
 ```bash
-PX4_HOME_LAT=-37.7304917 PX4_HOME_LON=175.7433944 PX4_HOME_ALT=48.0 PX4_HOME_YAW=205 \
+PX4_HOME_LAT=-37.7304917 PX4_HOME_LON=175.7433944 PX4_HOME_ALT=48.0 PX4_HOME_YAW=235 \
 PX4_FLIGHTAXIS_IP=192.168.10.1 make px4_sitl_nolockstep flightaxis_plane
 ```
 
@@ -840,7 +865,7 @@ configure time rather than failing at launch.
 | **Hangs silently at `waiting for PX4 on TCP 4560`** | The bridge is up and waiting, but PX4 never connected. Usually PX4 exited at startup — scroll back for its error. The most common cause is the missing airframes `CMakeLists.txt` registration (see step 3 of [Adding a new aircraft](#adding-a-new-aircraft)): the airframe is absent from the ROMFS, so `SYS_AUTOSTART` matches nothing. Also check that nothing else already holds TCP 4560. |
 | Aircraft twitches or flies inverted on one axis | Channel order mismatch. First confirm the JSON is still an identity map (`rf` == `px4` on every row); if it is, the fix is in the `PWM_MAIN_FUNC*` block of the matching airframe script, which must put `controls[]` in your RealFlight model's channel order (see [Model JSON](#model-json-channel-maps)). Inverted on exactly one axis with the right surface moving is a direction problem, not an ordering one: set that channel's bit in `PWM_MAIN_REV` (bit `N-1` for channel `N`) or flip the servo in the RealFlight model. |
 | Heli has no left yaw at all; the tail sits on its lower stop | The tail row must be `"scale": "bipolar"` with `"disarm": 0.5`. `1203_flightaxis_heli` uses `CA_AIRFRAME 11` ("tail Servo"), so the tail is a servo on `[-1,1]`. Under `CA_AIRFRAME 10` it would be a motor clamped to `[0,1]` and the whole negative half of the yaw command would be clipped away. |
-| `battery source:` names a fuel tank, and the percentage looks wrong | The line below it prints the raw reading beside the reference it is measured against — `tank: 47.500 raw (m-fuelRemaining-OZ), reference 95.000 -> 50%`. FlightAxis names the field in ounces but nothing upstream consumes it, so the unit rests on the name alone; the bridge divides by the largest value it has ever seen and is therefore correct for ounces, percent or a 0..1 fraction alike. A full tank printing `100.0` or `1.000` rather than a tank size tells you which it actually is. The reference is the largest reading of the session, re-armed upward if a fuller tank appears, so a reference below the true tank size only means no full tank has been seen yet — a refuel or a RealFlight reset restores it. |
+| `battery source:` names a fuel tank, and the percentage looks wrong | The line below it prints the raw reading beside the reference it is measured against — `tank: 47.500 raw (m-fuelRemaining-OZ), reference 95.000 -> 50%`. FlightAxis names the field in ounces but nothing upstream consumes it, so the unit rests on the name alone; the bridge divides by the largest value it has ever seen and is therefore correct for ounces, percent or a 0..1 fraction alike. A full tank printing `100.0` or `1.000` rather than a tank size tells you which it actually is. The reference is the largest reading of the session, so one below the true tank size only means no full tank has been seen yet — a refuel or a RealFlight reset re-arms it upward. It re-arms *downward* too, on a confirmed step up to a level still under the old reference, which is what swapping one internal-combustion model for a smaller-tanked one looks like; without that, a 10 oz tank behind a 40 oz one would read 25% while brim full and trip the low-battery failsafe. Burning fuel only ever falls, so it can never re-arm the reference down onto itself. |
 | Bridge exits with `PX4 link lost - shutting down` | Expected, not a fault: a dead PX4 link is terminal by design. PX4 exited, the board rebooted, or the cable was pulled. Restart both sides — the bridge deliberately does not re-accept a fresh PX4 whose clock starts at zero. |
 
 ## Credits / references

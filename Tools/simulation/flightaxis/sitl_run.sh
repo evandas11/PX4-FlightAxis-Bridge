@@ -155,20 +155,23 @@ export PX4_HITL_TRANSPORT=tcp-server
 #
 # RESTART LOOP.
 #
-# With PX4_FLIGHTAXIS_RESTART_ON_RESET=1 the bridge exits 42 when RealFlight
-# teleports the model, having first force-disarmed and rebooted PX4. Both come
-# back here, which is the only way to give the run a genuinely fresh estimator:
+# The bridge exits 42 when RealFlight teleports the model, having first
+# force-disarmed PX4 and then shut it down. Shut down, not rebooted: PX4's
+# reboot path is NuttX-only and does nothing on POSIX. Both come back
+# here, which is the only way to give the run a genuinely fresh estimator:
 # EKF2 cannot be talked out of a converged solution - an external position reset
 # is answered TEMPORARILY_REJECTED at exactly the moment it would be useful -
 # and PX4 SITL has no equivalent of ArduPilot's EKFType::SIM to bypass it with.
 #
 # PX4 stays in the FOREGROUND so the pxh> prompt keeps working. That is why the
-# bridge reboots PX4 rather than the script killing it: the script cannot act
+# bridge shuts PX4 down rather than the script killing it: the script cannot act
 # while it is blocked on the foreground process.
 #
-# Unset, or set to anything else, and this runs exactly once - the historical
-# behaviour, and still the default, because a session that restarts on every
-# respawn is not always what you want.
+# On by default; PX4_FLIGHTAXIS_RESTART_ON_RESET=0 runs exactly once instead,
+# which is the historical behaviour. The default is on because a respawn leaves
+# EKF2 converged on a flight that no longer exists, and it rejects the position
+# step rather than following it - the aircraft then drifts across the map while
+# it sits on the runway. A new estimator is the only thing that fixes that.
 pushd "$rootfs" >/dev/null
 
 while true; do
@@ -230,7 +233,7 @@ px4_status=$?
 # - falls out of the loop and reports as before.
 bridge_restart=no
 
-if [ "${PX4_FLIGHTAXIS_RESTART_ON_RESET:-0}" = "1" ]; then
+if [ "${PX4_FLIGHTAXIS_RESTART_ON_RESET:-1}" != "0" ]; then
 	wait "$bridge_pid" 2>/dev/null
 	[ "$?" = "42" ] && bridge_restart=yes
 fi

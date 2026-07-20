@@ -2,7 +2,22 @@
 
 **RealFlight (FlightAxis Link) as a PX4 SITL simulator, integrated the way PX4's in-tree simulator bridges are: files live in the PX4 tree, get compiled by the PX4 make system, and launch with one `make` command.**
 
-Version: 3.4 — July 2026
+Version: 3.5 — July 2026
+- v3.5: reconciled with the shipped implementation a third time. The on-ground accelerometer
+  override differentiates over an *accumulated* window rather than per frame, because the
+  per-frame minimum `dt` was above RealFlight's frame period and so fabricated an at-rest
+  reading on most frames of a ground roll (§6, §11); respawn detection is documented as it
+  is implemented — a position discontinuity, not `m-resetButtonHasBeenPressed` — together with
+  the position re-anchor, the retried external-position reset and the opt-in
+  `PX4_FLIGHTAXIS_RESTART_ON_RESET`, and the reason PX4 SITL leaves no alternative (§6, §11.4);
+  the heading datum is latched once per session and deliberately *not* re-derived on a respawn,
+  which is a change from v3.3's "shares `position_offset`'s lifetime" (§6); `RAW_RPM` selects the
+  main rotor first and falls back to the prop (§8.2); the sensor-learning parameters
+  `SENS_IMU_AUTOCAL` / `SENS_MAG_AUTOCAL` / `IMU_GYRO_CAL_EN` are set to `0` in the airframes,
+  and `SIM_BAT_ENABLE` / `COM_FLTT_LOW_ACT` are forced with `param set` rather than
+  `param set-default` (§9, §11.2, §11); `HeliDemix` and `Rev4Servos` are refused together at load
+  time (§5); the battery's internal-resistance estimator no longer substitutes 0 Ω on a
+  non-finite result and the fuel-tank reference re-arms downward as well as upward (§11.2).
 - v3.4: documentation corrections only — no behaviour change. Six statements that had drifted
   from the shipped code or from upstream are corrected: `RAW_RPM` *is* handled by
   `SimulatorMavlink`, and the reason for dropping it from the HITL profile is restated as the
@@ -98,6 +113,7 @@ PX4-Autopilot/
 │           ├── px4_communicator.{cpp,h}              # TCP 4560, HIL msgs — adapted, see COPYRIGHT.md
 │           ├── fa_communicator.{cpp,h}               # SOAP client + parser
 │           ├── vehicle_state.{cpp,h}                 # RF→NED conversions (§6) + sensor synth (§7)
+│           ├── battery_link.{cpp,h}                  # BATTERY_STATUS + commands over UDP 14580 (§11.2, §11.4)
 │           └── geo_mag_declination.{cpp,h}           # WMM tables — verbatim upstream, see COPYRIGHT.md
 ├── src/modules/simulation/simulator_mavlink/
 │   ├── sitl_targets_flightaxis.cmake                 # NEW (§3)
@@ -253,7 +269,8 @@ add_executable(flightaxis_bridge
 	src/px4_communicator.cpp
 	src/fa_communicator.cpp
 	src/vehicle_state.cpp
-	src/geo_mag_declination.cpp)
+	src/geo_mag_declination.cpp
+	src/battery_link.cpp)
 target_include_directories(flightaxis_bridge BEFORE PUBLIC ${MAVLINK_INCLUDE_DIRS})
 target_compile_options(flightaxis_bridge PUBLIC -g -fexceptions -Wno-cast-align -Wno-address-of-packed-member)
 target_link_libraries(flightaxis_bridge Eigen3::Eigen pthread)
@@ -323,6 +340,12 @@ FA_BRIDGE_PID=$!
 
 pushd "$rootfs" >/dev/null
 set +e
+# The shipped script wraps the two lines below in a restart loop and an EXIT/INT
+# trap; both are omitted here. The loop re-launches the pair when the bridge
+# exits 42, which it does only on a detected respawn with
+# PX4_FLIGHTAXIS_RESTART_ON_RESET=1 (§11.4). The trap reaps both children
+# however the script ends, so a script-level abort cannot orphan a bridge still
+# holding TCP 4560 and a PX4 still emitting heartbeats to a ground station.
 # -i is load-bearing: it is what makes px4_instance non-zero inside rcS, which
 # is what offsets the simulator TCP port the bridge is already listening on
 # (§11.3). Without it PX4 boots as instance 0 whatever the bridge was told.
@@ -465,7 +488,18 @@ Three heli-specific traps, all documented inside `heli.json`:
 - `disarm` = the value sent while PX4 is disarmed or the control is NaN. **`disarm: -1` (also the default when the key is absent) means "hold the last output"** rather than driving the channel anywhere — right for a plain control surface, wrong for a motor, which is why every motor row states `"disarm": 0.0` explicitly, and wrong for any row an option post-pass rewrites, which is why every row in `heli.json` states one (see the heli traps above).
 - **Duplicate indices are rejected at startup, not tolerated.** Two rows sharing an `rf` index would silently last-wins in `buildChannels()`, and a repeated `px4` index is almost always a typo, so the bridge refuses to start on either and names the two offending entries.
 - `UnmappedDefault` is the value sent on every RealFlight channel the map does not mention.
-- `Options` (a bit per option, flattened to a bitmask by `get_FAbridge_params.py`): `ResetPosition` (=1, ResetAircraft on startup, default), `Rev4Servos` (=2, swap ch1–4 ↔ 5–8 wholesale for RF models built that way — do **not** enable it on a model whose FUNC params already produce the right order, such as the quadplane, since it can only swap a correct order into a wrong one), `HeliDemix` (=4, **not enabled on any shipped model**; swash servos → RF roll/pitch/collective: `roll=(s1−s2)/1.732`, `pitch=((s1+s2)/2−s3)/1.5`, `col=(s1+s2+s3)/3`, recentered 0..1 — the divisors are gain normalisation, see below — for CCPM RealFlight models whose own mixing cannot be disabled), `SilenceFPS` (=8). All four shipped models flatten to **9** (`ResetPosition|SilenceFPS`).
+- `Options` (a bit per option, flattened to a bitmask by `get_FAbridge_params.py`): `ResetPosition` (=1, ResetAircraft on startup, default), `Rev4Servos` (=2, swap ch1–4 ↔ 5–8 wholesale for RF models built that way — do **not** enable it on a model whose FUNC params already produce the right order, such as the quadplane, since it can only swap a correct order into a wrong one), `HeliDemix` (=4, **not enabled on any shipped model**; swash servos → RF roll/pitch/collective: `roll=(s1−s2)/1.732`, `pitch=((s1+s2)/2−s3)/1.5`, `col=(s1+s2+s3)/3`, recentered 0..1 — the divisors are gain normalisation, see below — for CCPM RealFlight models whose own mixing cannot be disabled), `SilenceFPS` (=8, suppresses the bridge's periodic frame-rate line; the realtime-factor and
+physics-multiplier warnings are *not* silenced by it, since those report a degraded simulation
+rather than a statistic). All four shipped models flatten to **9** (`ResetPosition|SilenceFPS`).
+- **`HeliDemix` and `Rev4Servos` together are refused at load time**, by
+  `get_FAbridge_params.py`, rather than accepted and applied. The bridge runs `Rev4Servos`
+  first, so the demix would consume the *post*-swap slots — `rf4`–`rf6` rather than the swash
+  servos. On the shipped heli layout those are unassigned and sit at 0.5, which demixes to a
+  constant roll 0 / pitch 0 / collective 0.5: a swashplate frozen dead centre on an armed
+  aircraft, with nothing in the output to show it. No combination of the two is useful, so there
+  is nothing to configure. The consequence is that the flattener's other `HeliDemix` sanity
+  check — that `rf0`–`rf2` are the three swash servos — may read *pre*-swap `rf` numbers, and it
+  is correct to do so only for as long as this refusal stands.
 - **The `HeliDemix` gain normalisation.** The geometric inverse alone is not unit-gain. `buildChannels()` maps each bipolar swash servo to `(v+1)/2` before the post-pass runs, and with the pinned 300/60/180 geometry that leaves `s1−s2` at gain 0.866 and `(s1+s2)/2−s3` at 0.750, against the 0.5 about a 0.5 centre that RealFlight wants for a full-scale command. Undivided, the cyclic saturates at ±0.577 of commanded roll torque and ±0.667 of pitch, roll hotter than pitch. So roll is divided by 0.866/0.5 = √3 = 1.732 and pitch by 0.750/0.5 = 1.5. **Not** by 0.866 and 0.750: that recovers raw torque and clips at half command. Collective, `(s1+s2+s3)/3`, is already exactly gain 0.5 and is deliberately untouched. The constants are only valid for the pinned geometry — changing `CA_SP0_ANG*` or the arm lengths invalidates them. **These divisors are ours and ArduPilot has no equivalent:** `SIM_FlightAxis.cpp:348-350` is a plain unweighted inverse, exact only for a 140° head (`AP_MotorsHeli_Swash.cpp:138-145` mixes `H3_140` with flat ±1.0 factors). On the 120° head both projects actually use — `AP_MotorsHeli_Swash.cpp:147-154` defaults `add_servo_angle` to −60/+60/180, the same geometry as our `CA_SP0_ANG` 300/60/180 — ArduPilot's forward mixer carries cos 30° = 0.866 on roll against 0.5/1.0 on pitch, so its own round trip returns roll and pitch gains in the ratio 2/√3 = 1.155 rather than 1. Matching ArduPilot here would reintroduce that imbalance. **The channel order follows ArduPilot; the demix gains deliberately do not.**
 - **Both post-passes read a scratch copy, not the persistent channel array.** `channels[]` holds the untransformed per-channel state so that hold-last has something stable to hold; `out[]` is what goes to RealFlight. Transforming in place would re-transform every hold-last channel every frame — `HeliDemix` diverges, and `Rev4Servos`, whose swap is its own inverse, instead ping-pongs a held channel between `rf i` and `rf i+4` on alternate frames, a full-amplitude servo buzz at loop rate.
 - Adding a new aircraft takes **four** steps, not three: new JSON, one model name in the `models` list in `sitl_targets_flightaxis.cmake`, one airframe script — and that airframe must also be added to `ROMFS/px4fmu_common/init.d-posix/airframes/CMakeLists.txt` (§3.2) or it never reaches the ROMFS.
@@ -482,7 +516,13 @@ These go in `vehicle_state.cpp`. They are line-for-line what the upstream implem
 
 **Gyro:** `p=+roll_rate, q=+pitch_rate, r=−yaw_rate` (deg→rad, constrain ±2000 °/s). **Only yaw negated.**
 
-**Position (NED):** `(N=RF_Y, E=RF_X, D=−altASL)`. Capture `position_offset` on first frame and after every `m-resetButtonHasBeenPressed`; subtract it so PX4's home (bridge argv / `PX4_HOME_*`) anchors the RF world. NED→LLA for HIL_GPS.
+**Position (NED):** `(N=RF_Y, E=RF_X, D=−altASL)`. Capture `position_offset` on the first frame
+and again whenever the anchor has been invalidated — which is on a *detected respawn* (§11.4)
+as well as on `m-resetButtonHasBeenPressed`; subtract it so PX4's home (bridge argv /
+`PX4_HOME_*`) anchors the RF world. NED→LLA for HIL_GPS. `setFAData()` re-anchors on the single
+condition "no valid anchor", and deliberately does not test the reset flag itself: the main loop
+catches that flag and `continue`s before `setFAData()` is reached, so a second test there would
+read as a safety net while being dead code.
 
 **World velocity:** `(vN=U, vE=V, vD=W)` — **used directly, no swap.** The asymmetry with position
 is real and deliberate: it is what upstream ships. Applying position's swap here as well would
@@ -490,33 +530,69 @@ transpose north against east and make every mission leg track the wrong heading.
 
 **Wind:** swapped like position: `(windY, windX, windZ)`.
 
-**Heading datum (optional, `PX4_HOME_YAW`):** RealFlight's world north is arbitrary, so the conversions above map it onto NED unrotated. When `PX4_HOME_YAW` is set it names the true heading the aircraft should *start* on; the rotation that implies is derived on the first frame — `θ = wrapPi(home_yaw − yaw(q_ned))`, taken from the converted quaternion rather than `m-azimuth-DEG` so it cannot disagree with the attitude the pipeline uses — and latched alongside `position_offset`, sharing its lifetime so a reset re-derives it. `θ` is then applied about the down axis to **every** world-frame quantity: `q_ned` (pre-multiplied), position (after the offset subtraction, so the world turns about home and not RealFlight's origin), world velocity, and wind. Body-frame quantities and all Down components are left alone — rotating the world does not change what a strapdown sensor measures. HIL_GPS, baro, mag and COG need no special handling: each is derived from something already rotated. Applying `θ` to attitude alone would leave heading disagreeing with direction of travel, which EKF2 reads as an inconsistency it cannot null out. Unset is NAN, not 0, since 0 is a valid request for due north; at `θ = 0` every path is a strict no-op.
+**Heading datum (optional, `PX4_HOME_YAW`):** RealFlight's world north is arbitrary, so the conversions above map it onto NED unrotated. When `PX4_HOME_YAW` is set it names the true heading the aircraft should *start* on; the rotation that implies is derived on the first frame — `θ = wrapPi(home_yaw − yaw(q_ned))`, taken from the converted quaternion rather than `m-azimuth-DEG` so it cannot disagree with the attitude the pipeline uses — and latched **once per session**. `θ` is then applied about the down axis to **every** world-frame quantity: `q_ned` (pre-multiplied), position (after the offset subtraction, so the world turns about home and not RealFlight's origin), world velocity, and wind. Body-frame quantities and all Down components are left alone — rotating the world does not change what a strapdown sensor measures. HIL_GPS, baro, mag and COG need no special handling: each is derived from something already rotated. Applying `θ` to attitude alone would leave heading disagreeing with direction of travel, which EKF2 reads as an inconsistency it cannot null out. Unset is NAN, not 0, since 0 is a valid request for due north; at `θ = 0` every path is a strict no-op.
+
+**The offset moves; the frame does not.** Both quantities are captured in
+`resetPositionOffset()`, but their lifetimes are deliberately different. `position_offset` *is*
+re-captured on every respawn — that is what puts the model back at the point it entered, and it
+is what upstream does. `θ` is not re-derived with it. An offset is an origin and may move; a
+rotation is the frame every other quantity is expressed in, and re-deriving it turns that frame
+underneath an estimator that has already converged on the old one, while the synthetic magnetic
+field — built from the home location and never rotated — stays behind. The first time a respawn
+was actually detected rather than silently missed, re-deriving produced Compass 0 faults and
+horizontal-position instability. Nothing is lost by latching: a reset returns the model to where
+it entered, so the rotation derived there is still the right one for it.
+
+Two ordering consequences follow, and both are load-bearing. `resetPositionOffset()` runs
+*first* in `setFAData()`, because it establishes `θ` and every conversion below is expressed in
+the rotated world; it depends on nothing but the incoming frame. And world velocity is rotated
+*before* `last_velocity_ef` is seeded, so the on-ground accelerometer override differences two
+velocities drawn from the same frame and cannot manufacture a step out of the rotation itself.
 
 **Accelerometer (specific force):** in flight use `m-accelerationBodyA*` directly. On ground it's
 garbage — RealFlight's ground-contact accelerometer output is noisy enough to prevent a
 helicopter disarming — so substitute a finite difference of velocity. The shipped override goes
 beyond the upstream port in three deliberate ways: it triggers on more than ground contact, it
-refuses to differentiate across too short an interval, and it bounds the result far tighter than
-the sensor clamp:
+differentiates over an **accumulated window** rather than over a single frame, and it bounds the
+result far tighter than the sensor clamp:
 
 ```cpp
 accel_norm   = |m_accelerationBodyA*|;
 accel_absent = m_hasLostComponents || !isfinite(accel_norm) || accel_norm < 0.05;
+use_fd       = touching_ground || accel_absent;
 
-if (touching_ground || accel_absent) {
+// The source edge is detected BEFORE the block it guards, so the transition
+// frame re-anchors on itself rather than differencing against stale history.
+if (use_fd != last_use_fd) {
+    last_velocity_ef = velocity_ef; diff_accum_dt = 0; have_synth_accel = false;
+    anchor_seeded_this_frame = true; last_use_fd = use_fd;
+}
+
+if (use_fd) {
     // dt_true, NOT the glitch-capped dt: a swallowed glitch would divide the
-    // real velocity change by a shorter interval and overstate the accel
-    if (dt_true >= 0.005f && have_last_velocity) {
-        accel_ef  = (velocity_ef - last_velocity_ef) / dt_true;
+    // real velocity change by a shorter interval and overstate the accel.
+    // Not credited on the frame that seeded the anchor: that interval elapsed
+    // before the anchor existed and does not span the difference.
+    if (!anchor_seeded_this_frame) { diff_accum_dt += dt_true; }
+
+    if (have_last_velocity && diff_accum_dt >= 0.005f) {          // window closes
+        accel_ef  = (velocity_ef - last_velocity_ef) / diff_accum_dt;
         accel_ef.z -= 9.80665f;
         accel_body = R_ned_to_body * accel_ef;  // yields exactly (0,0,-g) at rest
         clamp(accel_body, ±3 g);                // synthetic, not measured
+        last_synth_accel_body = accel_body;     // and re-anchor:
+        last_velocity_ef = velocity_ef; diff_accum_dt = 0; have_synth_accel = true;
+    } else if (have_synth_accel) {
+        accel_body = last_synth_accel_body;     // inside the window: hold
     } else {
         accel_body = R_ned_to_body * (0, 0, -9.80665f);   // "at rest"
     }
 }
 clamp(accel_body, ±16 g);
 ```
+
+`last_velocity_ef` is *not* advanced on every frame: it anchors the window and moves only when
+the window closes.
 
 Each addition answers a distinct failure:
 
@@ -527,10 +603,41 @@ Each addition answers a distinct failure:
   the accelerometer as its only tilt-correction observation, and a gravity observation nowhere
   near 1 g is rejected, leaving attitude uncorrected. The threshold catches that case whether or
   not ground contact is flagged.
-- **The 5 ms minimum `dt`.** Differentiating amplifies by `1/dt`, so a small velocity step across
-  a short frame becomes an enormous acceleration — and at the ~4 ms nominal frame period, short
-  frames are ordinary. Below the threshold the previous value is held rather than a quotient
-  dominated by `1/dt` being reported.
+- **The 5 ms accumulation window.** Differentiating amplifies by `1/dt`, so a small velocity step
+  across a short frame becomes an enormous acceleration: one sample right after a respawn, from a
+  `dt` of about 3 ms, reached 45 m/s² and passed the 16 g clamp untouched. The interval therefore
+  has to be bounded — but bounding it by *discarding* frames is the wrong way to do it, and that
+  is what the first version did. RealFlight delivers frames 4.03 ms apart (measured over 12 361
+  frames, p50 4.07 ms, p90 7.64 ms), so a per-frame `dt >= 5 ms` test failed on **88.7 %** of
+  frames and each failure reported the aircraft at rest. For the whole of a fixed-wing ground
+  roll PX4 received pure gravity with no forward component while the aircraft accelerated down
+  the runway, and the consequences cascade: EKF2's velocity stayed near zero against a GNSS that
+  did not, the innovation reached 8.7 m/s and GNSS velocity fusion stopped for twelve seconds;
+  the airspeed validator reconciled a *correct* pitot reading against that stalled velocity the
+  only way it can, by inferring 14 m/s of wind in a world with none; and when the aircraft left
+  the ground and EKF2 caught up, the stale wind disagreed with reality by 11 m/s, tripped the
+  gate, and reported "Airspeed sensor failure detected" for a sensor that had been right
+  throughout.
+
+  The interval is still bounded, but by *accumulating* one rather than discarding frames. The
+  anchor velocity and its elapsed time are held until at least 5 ms have passed; the quotient is
+  taken over that whole window; and the last result stands for the frames inside it. Every frame
+  now carries a measured acceleration. Two details make the window honest: the frame that seeds
+  the anchor does not contribute its `dt`, since that interval elapsed before the anchor existed
+  and crediting it would halve the reported acceleration once per reset — and a reset happens at
+  boot, at every touchdown and liftoff, and after every respawn, which is precisely when EKF2 can
+  least absorb it; and the source edge is detected before the block it guards, so the transition
+  frame re-anchors on itself instead of differencing against stale history and costing a second
+  frame of fabricated at-rest. What remains is a floor rather than a defect: about two frames,
+  8 ms, at the start of each window where nothing has yet been measured. Acceleration cannot be
+  observed before two velocity samples exist far enough apart.
+
+  Worth recording why a threshold was reached for in the first place. The upstream override this is ported
+  from differentiates every frame with no minimum and no fallback, and bounds the result with the
+  16 g sensor clamp alone. The guard was added here against that 45 m/s² respawn spike — but the
+  respawn case is already covered by `invalidatePositionOffset()` dropping the velocity history.
+  Guarding it a second time, with a threshold above the frame interval, cost every frame in
+  between.
 - **The 3 g synthetic clamp**, applied *inside* the branch and in addition to the ±16 g sensor
   clamp. The 16 g bound exists to match what a Pixhawk can *report*, which is the right bound
   for something measured and far too loose for something synthesised by division — a 1/dt spike
@@ -685,7 +792,7 @@ PX4 has a complete picture immediately:
 | `HIL_STATE_QUATERNION` | **50 Hz** (`STATE_QUAT_INTERVAL_US`) | ground truth only — for log analysis, not consumed by the estimator |
 | `DISTANCE_SENSOR` | **20 Hz** (`DISTANCE_INTERVAL_US`) | built by `VehicleState::getDistanceSensorMsg()`; downward-facing (`PITCH_270`), 0.1–40 m, cm units. **Gated on `rangefinderValid()`** — suppressed entirely while the aircraft is inverted rather than sent as a bogus reading |
 | `RC_CHANNELS` | **50 Hz** (`RC_INTERVAL_US`) | built by `VehicleState::getRcChannelsMsg()` from the 12 InterLink channels echoed in every ExchangeData reply. **Gated on `rcValid()`** — see the RC passthrough note below |
-| `RAW_RPM` | every frame | index 0, from RealFlight's prop/rotor RPM. `SimulatorMavlink` *does* handle it — it decodes the message and publishes `rpm_s` on the `rpm` topic (it is one of the ten ids of §11.2) — but nothing in the SITL stack consumes that topic for a simulated airframe, so the value is low-return bandwidth on any link where bandwidth is not free. The HITL profile drops it, and there the asymmetry is decisive: `mavlink_receiver.cpp`, which is the receive path on a real board, has **no** `RAW_RPM` handler at all — `RAW_RPM` exists there only as an outbound stream, so a HITL `RAW_RPM` is parsed and discarded |
+| `RAW_RPM` | every frame | index 0. RealFlight reports two rotation rates and there is one channel, so **`m_heliMainRotorRPM` wins when it reports and `m_propRPM` is the fallback**, not the other way round: on a helicopter the prop field carries the *tail* rotor, so a prop-first order sent the tail rotor speed as the aircraft's RPM — a plausible number rather than an error. Every non-helicopter airframe reports zero on the main-rotor field, so the prop still wins by falling through. `SimulatorMavlink` *does* handle it — it decodes the message and publishes `rpm_s` on the `rpm` topic (it is one of the ten ids of §11.2) — but nothing in the SITL stack consumes that topic for a simulated airframe, so the value is low-return bandwidth on any link where bandwidth is not free. The HITL profile drops it, and there the asymmetry is decisive: `mavlink_receiver.cpp`, which is the receive path on a real board, has **no** `RAW_RPM` handler at all — `RAW_RPM` exists there only as an outbound stream, so a HITL `RAW_RPM` is parsed and discarded |
 
 **Sub-rates *within* `HIL_SENSOR`.** `vehicle_state` builds every message with
 `fields_updated = 0x1FFF` — "every sensor is new" — and `px4_communicator` then masks that
@@ -722,7 +829,8 @@ transport, not an omission.
 
 **HITL transports.** Beyond the SITL TCP server, `px4_communicator` also offers a serial client
 and a UDP client, selected by `PX4_HITL_TRANSPORT`, together with a HITL message profile that
-decimates `HIL_SENSOR`, drops `HIL_STATE_QUATERNION` and `RAW_RPM`, and adds a `HEARTBEAT`.
+decimates `HIL_SENSOR`, drops `HIL_STATE_QUATERNION`, `RAW_RPM` and `RC_CHANNELS`, takes
+`HIL_GPS` to 5 Hz and mag/baro/differential pressure to 50 Hz, and adds a `HEARTBEAT`.
 `HIL_STATE_QUATERNION` matters most: in SITL it is ground truth for logging, but a real board
 *consumes* it and republishes straight onto EKF2's own output topics. Full treatment, including
 the bandwidth budget and the `_datarate > 5000` gate, is in [`HITL.md`](HITL.md).
@@ -770,7 +878,7 @@ Loop rate is set by RealFlight's SOAP RTT (~2–5 ms → 200–500 Hz). Wired ne
 ## 9. Airframe Script Example — `1200_flightaxis_plane`
 
 **Heavily abridged — this is the shape, not a working airframe.** The four real scripts run
-44–108 lines each, and the bulk of that is the actuator geometry (`CA_AIRFRAME`, `CA_ROTOR*`,
+213–469 lines each, and the bulk of that is the actuator geometry (`CA_AIRFRAME`, `CA_ROTOR*`,
 `CA_SV_CS*`, `PWM_MAIN_FUNC*`) plus per-vehicle tuning, none of which is optional. Read the
 shipped files — `ROMFS/px4fmu_common/init.d-posix/airframes/120{0,1,2,3}_flightaxis_*` — before
 writing a new one; each carries a comment block deriving its `PWM_MAIN_FUNC*` values from the
@@ -786,17 +894,26 @@ step with the matching `models/<name>.json` — an identity map (§5).
 # RealFlight free-runs (no lockstep), GPS samples arrive fresh.
 param set EKF2_GPS_DELAY 0
 param set EKF2_MULTI_IMU 1
+param set SIM_BAT_ENABLE 0
+param set COM_FLTT_LOW_ACT 0
 param set-default SDLOG_MODE 0
 param set-default COM_RC_IN_MODE 4
+param set-default SENS_IMU_AUTOCAL 0
+param set-default SENS_MAG_AUTOCAL 0
+param set-default IMU_GYRO_CAL_EN 0
 
-# ... 60 more lines: CA_* geometry, PWM_MAIN_FUNC* assignments, per-vehicle tuning ...
+# ... 200+ more lines: CA_* geometry, PWM_MAIN_FUNC* assignments, per-vehicle tuning ...
 ```
 
-**`param set` versus `param set-default`.** The first two use a plain `param set` deliberately,
-because `px4-rc.mavlinksim` runs *after* the airframe script and issues its own
-`param set-default` for both, which would quietly win over a default set here. A plain
-`param set` takes precedence and survives. The rest are `set-default`, so a user's saved value
-still wins. What each is for:
+**`param set` versus `param set-default`.** The `param set` lines are forced deliberately, for
+two distinct reasons. `EKF2_GPS_DELAY` and `EKF2_MULTI_IMU` are forced because
+`px4-rc.mavlinksim` runs *after* the airframe script and issues its own `param set-default` for
+both, which would quietly win over a default set here; a plain `param set` takes precedence and
+survives. `SIM_BAT_ENABLE` and `COM_FLTT_LOW_ACT` are forced because a value saved from an
+earlier session would otherwise win, and both are requirements of this integration rather than
+preferences — two battery publishers fighting over one topic is worse than either alone, and a
+saved `COM_FLTT_LOW_ACT` brings back an RTL that fires within seconds of every arm. The rest are
+`set-default`, so a user's saved value still wins. What each is for:
 
 | Parameter | Value | Why |
 |---|---|---|
@@ -804,6 +921,9 @@ still wins. What each is for:
 | `EKF2_MULTI_IMU` | `1` | The bridge sends `HIL_SENSOR` with `id = 0` only, so `SimulatorMavlink` only ever fills IMU instance 0. `px4-rc.mavlinksim` asks for 3, leaving two EKF instances running on dead sensors. `0` is not an alternative — EKF2 clamps this to a minimum of 1 when `SENS_IMU_MODE` is 0. |
 | `SDLOG_MODE` | `0` | `rcS` sets 1, "from boot until disarm", which opens the log at boot and so records the whole idle stretch before you ever arm. 0 is "when armed until disarm": one bounded file per flight, nothing recorded while sitting at the `pxh>` prompt. It is PX4's own default, but the explicit line is still needed to undo `rcS`. `@reboot_required`, so it has to be a startup default rather than a `pxh>` command. |
 | `COM_RC_IN_MODE` | `4` | A headless run has no manual control source at all, and 4 ("ignore any stick input") is the only value that skips the RC-loss failsafe. `NAV_RCL_ACT` is deliberately left alone: it is unreachable once this is 4, and the value usually suggested for it is outside the parameter's declared range. |
+| `SENS_IMU_AUTOCAL`, `SENS_MAG_AUTOCAL`, `IMU_GYRO_CAL_EN` | `0` | PX4 learns accelerometer, gyro and magnetometer offsets in flight and **commits them as permanent calibration**. On a real aircraft that tracks a bias which genuinely drifts. Here every sensor is synthesised from RealFlight's state and has no bias to find, so what gets learned is the estimator's own transients — and then saved, so the next flight *starts* from them. Measured: an accelerometer offset going from zero to 0.36 m/s² within a single session, which dead-reckons to roughly 21 m/s in a minute and reads as the aircraft wandering in QGC while it sits still in RealFlight. Because it survives restarts, the symptom looks unrelated to whatever was last changed. |
+| `SIM_BAT_ENABLE` | `0` | The bridge is the single battery publisher (§11.2); leaving PX4's synthetic battery on makes the two alternate on `battery_status` and the reading flicker between them. |
+| `COM_FLTT_LOW_ACT` | `0` | The bridge cannot supply a remaining-flight-time estimate over `BATTERY_STATUS`, so PX4 reads 0.0 s and concludes there is no flight time left, firing an RTL within seconds of arming. Acting on a number PX4 never received is not something this integration can fix from the bridge side, so the action is set to None. Low-battery protection is unaffected: `BAT_LOW_THR`, `BAT_CRIT_THR` and `BAT_EMERGEN_THR` all act on `remaining`, which the bridge does supply. The airframes additionally set `COM_FAIL_ACT_T 0`, because a failsafe configured to do nothing is still promoted to `Hold` for the pre-action delay — `Action::None` is omitted from the exclusion lists in both places that arm and promote it. The trade is stated in the scripts: this also removes the pilot-takeover grace period before every *other* failsafe. |
 
 **Rotor geometry: the symmetry matters, the magnitudes do not.** PX4 normalises the multirotor mixing matrix by a scale derived from the mix
 columns themselves (`ControlAllocationPseudoInverse`), so the arm length divides straight back
@@ -858,6 +978,16 @@ real numbers.
 | **Dead PX4 link retried forever** — thousands of log lines a second and continued SOAP load for a simulation nobody consumes | a dead link is terminal: stop sending, latch, exit cleanly (§8.2) |
 | **Silent channel-map typo** — duplicate `rf` last-wins, duplicate `px4` is a typo | bridge refuses to start and names both entries (§5) |
 | **Physics falling behind wall time, invisibly** — PX4 timestamps on arrival, so the vehicle flies in slow motion with entirely correct-looking sensor values | realtime-factor monitor, printed as `rtf=` and warned outside 0.95–1.05 (§7) |
+| **Ground roll reported as at-rest** — a per-frame 5 ms minimum `dt` sat above RealFlight's 4.03 ms frame period, so 88.7 % of frames fell through to a fabricated `(0,0,−g)`; EKF2 stalled its velocity against a GNSS that had not, stopped fusing GNSS velocity for 12 s, and the airspeed validator invented 14 m/s of wind that later tripped the airspeed gate | accumulate the differentiation window instead of discarding frames: hold the anchor until 5 ms have elapsed, take the quotient over that window, hold the last result inside it (§6) |
+| **Differentiation window credited with time before its own anchor** — the seeding frame's `dt` was counted, halving the first reported acceleration after every reset, i.e. at boot, at each touchdown and liftoff, and after each respawn | skip `dt` accumulation on the frame that seeds the anchor, and detect the accel-source edge *before* the block it guards (§6) |
+| **Respawn invisible to the bridge** — `m_resetButtonHasBeenPressed` does not fire on a spacebar respawn; measured 92.3 m and 120.9 m single-frame teleports with the flag at 0 throughout, after which PX4 keeps flying the old trajectory | detect the position discontinuity against the distance the reported velocity could cover, re-anchor, and retry an external position reset for 5 s (§11.4) |
+| **Heading datum re-derived on a respawn** — turns the frame under a converged estimator while the synthetic mag field, built from home and never rotated, stays behind; produced Compass 0 faults and horizontal-position instability | latch the datum once per session; re-capture only the position offset (§6) |
+| **Sensor learning saves the estimator's own transients as calibration** — synthesised sensors have no bias to find, so PX4 learns and *commits* the transients; an accelerometer offset reached 0.36 m/s² in one session, survived restarts, and read as the aircraft wandering in QGC while it sat still in RealFlight | `SENS_IMU_AUTOCAL 0`, `SENS_MAG_AUTOCAL 0`, `IMU_GYRO_CAL_EN 0` in the airframes (§9) |
+| **RTL within seconds of every arm** — the bridge cannot supply a remaining-flight-time estimate, PX4 reads the resulting 0.0 s as "no flight time left", and a failsafe set to `Action::None` is promoted to `Hold` anyway for the pre-action delay | `COM_FLTT_LOW_ACT 0` *and* `COM_FAIL_ACT_T 0`, both forced with `param set` (§9) |
+| **Helicopter reports its tail rotor as aircraft RPM** — prop-first selection, and on a heli `m_propRPM` is the tail; the symptom is a plausible number, not an error | main rotor wins when it reports, prop is the fallback — every other airframe reads zero on the main-rotor field (§8.2) |
+| **Internal-resistance estimate zeroed on a non-finite result** — discards a good estimate, disables the sag correction, and is permanent, because a non-finite result means the filter state was already non-finite | treat it as an uninformative sample: keep `R`, re-centre the open-circuit voltage (§11.2) |
+| **Fuel gauge measures every tank against the largest ever seen** — the reference is reset only on a class change, so a 10 oz tank after a 40 oz one reads 25 % brim-full: a low-battery failsafe on a full tank | re-arm the reference downward too, on a sustained rise rather than on a low reading (§11.2) |
+| **`HeliDemix` and `Rev4Servos` both set** — the swap runs first, so the demix consumes `rf4`–`rf6`, which on the shipped heli layout are unassigned at 0.5: a swashplate frozen dead centre on an armed aircraft, with nothing in the output to show it | the pair is refused at load time by `get_FAbridge_params.py` (§5) |
 | WiFi to RealFlight | wired / same host only |
 | Bridge lives on wrong side | run bridge on (or wired-adjacent to) the RealFlight machine; SOAP RTT dominates — MAVLink to PX4 tolerates more latency |
 
@@ -911,14 +1041,47 @@ Three sources, selected per frame and logged on change:
 
 | RealFlight reports | `remaining` from | `voltage_v` | Notes |
 |---|---|---|---|
-| pack voltage > 0 (electric) | linear per-cell SOC, 3.30 V empty → 4.20 V full | measured | cell count inferred once from the first sample; `discharged_mah` coulomb-integrated |
+| pack voltage > 0 (electric) | linear per-cell SOC over an **open-circuit** estimate, 3.30 V empty → 4.20 V full | measured | cell count inferred once from the first sample; `discharged_mah` coulomb-integrated |
 | voltage = −1, fuel > 0 (IC) | `fuel_oz / max_fuel_oz_seen` | **nominal, not measured** | this is the −1 case the ledger used to flag; fuel is the physically meaningful "flying left", and a nominal voltage stops `BAT_V_EMPTY` firing on an armed aircraft |
 | neither | 1.0 | nominal | obviously synthetic; logged as such |
 
-Because the bridge is now the single publisher, the four SITL airframes set
-`param set-default SIM_BAT_ENABLE 0`; otherwise `battery_simulator` and the bridge alternate on the
-topic and the reading flickers between them. If the bridge cannot open its socket it says so, and
-`SIM_BAT_ENABLE` should be set back to 1.
+Because the bridge is now the single publisher, the four SITL airframes force
+`param set SIM_BAT_ENABLE 0` — a plain `set`, not `set-default`, because a value saved from an
+earlier session would otherwise put `battery_simulator` back and the two publishers would
+alternate on the topic with the reading flickering between them. If the bridge cannot open its
+socket it says so, and `SIM_BAT_ENABLE` should be set back to 1.
+
+**The electric path does not map the terminal voltage.** It maps `V + I·R`, the open-circuit
+estimate, through a 3 s low-pass (`SOC_FILTER_TAU_S`) and only then onto the 3.30–4.20 V window.
+Both stages exist because that window is 0.90 V wide per cell: at a plausible 5 mΩ and 40 A of
+hover current, sag alone moves the reported state of charge by more than a fifth of full scale.
+Mapping the raw terminal voltage put a nearly full pack into `WARNING_CRITICAL` the moment the
+throttle came up — and PX4 never lowers a latched battery warning, so the flight was over. The
+sag correction removes the sustained component and the filter removes the spikes that survive it.
+The resistance is estimated per pack rather than assumed; see the first bullet below.
+
+Two behaviours of the electric and fuel paths are worth stating, because both look like the
+obvious thing to do and both were once done the obvious way:
+
+- **A non-finite RLS result keeps the resistance, it does not zero it.** The per-cell open-circuit
+  voltage is `V + I·R`, and `R` is estimated by recursive least squares from the pack's own
+  behaviour. Substituting 0 Ω whenever the estimate came back non-finite threw away a good
+  estimate *and* disabled the sag correction the estimator exists to provide. Worse than a
+  one-shot error: a non-finite result means the filter state was already non-finite, so every
+  later sample was too and the substitution became permanent. A non-finite result now takes the
+  same path as an uninformative sample — keep `R`, re-centre the open-circuit voltage — which is
+  what the neighbouring branch already did for the far milder case.
+- **The fuel-tank reference re-arms downward as well as upward.** FlightAxis reports
+  instantaneous ounces and no capacity, so the largest reading ever seen is taken as full. That
+  re-arms upward, so a refuel or a reset restores 100 %. It must also re-arm *downward*, because
+  the accumulator is reset only on a propulsion-class change and swapping one IC model for
+  another keeps the class at `Fuel`: a 10 oz tank loaded after a 40 oz one would read 25 %
+  brim-full, which is a low-battery failsafe on a full tank. The trigger is a sustained *rise*,
+  never a low reading on its own — burning fuel declines monotonically away from the reference,
+  so a nearly dry tank can never drag the reference down onto itself, whereas a model swap steps
+  up from the sentinel/near-zero frames a reload passes through and then holds. Confirmed over
+  the same frame count and at the same 2 Hz gate as the class latch, so one spurious high frame
+  does not count as a new tank.
 
 Full reasoning lives in `Tools/simulation/flightaxis/flightaxis_bridge/src/battery_link.h`.
 
@@ -937,6 +1100,79 @@ Note that earlier drafts claimed multi-instance "follows the FlightGear conventi
 and useless: PX4's own `Tools/simulation/flightgear/sitl_run.sh` hard-codes `0` in exactly the same
 place, so neither runner supported it. In practice each instance still needs its own RealFlight
 host — one RealFlight instance serves one aircraft.
+
+### 11.4 Respawn — detection, re-anchoring, and the restart escape hatch
+
+**`m_resetButtonHasBeenPressed` is not the reset the pilot uses.** The obvious design is to
+watch that flag, and it does not work: on two respawns in one session the reported position
+moved 92.3 m and 120.9 m in a *single frame* while the flag stayed 0 both times. Whatever it
+reports — an aircraft change, a transmitter button — it is not the spacebar. A bridge that waits
+for it never learns the aircraft moved, and PX4 goes on flying the trajectory of an aircraft that
+no longer exists. The flag is still handled where it does fire (§8.1), but it cannot be the only
+trigger.
+
+**The discontinuity is the signal.** Frames arrive about 4 ms apart, so 92 m in one of them is
+23 km/s. Detection therefore compares the distance actually moved against the distance the
+*reported velocity* could have covered — `moved > 4·|v|·dt + 10 m` — rather than against a fixed
+threshold. Using a velocity-relative bound is what keeps this correct after the glitch
+compensator has swallowed a long network stall and a legitimate frame really does span two
+seconds of flight; the floor keeps a stationary model, whose reachable distance is zero, from
+tripping on numerical noise in its own coordinates. The frame's physics interval is computed in
+the detector rather than reused from the clock handling, which has not run yet at that point.
+
+**What the bridge does with it.** `invalidatePositionOffset()` drops the position anchor, so the
+next frame re-captures it (§6) and the bridge reports the model at home again — which is what a
+freshly started session would report. The heading datum is deliberately *not* re-derived with it,
+for the reasons in §6. When the reset flag *does* fire, the previous flight's channel state is
+re-seeded to its disarm values as well: hold-last slots otherwise keep whatever the crash left
+them at — measured, a fully deflected elevator — on an aircraft the pilot is watching sit still
+on the runway. That is not a disarm and not a substitute for one; `buildChannels()` overwrites
+every mapped slot from live PX4 output on the first frame after the flag clears, so if PX4 is
+still armed and still commanding throttle, throttle comes straight back. Both actions sit
+*outside* the reinject throttle: the SOAP storm is what needs rate limiting, dropping a flag and
+re-seeding an array do not, and both are idempotent.
+
+**Re-anchoring does not make PX4 believe it.** EKF2 has converged state from the flight just
+ended and reads a 100 m step as a lying GPS rather than a moved aircraft, so it rejects the
+position and dead-reckons — which is the pilot's "QGC keeps flying". There is no HIL message for
+"the vehicle has been repositioned", but PX4 does accept an external position fix with a stated
+accuracy and treats a sub-metre one as grounds for a hard reset rather than a fusion update. The
+bridge sends one, over the same UDP 14580 link the battery uses (§11.2). It is **retried, not
+fired once**: sent at the instant of the teleport it comes back `TEMPORARILY_REJECTED`, because
+EKF2 accepts an external position only while dead-reckoning, or on the ground and not fusing
+GNSS — and at the moment of a respawn neither holds, GNSS fusion having been active 100 % of the
+time in the run that produced this. The condition arrives a second or two later, once the
+rejected position has pushed the estimator into dead reckoning, so the request is offered every
+200 ms for 5 s and EKF2 takes it when it can. Being accepted more than once is harmless: every
+request carries the same home coordinates, which is where the model is standing.
+
+**`PX4_FLIGHTAXIS_RESTART_ON_RESET` — the opt-in that stops arguing.** Set it to `1` and a
+detected teleport instead force-disarms PX4 (`MAV_CMD_COMPONENT_ARM_DISARM` with Commander's
+force magic), asks it to shut down (`MAV_CMD_PREFLIGHT_REBOOT_SHUTDOWN` — shutdown, not reboot,
+because POSIX SITL has nothing to reboot into), releases the RealFlight controller and exits
+with status **42**. `sitl_run.sh` runs both processes in a loop and treats exactly that status as
+"the bridge asked for this", bringing the pair back up; anything else — a crash, a Ctrl-C, PX4
+exiting by itself — falls out of the loop and reports as before. PX4 stays in the *foreground* so
+the `pxh>` prompt keeps working, which is why the bridge has to ask PX4 to go rather than the
+script killing it: the script cannot act while blocked on its foreground child. If PX4 is still
+alive seconds later the request was refused, and the bridge says so rather than leaving a silent
+hang.
+
+It is off by default, because the gap — a few seconds, a new log file, a ground-station
+reconnect — is visible, and a running session is usually preferable to a correct one that keeps
+stopping.
+
+**Why the escape hatch has to exist at all.** An estimator with no state accepts whatever it is
+given, which is why a freshly started session is always correct and a respawn is not. Everything
+short of a restart has to persuade EKF2 to abandon a converged solution, and it is built not to.
+ArduPilot sidesteps this entirely with `EKFType::SIM`, which feeds the simulator's own state in
+place of an estimator. **PX4 SITL has no equivalent.** The nearest thing PX4 owns exists only in
+HITL: `mavlink_receiver` handles `HIL_STATE_QUATERNION` by publishing it straight onto
+`vehicle_attitude` and `vehicle_local_position`, PX4's own estimator output topics. In SITL the
+same message reaches `SimulatorMavlink`, which routes it to `_gpos_ground_truth_pub` and nothing
+else — it is logging, and no consumer in the control stack reads it. So the one message that
+could bypass the estimator is inert on precisely the path where it would be wanted. Restarting
+the pair is the remaining way to give a run a genuinely fresh estimator.
 
 ## 12. References
 

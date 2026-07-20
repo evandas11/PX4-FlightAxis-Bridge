@@ -76,6 +76,7 @@
  * Selecting serial or udp also selects the HITL message profile, which:
  *   - stops sending HIL_STATE_QUATERNION (it would race EKF2 on a real board)
  *   - stops sending RAW_RPM (no receiver handler exists for it)
+ *   - stops sending RC_CHANNELS (no RC passthrough to a real board)
  *   - drops HIL_GPS to 5 Hz and mag/baro/airspeed to 50 Hz
  *   - adds a HEARTBEAT, without which PX4 never brings a USB link up
  * These are correctness requirements on a real board, not bandwidth tweaks -
@@ -852,12 +853,27 @@ int main(int argc, char **argv)
 	 * enough not to miss a brief window and far too slow to matter as traffic.
 	 */
 	/*
-	 * Opt-in: restart PX4 on a respawn instead of asking its estimator to
-	 * accept a jump. Off by default because the gap is visible and a running
-	 * session is usually preferable to a correct one that keeps stopping.
+	 * Restart PX4 on a respawn. ON by default; set the variable to 0 to keep a
+	 * session running across one.
+	 *
+	 * Not a preference. A respawn leaves EKF2 holding a converged solution for
+	 * a flight that no longer exists, and it treats the hundred-metre step as a
+	 * lying GPS rather than a moved aircraft - it rejects the position and dead
+	 * reckons, which is the aircraft drifting across the map while it sits on
+	 * the runway. Nothing short of a new estimator fixes that: the external
+	 * position reset PX4 offers is refused at exactly the moment it would help,
+	 * and SITL has no way to bypass the estimator the way ArduPilot's
+	 * EKFType::SIM does. Everyone who presses spacebar needs this, so it is not
+	 * something to find out about first.
+	 */
+	/*
+	 * Whole-string compare, not restart_env[0], so this agrees with the test in
+	 * sitl_run.sh. Testing the first character alone made a value like "0x"
+	 * disable the bridge half while the script still looped, and the two halves
+	 * of one feature disagreeing is not something a user can diagnose.
 	 */
 	const char *restart_env = ::getenv("PX4_FLIGHTAXIS_RESTART_ON_RESET");
-	const bool restart_on_teleport = (restart_env != nullptr && restart_env[0] == '1');
+	const bool restart_on_teleport = (restart_env == nullptr || ::strcmp(restart_env, "0") != 0);
 
 	const uint64_t RESET_RETRY_WINDOW_US   = 5000000;
 	const uint64_t RESET_RETRY_INTERVAL_US = 200000;
@@ -1297,7 +1313,8 @@ int main(int argc, char **argv)
 					 * runner this was deliberate rather than a crash.
 					 */
 					cerr << "[flightaxis_bridge]   restarting PX4 "
-					     << "(PX4_FLIGHTAXIS_RESTART_ON_RESET is set)" << endl;
+					     << "(PX4_FLIGHTAXIS_RESTART_ON_RESET=0 disables this)"
+					     << endl;
 
 					// Force-disarm, then shut PX4 down; sitl_run.sh brings it
 					// and this bridge back up together. If PX4 is still alive a
@@ -1424,7 +1441,7 @@ int main(int argc, char **argv)
 			// to have been updated within 1 s (accelerometerCheck.cpp:56 and
 			// its gyro/mag/baro siblings), and (b) EKF2's own per-source
 			// timeouts. (COM_RC_LOSS_T is 0.5 s but is RC loss and unrelated.)
-			// Spec 11.6 wants this to self-heal. NOT gated on the throttle above
+			// This has to self-heal. NOT gated on the throttle above
 			// - only the SOAP reinject is. Hold the last state, advance the clock,
 			// and keep draining actuator controls so 4560 cannot back up.
 			//

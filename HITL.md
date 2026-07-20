@@ -302,6 +302,9 @@ console. **`SYS_HITL` is `@reboot_required` — reboot after setting it.**
 | `COM_RC_IN_MODE` | `1` or `4` | no real RC transmitter attached |
 | `EKF2_MULTI_IMU` | `1` | The bridge sends `HIL_SENSOR` with `id = 0` only, so only IMU instance 0 is ever supplied; leaving this higher runs EKF instances on dead sensors (same as the SITL airframes) |
 | `SDLOG_MODE` | `0` | The firmware default already, "when armed until disarm": one log file per flight. Nothing to set on a board — no startup script overrides it there, unlike SITL's `rcS`. `@reboot_required` |
+| `SENS_IMU_AUTOCAL` | `0` | Stop PX4 learning sensor bias from synthesised sensors and saving it as permanent calibration. The SITL airframes set this; the `.hil` files do not — **see §6.3** |
+| `SENS_MAG_AUTOCAL` | `0` | as above |
+| `IMU_GYRO_CAL_EN` | `0` | as above |
 
 **Leave `EKF2_GPS_DELAY` at its firmware default.** The SITL airframes force it to `0`, but that
 value is SITL-specific and wrong on a board — HITL `HIL_GPS` arrives over a real link with real
@@ -380,9 +383,9 @@ through HITL to the physical output pinout, and moving a vehicle from the simula
 changes no channel numbers anywhere. If your RealFlight model uses a different order, change
 `HIL_ACT_FUNC<N>` and leave the JSON as an identity map.
 
-**What was dropped from the SITL airframes**, and why — these are SITL-only and wrong or
-meaningless on a board. A line-by-line diff of each `.hil` against its SITL twin gives **seven**
-dropped settings, identical in all four pairs:
+**What was dropped from the SITL airframes**, and why. A line-by-line diff of each `.hil`
+against its SITL twin gives **ten** dropped settings, identical in all four pairs. The first
+seven are SITL-only and wrong or meaningless on a board:
 
 - `EKF2_GPS_DELAY 0` — existed only to countermand `px4-rc.mavlinksim`, which runs after the
   airframe in SITL. No such script exists on a board, and forcing 0 is actively wrong there: HITL
@@ -399,11 +402,29 @@ dropped settings, identical in all four pairs:
 - `BAT1_SOURCE 1` — declares the battery as externally provided, which suits SITL's simulated
   pack. Dropping it restores the firmware default.
 
-The last three are failsafe-adjacent, and dropping them is the **safe** direction: the board falls
-back to the real firmware failsafe defaults instead of inheriting SITL's deliberately-disabled
-ones. Keeping them would have carried a simulator's relaxed failsafe configuration onto hardware.
-They are listed explicitly because this list is the one a reader auditing failsafe behaviour will
-read as exhaustive.
+The last three of those are failsafe-adjacent, and dropping them is the **safe** direction: the
+board falls back to the real firmware failsafe defaults instead of inheriting SITL's
+deliberately-disabled ones. Keeping them would have carried a simulator's relaxed failsafe
+configuration onto hardware. They are listed explicitly because this list is the one a reader
+auditing failsafe behaviour will read as exhaustive.
+
+The remaining three are **different in kind**, and worth reading before you assume the `.hil`
+files are complete:
+
+- `SENS_IMU_AUTOCAL 0`
+- `SENS_MAG_AUTOCAL 0`
+- `IMU_GYRO_CAL_EN 0`
+
+The SITL airframes set these because PX4 learns accelerometer, gyro and magnetometer offsets in
+flight and commits them as permanent calibration — which tracks a bias that genuinely drifts on a
+real aircraft, but against sensors synthesised from RealFlight's state finds only the estimator's
+own transients and then saves them, so the next flight starts from them.
+
+Unlike the seven above, **that reasoning is not SITL-specific.** A HITL board is fed the same
+synthesised `HIL_SENSOR` stream over the same bridge, so it has the same nothing to learn. The
+`.hil` files do not set them, so a board runs with the firmware defaults of `1`. If you see an
+offset accumulate across a HITL session — and it will persist, because a board saves its
+parameters — set these three on the board yourself.
 
 The per-vehicle tables below are kept as **reference for debugging a mis-wired model** — they are
 no longer instructions.
@@ -511,6 +532,15 @@ PX4_FLIGHTAXIS_IP=192.168.1.50 \
 The `PX4_HOME_*` variables are the bridge's, not the runner's, and mean here exactly what they
 mean in SITL — the two shortened examples above omit them only to keep the varying part visible.
 
+> **A RealFlight respawn will end the run.** The bridge's restart-on-respawn behaviour is on by
+> default and is **not** gated on the transport: press spacebar in RealFlight and the bridge
+> exits deliberately, expecting a runner to bring it and PX4 back up together. In SITL
+> `sitl_run.sh` has a loop that does exactly that. `hitl_run.sh` does not — it `exec`s the
+> bridge, because the firmware is on the board and there is no PX4 process for it to restart —
+> so on HITL the exit simply ends the session and the board is left in HIL with nothing feeding
+> it. Set **`PX4_FLIGHTAXIS_RESTART_ON_RESET=0`** for HITL runs if you expect to use the
+> respawn key; otherwise re-run `hitl_run.sh` after each one.
+
 There is also a make-style target, though see the caveat below:
 
 ```bash
@@ -545,6 +575,8 @@ for.
 | `PX4_HITL_SENSOR_HZ` | `250` serial/udp, `0` tcp | `0` = every frame (~1 kHz); only on USB |
 | `PX4_HITL_STATE_QUAT_BYPASS` | unset | debug only — see §2 |
 | `PX4_FLIGHTAXIS_IP` | `127.0.0.1` | RealFlight host |
+| `PX4_FA_DUMP_CHANNELS` | unset | channel dump at the given Hz; works identically here — see [README](README.md#finding-which-realflight-channel-a-surface-is-on) |
+| `PX4_FLIGHTAXIS_RESTART_ON_RESET` | unset (on) | read unconditionally by the bridge, but `hitl_run.sh` has no restart loop, so a respawn ends the session — **set it to `0`** (§7) |
 
 Selecting `serial` or `udp` also selects the HITL message profile (no `HIL_STATE_QUATERNION`,
 no `RAW_RPM`, no `RC_CHANNELS`, `HIL_GPS` at 5 Hz, mag/baro/airspeed at 50 Hz, plus `HEARTBEAT`).
