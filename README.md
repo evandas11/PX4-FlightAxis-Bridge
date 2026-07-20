@@ -362,6 +362,39 @@ magnetometer and gyro *ids* but no offsets and reports `Compass 0 fault`, and th
 **Vehicle Setup → Sensors**, compass then gyroscope — and it is stored in that working
 directory for good, and is what every later directory seeds from.
 
+#### Turn PX4's in-flight sensor learning off
+
+Do this before the first flight in a working directory. `SENS_IMU_AUTOCAL`, `SENS_MAG_AUTOCAL`
+and `IMU_GYRO_CAL_EN` all default to `1`, and on a real aircraft that is correct: the sensors
+drift, PX4 learns the bias in flight and saves it. Here the sensors are synthesised from
+RealFlight's state and have no bias to learn, so what PX4 learns instead is its own estimator
+transients — and it writes them to `parameters.bson` as permanent calibration.
+
+Measured in one session: an accelerometer offset moving from zero to
+`+0.308, -0.173, +0.040 m/s²`. A 0.36 m/s² bias dead-reckons to roughly 21 m/s over a minute,
+which presents as the aircraft wandering across the QGC map while it sits perfectly still in
+RealFlight. Because the offsets accumulate across sessions rather than resetting with each run,
+the symptom looks intermittent and unrelated to whatever was last changed.
+
+At the `pxh>` prompt:
+
+```
+param set SENS_IMU_AUTOCAL 0
+param set SENS_MAG_AUTOCAL 0
+param set IMU_GYRO_CAL_EN 0
+param reset CAL_ACC0_XOFF CAL_ACC0_YOFF CAL_ACC0_ZOFF
+param reset CAL_GYRO0_XOFF CAL_GYRO0_YOFF CAL_GYRO0_ZOFF
+param reset CAL_MAG0_XOFF CAL_MAG0_YOFF CAL_MAG0_ZOFF
+param save
+```
+
+Then restart PX4: the offsets are read at boot, so clearing them takes effect on the next one.
+
+**Reset only the `*OFF` parameters, named individually as above.** `param reset CAL_ACC0_*`
+would also clear `CAL_ACC0_ID`, and without an id PX4 reports the sensor as uncalibrated
+entirely — a worse state than the one being fixed, and one that needs a full QGC sensor
+calibration to leave.
+
 #### Stored values against the airframe's defaults
 
 If a stored value seems to be overriding the airframe, reset that parameter rather than the
@@ -475,6 +508,60 @@ so a process that has exited cannot produce this. Deleting the lock file does no
 anything; it only lets a second instance start alongside the first. Also check for a stray
 `bin/px4` still holding TCP 4560.
 
+### Restarting on a RealFlight respawn
+
+Add one line, `PX4_FLIGHTAXIS_RESTART_ON_RESET=1`, and a RealFlight respawn — spacebar, or the
+automatic reset after a crash — force-disarms and reboots PX4; `sitl_run.sh` brings PX4 and the
+bridge back up together in the same terminal:
+
+```bash
+PX4_FLIGHTAXIS_RESTART_ON_RESET=1 \
+PX4_FLIGHTAXIS_IP=192.168.10.1 \
+make px4_sitl_nolockstep flightaxis_plane
+```
+
+| | |
+|---|---|
+| Unset, or any other value | one run per invocation — the historical behaviour, and the default |
+| `1` | PX4 and the bridge restart on every respawn |
+
+**How the bridge notices.** Not from `m_resetButtonHasBeenPressed`: that field does not fire on
+a spacebar respawn. Instrumented over two respawns in one session, the reported position jumped
+92.3 m and then 120.9 m in a single frame while the flag stayed `0` both times. The
+discontinuity is the signal instead, and it is unambiguous — frames arrive about 4 ms apart, so
+92 m in one of them is 23 km/s. The test compares the distance moved against the distance the
+reported velocity could actually have covered, rather than against a fixed threshold, so it
+stays correct when the glitch compensator has just absorbed a network stall and a legitimate
+frame really does span two seconds of flight. On detection the bridge prints:
+
+```
+[flightaxis_bridge] aircraft teleported 92.3 m (RealFlight reset) - re-anchoring
+```
+
+**What a respawn does regardless of this option.** The position anchor is re-captured, so PX4 is
+told the model is back at the point it entered the world. The heading datum is *not* re-derived
+— it is latched once per session, because it defines the frame every other quantity is expressed
+in (see [Home position and heading](#home-position-and-heading)).
+
+**Why a restart is on offer at all.** Re-anchoring makes the bridge report the model at home
+again; it does not make PX4 believe it. A freshly started session is always correct because an
+estimator with no state accepts whatever it is given. A respawn is not, because EKF2 has
+converged on the flight that just ended and reads a hundred-metre teleport as a lying GPS rather
+than as a moved aircraft — so it rejects the position and dead-reckons, which is what the pilot
+sees as QGC still flying the old trajectory after the model is back on the runway.
+
+There is no way to bypass the estimator in PX4 SITL. ArduPilot has one — `EKFType::SIM`, an AHRS
+backend that takes the simulator's state as the answer, which is why the same respawn is seamless
+there. PX4's equivalent exists only in HITL, where `mavlink_receiver` publishes
+`HIL_STATE_QUATERNION` straight onto `vehicle_attitude` and `vehicle_local_position`; in SITL
+that same message reaches `_gpos_ground_truth_pub` and nothing else. A restart is therefore the
+blunt instrument, and it is the only one.
+
+**What it costs**, which is why it is off by default: a gap of a few seconds while both sides
+come back, a new log file per respawn, and a ground-station reconnect each time. PX4 stays in
+the foreground throughout, so the `pxh>` prompt survives the loop and Ctrl-C still ends the
+session.
+
 ### Finding which RealFlight channel a surface is on
 
 `PX4_FA_DUMP_CHANNELS=<hz>` prints every channel's current value and its travel since the
@@ -584,8 +671,11 @@ rotates nothing, which is also what ArduPilot's FlightAxis backend does: it acce
 `--custom-location` but its `SIM_FlightAxis` overwrites the attitude from RealFlight on the first
 frame, so the value has no effect there.
 
-The heading datum is re-derived whenever the position anchor is, so pressing reset in RealFlight
-keeps the requested start heading.
+The datum is **latched once per session**, on the first frame, and is not re-derived when
+RealFlight respawns the model. It defines the frame every other quantity is expressed in, so
+re-deriving it mid-session would rotate the world out from under a position and velocity history
+that were recorded in the old frame. A respawn re-captures the position anchor only — see
+[Restarting on a RealFlight respawn](#restarting-on-a-realflight-respawn).
 
 ## Model JSON: channel maps
 
@@ -738,6 +828,7 @@ configure time rather than failing at launch.
 | **Hangs silently at `waiting for PX4 on TCP 4560`** | The bridge is up and waiting, but PX4 never connected. Usually PX4 exited at startup — scroll back for its error. The most common cause is the missing airframes `CMakeLists.txt` registration (see step 3 of [Adding a new aircraft](#adding-a-new-aircraft)): the airframe is absent from the ROMFS, so `SYS_AUTOSTART` matches nothing. Also check that nothing else already holds TCP 4560. |
 | Aircraft twitches or flies inverted on one axis | Channel order mismatch. First confirm the JSON is still an identity map (`rf` == `px4` on every row); if it is, the fix is in the `PWM_MAIN_FUNC*` block of the matching airframe script, which must put `controls[]` in your RealFlight model's channel order (see [Model JSON](#model-json-channel-maps)). Inverted on exactly one axis with the right surface moving is a direction problem, not an ordering one: set that channel's bit in `PWM_MAIN_REV` (bit `N-1` for channel `N`) or flip the servo in the RealFlight model. |
 | Heli has no left yaw at all; the tail sits on its lower stop | The tail row must be `"scale": "bipolar"` with `"disarm": 0.5`. `1203_flightaxis_heli` uses `CA_AIRFRAME 11` ("tail Servo"), so the tail is a servo on `[-1,1]`. Under `CA_AIRFRAME 10` it would be a motor clamped to `[0,1]` and the whole negative half of the yaw command would be clipped away. |
+| `battery source:` names a fuel tank, and the percentage looks wrong | The line below it prints the raw reading beside the reference it is measured against — `tank: 47.500 raw (m-fuelRemaining-OZ), reference 95.000 -> 50%`. FlightAxis names the field in ounces but nothing upstream consumes it, so the unit rests on the name alone; the bridge divides by the largest value it has ever seen and is therefore correct for ounces, percent or a 0..1 fraction alike. A full tank printing `100.0` or `1.000` rather than a tank size tells you which it actually is. The reference is the largest reading of the session, re-armed upward if a fuller tank appears, so a reference below the true tank size only means no full tank has been seen yet — a refuel or a RealFlight reset restores it. |
 | Bridge exits with `PX4 link lost - shutting down` | Expected, not a fault: a dead PX4 link is terminal by design. PX4 exited, the board rebooted, or the cable was pulled. Restart both sides — the bridge deliberately does not re-accept a fresh PX4 whose clock starts at zero. |
 
 ## Credits / references

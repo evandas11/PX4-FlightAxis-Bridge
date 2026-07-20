@@ -849,10 +849,31 @@ bool BatteryLink::requestReboot()
 	ok = (::sendto(_fd, buf, (size_t)len, MSG_DONTWAIT,
 		       (struct sockaddr *)&addr, sizeof(addr)) == len) && ok;
 
+	/*
+	 * Let the disarm land before asking for the shutdown. Commander evaluates
+	 * !isArmed() when it handles PREFLIGHT_REBOOT_SHUTDOWN, so two datagrams
+	 * arriving in the same cycle would have the shutdown refused against an
+	 * armed state the disarm has not cleared yet - and refused silently, since
+	 * nothing here reads the ack. Blocking here is safe: the caller is on its
+	 * way out and has already released the RealFlight controller.
+	 */
+	::usleep(300000);
+
+	/*
+	 * param1 = 2, SHUTDOWN, not 1 = reboot.
+	 *
+	 * px4_reboot_request() is compiled only under CONFIG_BOARDCTL_RESET, which
+	 * is NuttX; on POSIX it does not exist, so a reboot request is accepted and
+	 * does nothing. PX4 then keeps running with no simulator attached, filling
+	 * the console with "Failed sending mavlink message: Broken pipe" while the
+	 * runner sits blocked on it. px4_shutdown_request() is the one guarded by
+	 * __PX4_POSIX (shutdown.cpp:250) and it does end the process, which is what
+	 * lets sitl_run.sh start the next one.
+	 */
 	mavlink_msg_command_long_pack_chan(
 		_sysid, BATTERY_COMPID, MAVLINK_COMM_1, &msg,
 		1, 1, 246 /* MAV_CMD_PREFLIGHT_REBOOT_SHUTDOWN */, 0,
-		1.0f,		// param1: 1 = reboot autopilot
+		2.0f,		// param1: 2 = shutdown
 		0, 0, 0, 0, 0, 0);
 	len = mavlink_msg_to_send_buffer(buf, &msg);
 	ok = (::sendto(_fd, buf, (size_t)len, MSG_DONTWAIT,

@@ -1299,10 +1299,16 @@ int main(int argc, char **argv)
 					cerr << "[flightaxis_bridge]   restarting PX4 "
 					     << "(PX4_FLIGHTAXIS_RESTART_ON_RESET is set)" << endl;
 
-					// Force-disarm then reboot. PX4 exits; sitl_run.sh brings
-					// it and this bridge back up together.
-					if (battery.active()) {
-						battery.requestReboot();
+					// Force-disarm, then shut PX4 down; sitl_run.sh brings it
+					// and this bridge back up together. If PX4 is still alive a
+					// few seconds from now the request was refused, and because
+					// the runner is blocked on it in the foreground nothing here
+					// can recover that - say so rather than leave a silent hang.
+					if (battery.active() && !battery.requestReboot()) {
+						cerr << "[flightaxis_bridge]   WARNING: could not send the"
+						     << " shutdown request. If PX4 keeps running with"
+						     << " \"Broken pipe\" warnings, Ctrl-C the session."
+						     << endl;
 					}
 
 					fa.releaseController();

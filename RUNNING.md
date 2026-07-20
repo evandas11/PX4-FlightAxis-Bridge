@@ -1003,6 +1003,19 @@ heading](#3-home-position-and-heading).
 the last means RealFlight has shown neither a pack nor a tank yet, so the bridge is sending a
 nominal full battery so preflight can pass. It is normal for the first frames.
 
+When the source is `fuel`, a second line follows it:
+
+```
+[flightaxis_bridge]   tank: 40.000 raw (m-fuelRemaining-OZ), reference 40.000 -> 100%
+```
+↑ The raw tank reading beside the reference the bridge is dividing by, and the percentage that
+falls out. FlightAxis's field name asserts ounces and nothing upstream reads the field, so the
+unit is unverified; the bridge divides by the largest value it has seen and is therefore correct
+whether RealFlight reports ounces, percent or a 0..1 fraction. The line is printed so that a
+*reader* can settle the question in one flight — a full tank showing `40.000`, `100.0` or `1.000`
+tells you which it is. Printed with the source line, so once at latch and again on any change of
+source.
+
 ```
 [flightaxis_bridge] first HIL_ACTUATOR_CONTROLS received, enabling channels
 ```
@@ -1043,6 +1056,18 @@ Occasional single lines are normal and benign:
 ```
 [flightaxis_bridge] glitch 0.11s
 ```
+
+Not part of a healthy start, but expected the moment you press spacebar in RealFlight:
+
+```
+[flightaxis_bridge] aircraft teleported 111.0 m (RealFlight reset) - re-anchoring
+```
+↑ The bridge noticed the respawn and re-captured the position anchor. With
+`PX4_FLIGHTAXIS_RESTART_ON_RESET=1` (§6.1) a second line follows —
+`restarting PX4 (PX4_FLIGHTAXIS_RESTART_ON_RESET is set)` — and the run comes back from the
+beginning. Without it, expect PX4 to keep flying the old trajectory for a while: see
+[`aircraft teleported N m (RealFlight reset) - re-anchoring`](#aircraft-teleported-n-m-realflight-reset---re-anchoring)
+in §7 for why.
 
 ### Before you fly, check in QGC
 
@@ -1125,6 +1150,38 @@ PX4_SIM_MODEL=flightaxis_plane \
 ```
 
 Note `PX4_HOME_*` must be set on the **bridge** process, not on `px4`.
+
+### 6.1 `PX4_FLIGHTAXIS_RESTART_ON_RESET`
+
+Prepended to the make command like every other variable here:
+
+```bash
+PX4_FLIGHTAXIS_RESTART_ON_RESET=1 \
+PX4_FLIGHTAXIS_IP=192.168.10.1 \
+make px4_sitl_nolockstep flightaxis_plane
+```
+
+What it is for, and why a restart is the answer rather than a workaround, is in
+[Restarting on a RealFlight respawn](README.md#restarting-on-a-realflight-respawn). What running
+with it costs:
+
+- **It is off unless the value is exactly `1`.** Unset, empty, `0`, `true`, `yes` — all leave the
+  historical single-run behaviour. Both the bridge and `sitl_run.sh` test for the literal `1`.
+- **`pxh>` keeps working across restarts.** PX4 stays in the foreground of `sitl_run.sh`'s loop,
+  so the prompt returns with the new PX4. This is also why the *bridge* reboots PX4 rather than
+  the script killing it: a script blocked on a foreground process cannot act.
+- **Each respawn costs a few seconds** — force-disarm, reboot, both processes back up, EKF2
+  re-converging from nothing.
+- **The log is closed and a new one opened**, so a session with three respawns leaves four flight
+  logs rather than one (§7, *Where the logs land*).
+- **The ground station reconnects.** QGC drops the vehicle and picks it up again; a MAVSDK or ROS 2
+  client sees the same and must tolerate a disconnect.
+- Anything other than a requested restart — a bridge crash, Ctrl-C, PX4 exiting by itself — falls
+  out of the loop and reports exactly as it did before. The bridge signals the deliberate case with
+  exit code 42, which is the only thing `sitl_run.sh` loops on.
+
+Leave it off if you would rather keep a session alive across a respawn and accept the estimator
+divergence described in §7.
 
 ---
 
@@ -1228,6 +1285,43 @@ RealFlight took control back — someone hit the spacebar (reset), changed aircr
 scenery. The bridge re-injects the controller every 300 ms until it sticks and re-anchors the
 position offset. Expected and self-healing; if it loops forever, RealFlight has a modal dialog
 open or the model has no FlightAxis-controllable channels.
+
+### `aircraft teleported N m (RealFlight reset) - re-anchoring`
+
+```
+[flightaxis_bridge] aircraft teleported 111.0 m (RealFlight reset) - re-anchoring
+```
+
+**The bridge saw a respawn.** Normal after a spacebar press, and the only notice you get: the
+detection is a **position discontinuity**, not `m_resetButtonHasBeenPressed`. That field does not
+fire on a spacebar respawn — instrumented across two respawns, the reported position jumped 92.3 m
+and 120.9 m in a single frame while the flag stayed 0 both times. Frames arrive about 4 ms apart,
+so the test compares the distance moved against the distance the reported velocity could actually
+cover, rather than against a fixed threshold; that is what keeps it correct when the glitch
+compensator has just swallowed a network stall and a legitimate frame really does span a second of
+flight. (The flag is still checked, for the aircraft-change case it does catch — see the
+reinjection entry above.)
+
+**What happens next, and why the aircraft keeps flying in QGC.** The position anchor is
+re-captured, so PX4 receives the model back at the point it entered — everything the bridge sends
+is correct from the next frame. PX4 does not believe it. EKF2 has converged state from the flight
+just ended and reads a hundred-metre step as a lying GPS rather than a moved aircraft, so it
+rejects the position and dead-reckons: on the QGC map the vehicle carries on along the old
+trajectory while RealFlight has it standing on the runway.
+
+The bridge asks for a hard reset — `MAV_CMD_EXTERNAL_POSITION_ESTIMATE` with a 0.5 m stated
+accuracy, retried every 200 ms for five seconds rather than fired once. EKF2 gates that request on
+the vehicle dead-reckoning, or being on the ground and not fusing GNSS (`EKF2.cpp:534`), and at the
+instant of a respawn neither holds, so it is refused; the gate may open a second or two later once
+the rejected position has pushed the estimator into dead reckoning, which is why the offer is kept
+open. It is a recovery in seconds when it works, and it does not always work.
+
+**The definite answer is `PX4_FLIGHTAXIS_RESTART_ON_RESET=1`** (§6.1): a restart gives the run an
+estimator with no state, and an estimator with no state accepts whatever it is given. Background in
+[Restarting on a RealFlight respawn](README.md#restarting-on-a-realflight-respawn).
+
+If you are waiting the divergence out instead, the related symptom is
+[`Disarming denied: not landed`](#disarming-denied-not-landed-after-a-spacebar-reset) below.
 
 ### `FlightAxis controller injection failed, retrying ...`
 
@@ -1338,6 +1432,22 @@ param set SIM_BAT_ENABLE 1
 which gives you a synthetic battery instead of RealFlight's. Usual cause is the UDP port
 (`14580 + instance`) already being held by another SITL instance — see §6 if you are running more
 than one.
+
+### The fuel percentage looks wrong on an internal-combustion model
+
+Check the diagnostic the bridge prints beside the source line when the class latches to fuel (§5):
+
+```
+[flightaxis_bridge]   tank: 40.000 raw (m-fuelRemaining-OZ), reference 40.000 -> 100%
+```
+
+`raw` is what RealFlight reported this frame; `reference` is the largest reading the bridge has
+seen, which is what it divides by, FlightAxis reporting no tank capacity. A full tank at the start
+of a flight should show the two equal and `100%`. A `reference` visibly below a full tank means the
+bridge attached to an aircraft that was **already part-used** — that partial level became "full",
+so the percentage reads high for the rest of the flight. The reference re-arms upwards on any
+larger reading, so resetting in RealFlight with a full tank corrects it; loading the model fresh
+avoids it. The same line also tells you what the unit is (§5), which the field name only asserts.
 
 ### `Disarming denied: not landed` after a spacebar reset
 
@@ -1488,6 +1598,63 @@ overwrites one — or the shared directory has none to give. Either calibrate in
 that one file and run again to let the seed fire. `PX4_FLIGHTAXIS_SEED=0` disables seeding
 if you want a directory calibrated from scratch.
 
+### The aircraft wanders in QGC while standing still in RealFlight (`ACC 0 offset committed`)
+
+Four symptoms that belong to one cause, and none of them names it:
+
+- the vehicle drifts across the QGC map while the model sits motionless on the RealFlight runway;
+- the wind estimate climbs although RealFlight has no wind set;
+- each flight in that working directory is worse than the last;
+- it survives a restart, because the value was **saved**.
+
+The giveaway in the console is:
+
+```
+INFO  [vehicle_imu] ACC 0 offset committed: ...
+```
+
+`SENS_IMU_AUTOCAL`, `SENS_MAG_AUTOCAL` and `IMU_GYRO_CAL_EN` all default to `1`. On a real
+aircraft that is right — the sensors drift and PX4 learns the bias in flight. Here the sensors are
+synthesised from RealFlight's state and have no bias to learn, so what PX4 learns instead is its
+own estimator transients, and it **commits them to `parameters.bson` as permanent calibration**.
+Measured in one session: an accelerometer offset going from zero to
+`+0.308, -0.173, +0.040 m/s²`. Because it accumulates across sessions rather than resetting with
+each run, the symptom looks intermittent and unrelated to whatever was last changed.
+
+At the `pxh>` prompt:
+
+```
+param set SENS_IMU_AUTOCAL 0
+param set SENS_MAG_AUTOCAL 0
+param set IMU_GYRO_CAL_EN 0
+param reset CAL_ACC0_XOFF CAL_ACC0_YOFF CAL_ACC0_ZOFF
+param reset CAL_GYRO0_XOFF CAL_GYRO0_YOFF CAL_GYRO0_ZOFF
+param reset CAL_MAG0_XOFF CAL_MAG0_YOFF CAL_MAG0_ZOFF
+param save
+```
+
+Then restart PX4 — the offsets are read at boot, so clearing them takes effect on the next one.
+It is a per-working-directory fix, so repeat it in each `PX4_FLIGHTAXIS_ROOTFS` (§2 preamble).
+
+⚠️ **Reset only the `*OFF` parameters, named individually as above.** `param reset CAL_ACC0_*`
+would also clear `CAL_ACC0_ID`, and without an id PX4 reports the sensor as **uncalibrated** — a
+worse state than the one being fixed, and the sibling of
+[`Compass 0 fault`](#compass-0-fault-and-airspeed-invalid-in-a-working-directory-you-just-made)
+above. If you have already done it, the ids `rcS` uses are:
+
+```
+param set CAL_ACC0_ID 1310988
+param set CAL_GYRO0_ID 1310988
+param set CAL_ACC1_ID 1310996
+param set CAL_GYRO1_ID 1310996
+param set CAL_ACC2_ID 1311004
+param set CAL_GYRO2_ID 1311004
+param save
+```
+
+`rcS` only writes those during autoconfig, so it will not put them back on a directory that
+already has a `parameters.bson`.
+
 ### `Preflight Fail: ekf2 missing data`
 
 **Benign, and the wording is misleading.** The underlying event text is "Waiting for estimator to
@@ -1555,8 +1722,9 @@ usually the explanation for a missing log rather than a logging failure.
 - On startup, once: expected — `ResetPosition` is set in every shipped model, so the bridge calls
   `ResetAircraft` when it injects the controller.
 - Mid-flight: someone pressed spacebar in RealFlight, or the bridge re-injected (see above).
-  The position offset is re-captured, so PX4 sees the aircraft back at home rather than a
-  position jump.
+  The position offset is re-captured, so the *bridge* reports the aircraft back at home rather
+  than a position jump — but EKF2 does not accept it, which is the whole of
+  [`aircraft teleported N m (RealFlight reset) - re-anchoring`](#aircraft-teleported-n-m-realflight-reset---re-anchoring).
 - If you do *not* want the reset on startup, remove `"ResetPosition"` from that model's
   `Options` — but then PX4's home and the RealFlight position start out inconsistent until the
   first frame anchors them.

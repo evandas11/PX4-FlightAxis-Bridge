@@ -167,7 +167,9 @@ public:
 	 * PREFLIGHT_REBOOT_SHUTDOWN while armed (Commander.cpp:1234), and forced
 	 * because after a RealFlight reset PX4 still believes it is flying.
 	 *
-	 * PX4 exits rather than restarts; sitl_run.sh is what brings it back.
+	 * The request is SHUTDOWN rather than reboot: px4_reboot_request() is
+	 * NuttX-only, so on POSIX a reboot is accepted and does nothing. PX4 exits;
+	 * sitl_run.sh is what brings it back.
 	 */
 	bool requestReboot();
 
