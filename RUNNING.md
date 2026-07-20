@@ -1010,7 +1010,9 @@ following PX4's own `Tools/simulation/sitl_multiple_run.sh`.
 `PX4_FLIGHTAXIS_ROOTFS` overrides both, and it is the right tool when you want to separate
 **models** rather than instances — see
 [*A working directory per model*](README.md#a-working-directory-per-model) in README.md for
-that.
+that. A directory with no `parameters.bson` is seeded from
+`build/px4_sitl_nolockstep/rootfs`, so a new one starts with the calibration you already
+have; §7 has what happens without it.
 
 The two are not interchangeable. `-i` is wired to `MAV_SYS_ID`, the simulator TCP port and
 every MAVLink UDP port, so using it to mean "model" burns a port range per airframe and
@@ -1246,6 +1248,30 @@ is enough, and it touches nothing else. Deleting the working directory also work
 blunter instrument: it takes your radio calibration, sensor calibration and flight-mode
 assignments with it, and no airframe file will put those back. On a real board, QGC's
 **Tools → Reset all parameters** followed by re-selecting the airframe has the same cost.
+
+### `Compass 0 fault` and `Airspeed invalid` in a working directory you just made
+
+Neither message names its cause, and the second is a consequence of the first.
+
+`rcS` writes the magnetometer and gyro **ids** during autoconfig but not their **offsets**, so
+a directory that has never been calibrated comes up with `CAL_MAG0_ID` set and
+`CAL_MAG0_XOFF/YOFF/ZOFF` absent. That is the compass fault. The airspeed validator then
+checks the pitot against airspeed derived from the EKF — groundspeed less wind — and a bad
+compass has already spoiled the EKF's yaw, so the innovation exceeds `ASPD_FS_INNOV` and a
+perfectly good pitot reading is rejected as well.
+
+`sitl_run.sh` avoids this by seeding a working directory that has no `parameters.bson` from
+`build/px4_sitl_nolockstep/rootfs`, and says so when it does:
+
+```
+seeded parameters.bson from .../build/px4_sitl_nolockstep/rootfs (calibration carried over)
+```
+
+If you do not see that line, the directory already had a `parameters.bson` — seeding never
+overwrites one — or the shared directory has none to give. Either calibrate in QGC
+(**Vehicle Setup → Sensors**, compass then gyroscope) and it is stored for good, or delete
+that one file and run again to let the seed fire. `PX4_FLIGHTAXIS_SEED=0` disables seeding
+if you want a directory calibrated from scratch.
 
 ### Aircraft resets or teleports
 
