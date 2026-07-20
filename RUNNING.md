@@ -503,7 +503,10 @@ against the house style, immediately next to a `quadplane.json` that carries an 
 requirement: `get_FAbridge_params.py` rejects any `Rev4Servos`-covered row (rf0–7) left on
 `"disarm": -1` / hold-last, because the swap rewrites the slot every frame and a held channel would
 ping-pong between `rf i` and `rf i+4` at the loop rate — a full-amplitude servo buzz at ~250 Hz.
-Give those rows an explicit `disarm` (0.5 for a bipolar servo, 0.0 for a motor).
+Give those rows an explicit `disarm` (0.5 for a bipolar servo, 0.0 for a motor). Note also that
+`Rev4Servos` may never be combined with `HeliDemix` — `get_FAbridge_params.py` rejects the pair
+and the bridge will not start; see [When to re-enable `HeliDemix`](#when-to-re-enable-helidemix)
+for why the combination fails silently.
 
 **Gotcha — transition.** The airframe sets `VT_F_TRANS_THR 0.75`, `VT_FWD_THRUST_EN 4`,
 `FW_AIRSPD_MAX 25`. Transition needs the pusher to actually accelerate the model. These values
@@ -642,6 +645,18 @@ undo PX4's swash mix first. Add `"HeliDemix"` back to `Options` in `heli.json` (
 and change nothing else. **Never enable both** the model's mixing and the bridge's demix — and
 never enable the demix against a model you have already wired direct-servo.
 
+**Never set `HeliDemix` and `Rev4Servos` together.** `get_FAbridge_params.py` rejects the
+combination outright and the bridge will not start, because the two passes run in a fixed order
+and compose into silence. `Rev4Servos` runs first and swaps `out[0..3]` with `out[4..7]`; the
+demix then reads `out[0..2]`, which by that point holds the former rf4–6 rather than the swash
+servos. On the shipped heli layout rf4–6 are unassigned and sit at a steady 0.5, so the demix
+computes roll = 0, pitch = 0, collective = 0.5 from three equal inputs and keeps emitting them
+frame after frame — a swashplate frozen dead centre on an armed aircraft, with no diagnostic of
+its own to give it away. The failure is silent rather than noisy, which is why it is refused at
+load time instead of being left to the pilot to discover. If your model needs both a channel
+rotation and a demix, do the rotation in the `Channels` map (or in the airframe's `PWM_MAIN_FUNC*`
+params) and leave `Rev4Servos` off.
+
 The option remains fully supported in the code; it is simply not the right default for a
 directly-wired model. **It is also a dead path by default**: with the demix off, the demix
 arithmetic below is not exercised at all, and the `CA_SP0_ANG` 300/60/180 geometry is a claim
@@ -689,8 +704,13 @@ the model in RealFlight's aircraft editor.
 `CA_SP0_ARM_L0/1/2` are pinned to 1.0 (equal arms, right for a symmetric head) and
 `CA_MAX_SVO_THROW` to 0 (no `asin()` linearisation — that correction is only right if it
 matches the linkage the model actually simulates, and a mismatched one is worse than none).
-Both previously *had* to hold for the demix inverse to be exact; that constraint is gone, but
-the values remain the sane defaults.
+Both *had* to hold for the demix inverse to be exact. That constraint is released **only for
+as long as `HeliDemix` stays off**: re-enabling it (see "When to re-enable `HeliDemix`" above)
+re-imposes both — the arm lengths back at 1.0, and the angles back at exactly 300/60/180 —
+because the √3 and 1.5 divisors are derived from that geometry and no other. So with the demix
+off you may set `CA_SP0_ANG*` to whatever your model's head actually is, and the pinned values
+are merely the sane defaults; with the demix on they are a hard requirement, and changing the
+angles without changing the divisors silently mis-scales cyclic.
 
 **Gotcha — the tail is a servo, so it is bipolar.** Under `CA_AIRFRAME 11` the yaw tail is a
 *servo* on `[-1,1]`, and 0.5 on the wire is zero tail pitch — which is what a collective-pitch

@@ -667,6 +667,7 @@ wants `[0,1]`), `disarm`, and the option transforms:
 | `ResetPosition` | issue `ResetAircraft` on startup, so every run begins from a known state. On by default in all four shipped models. |
 | `Rev4Servos` | swap RealFlight channels 1–4 with 5–8 wholesale, for RF models built that way. **Do not enable it on a model whose FUNC params already produce the right order** — every shipped model, `quadplane.json` included — as it can only swap a correct order into a wrong one. |
 | `HeliDemix` | **Off by default** — see "Swash mixing" below. Converts the three swash servo outputs back into the roll/pitch/collective triple a CCPM RealFlight model expects (`roll=(s1−s2)/1.732`, `pitch=((s1+s2)/2−s3)/1.5`, `col=(s1+s2+s3)/3`). The two divisors normalise the raw differences to unit gain — without them the cyclic saturates at 0.577 of commanded roll and 0.667 of pitch. They are exact only for the swash geometry `1203_flightaxis_heli` forces via `CA_SP0_ANG*` = 300/60/180, which is why that airframe pins the angles and the arm lengths. **The divisors are ours; ArduPilot's `SIM_FlightAxis.cpp:348-350` has no equivalent** and leaves roll and pitch in the ratio 2/√3 on the 120° head both projects use. The channel *order* follows ArduPilot (swash 1–3, tail 4, RSC 8); the demix *gains* deliberately do not. |
+| `HeliDemix` + `Rev4Servos` | **Mutually exclusive — `get_FAbridge_params.py` rejects the pair and the bridge will not start.** `Rev4Servos` runs first, so the demix would read the swapped-in rf4–6 instead of the swash servos and emit a constant roll 0 / pitch 0 / collective 0.5 — a swashplate frozen dead centre on an armed aircraft, with nothing in the output to show it. Refused at load time because the failure is silent; the full account is in [RUNNING.md §2.4](RUNNING.md#when-to-re-enable-helidemix). |
 | `SilenceFPS` | suppress the periodic `exchanges=… rtf=… glitches=…` line on stderr. **On in all four shipped models** — it prints once a second forever and buries everything else in the terminal. The alarms still print: each swallowed glitch gets its own `glitch 0.62s` line and an out-of-range realtime factor still warns, both independently of this option. Drop it from `Options` if you want the running heartbeat back. |
 
 ### Swash mixing (helicopter)
@@ -693,7 +694,9 @@ Never enable the model's mixing and the bridge's demix at the same time.
 
 With PX4 as the sole mixer, `CA_SP0_ANG*` describes the **physical** swash of your model. The
 airframe sets 300/60/180 — a 120° head with the odd servo aft, matching ArduPilot's default.
-If your model's third servo is at the front, use 120/240/0.
+If your model's third servo is at the front, use 120/240/0. That freedom exists only while
+`HeliDemix` is off — re-enabling it pins the angles back to 300/60/180, since the demix divisors
+are derived from that geometry alone.
 
 The heli rate gains, collective curve and yaw compensation in `1203_flightaxis_heli` are a
 generic collective-pitch starting point, not a tune for any particular machine — expect to

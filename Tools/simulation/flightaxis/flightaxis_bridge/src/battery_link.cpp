@@ -134,6 +134,13 @@ constexpr double FUEL_EPS_OZ = 1.0e-6;
 // model swap produces and a one-frame glitch does not.
 constexpr int CLASS_CONFIRM_FRAMES = 3;
 
+// How far below the candidate a confirming frame may sit and still count as
+// "the tank is holding at a new maximum" rather than having fallen back to the
+// level it stepped up from. Across the ~1.5 s the streak spans, a running
+// engine takes a fraction of a percent off any real tank, while a one-frame
+// spike drops the whole way back - so 5% separates the two with room to spare.
+constexpr double FUEL_HOLD_FRACTION = 0.95;
+
 double clamp(double v, double lo, double hi)
 {
 	return (v < lo) ? lo : ((v > hi) ? hi : v);
@@ -399,14 +406,62 @@ void BatteryLink::update(const FAState &fa, uint64_t now_us)
 		 * Re-armed UPWARDS rather than latched so a refuel or a reset restores
 		 * 100% instead of pinning the fraction low for the rest of the session.
 		 *
+		 * It also has to re-arm DOWNWARDS, because adopt() - which resets it -
+		 * only fires on a CLASS change, and swapping one IC model for another
+		 * keeps the class at Fuel. Without the branch below, a 40 oz glow model
+		 * followed by a 10 oz one leaves the reference at 40: the new tank,
+		 * brim full, reports 25% remaining, which is a low-battery failsafe on
+		 * a full tank. That is the wrong direction to be wrong in.
+		 *
+		 * What separates a swap from ordinary burning: burning is a monotone
+		 * decline away from the reference, whereas a swap is a STEP UP from
+		 * whatever the previous model was showing - the sentinel/near-zero
+		 * frames a reload passes through, or a part-used old tank - to a level
+		 * still under the old reference, which then HOLDS. So the trigger is a
+		 * rise, never a low reading on its own; a nearly dry tank only ever
+		 * falls and can never re-arm the reference down onto itself.
+		 *
+		 * Confirmed over CLASS_CONFIRM_FRAMES the same way the class latch is,
+		 * at the same 2 Hz gate, so a single spurious high frame - which drops
+		 * straight back to the old level - is not mistaken for a new tank.
+		 *
 		 * Where it is wrong, and it cannot be fixed from here: if the bridge
 		 * attaches to an aircraft that is ALREADY part-used, that partial tank
 		 * becomes "full" and the reported percentage reads high until the next
 		 * reset re-arms it. Load the model fresh and this never arises.
 		 */
 		if (fuel_oz > _fuel_full_oz) {
-			_fuel_full_oz = fuel_oz;
+			_fuel_full_oz  = fuel_oz;
+			_fuel_streak   = 0;
+			_fuel_cand_oz  = 0.0;
+
+		} else if (fuel_plausible && fuel_oz > _fuel_last_oz) {
+			// A step up that does not reach the reference: candidate new tank.
+			// Take the largest reading of the streak as the candidate, so a
+			// swap caught mid-rise still ends up at the true full mark.
+			if (fuel_oz > _fuel_cand_oz) {
+				_fuel_cand_oz = fuel_oz;
+			}
+
+			++_fuel_streak;
+
+		} else if (_fuel_streak > 0 && fuel_plausible
+			   && fuel_oz >= _fuel_cand_oz * FUEL_HOLD_FRACTION) {
+			// Still sitting at the candidate: the level is holding, not spiking.
+			++_fuel_streak;
+
+		} else {
+			_fuel_streak = 0;
+			_fuel_cand_oz = 0.0;
 		}
+
+		if (_fuel_streak >= CLASS_CONFIRM_FRAMES && _fuel_cand_oz > 0.0) {
+			_fuel_full_oz = _fuel_cand_oz;
+			_fuel_streak  = 0;
+			_fuel_cand_oz = 0.0;
+		}
+
+		_fuel_last_oz = fuel_oz;
 
 		remaining = (_fuel_full_oz > 0.0) ? clamp(fuel_oz / _fuel_full_oz, 0.0, 1.0) : 1.0;
 
@@ -610,6 +665,9 @@ void BatteryLink::adopt(Source s)
 	_cell_r_internal = CELL_R_DEFAULT;
 	_rls_init        = false;
 	_fuel_full_oz   = 0.0;
+	_fuel_last_oz   = 0.0;
+	_fuel_cand_oz   = 0.0;
+	_fuel_streak    = 0;
 	_discharged_mah = 0.0;
 	_last_voltage_v = 0.0;
 	_last_remaining = 1.0;

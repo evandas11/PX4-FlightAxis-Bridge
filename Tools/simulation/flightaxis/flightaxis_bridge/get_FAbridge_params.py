@@ -140,6 +140,23 @@ for opt in options:
              % (opt, ", ".join(sorted(OPTION_BITS))))
     bitmask |= OPTION_BITS[opt]
 
+# Rejected here rather than left to the bridge, which composes them silently and
+# wrongly. src/flightaxis_bridge.cpp:483-533 runs Rev4Servos FIRST - out[0..3]
+# and out[4..7] are swapped - and the demix then reads out[0..2], which by then
+# holds what the model wrote to rf4-6. Those are seldom swash servos; on a model
+# like models/heli.json they are unassigned and sit at UnmappedDefault, so the
+# demix computes roll=0, pitch=0, collective=UnmappedDefault and pins the
+# swashplate dead centre while the aircraft is armed - and the real swash values
+# have meanwhile been swapped away to rf4-6. There is no ordering of the two that
+# is useful, so there is nothing to configure: refuse the pair.
+if bitmask & OPTION_BITS['HeliDemix'] and bitmask & OPTION_BITS['Rev4Servos']:
+    fail("'HeliDemix' and 'Rev4Servos' cannot both be set: the bridge applies "
+         "Rev4Servos first, so the demix would consume the POST-swap slots "
+         "(what the model wrote to rf4-6) instead of the swash servos on rf0-2, "
+         "and emit a motionless swashplate while armed. Drop one of them - if "
+         "the RealFlight model needs the rf0-3/rf4-7 swap, reorder the rows or "
+         "the airframe's control allocation instead.")
+
 # Accumulated and written only once every row has validated, so a failure part
 # way through can never leave a truncated argv on stdout
 out = [str(bitmask), str(unmapped_default), str(len(channels))]
@@ -232,6 +249,13 @@ for key, pos in (('rf', 0), ('px4', 1)):
 mapped_rf = {row[0]: row for row in rows}
 
 if bitmask & OPTION_BITS['HeliDemix']:
+    # These are PRE-swap rf numbers, and that is correct only because HeliDemix
+    # with Rev4Servos was rejected above: with both set the demix would read the
+    # post-swap slots and this would validate the wrong three rows (rf0-2 while
+    # rf4-6 are what actually feed it). Left deliberately swap-UNaware rather
+    # than generalised, since the input that would need the generality can no
+    # longer reach here. If that rejection is ever relaxed, this must become
+    # swap-aware in the same commit.
     missing = [n for n in (0, 1, 2) if n not in mapped_rf]
     if missing:
         # The demix reads rf0-2 unconditionally; an unmapped one is seeded from

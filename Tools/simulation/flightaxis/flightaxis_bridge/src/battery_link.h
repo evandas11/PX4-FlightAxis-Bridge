@@ -203,10 +203,21 @@ private:
 	double _rls_p00{0.0}, _rls_p01{0.0}, _rls_p10{0.0}, _rls_p11{0.0};
 	double _rls_p_norm{0.0};
 
-	// fuel: largest reading seen, taken as "full tank". Re-armed upwards on
-	// refuel / aircraft reset rather than latched, so a mid-session reset
-	// does not leave the fraction pinned below 1.0 forever.
+	// fuel: largest reading seen, taken as "full tank". Re-armed in BOTH
+	// directions rather than latched. Upwards immediately, so a refuel or an
+	// aircraft reset does not leave the fraction pinned below 1.0 forever.
+	// Downwards on a sustained step UP to a level still under the reference,
+	// which is the signature of a smaller tank being loaded - adopt() cannot
+	// cover that, because swapping one IC model for another never changes the
+	// class. Without it a 10 oz tank behind a 40 oz one reads 25% when full.
 	double _fuel_full_oz{0.0};
+
+	// fuel: previous frame's raw reading, and the candidate maximum plus its
+	// agreement streak behind a downward re-arm. Same idiom as _class_streak:
+	// several consecutive frames must agree before the reference moves.
+	double _fuel_last_oz{0.0};
+	double _fuel_cand_oz{0.0};
+	int    _fuel_streak{0};
 
 	// Last values actually derived from a plausible sample. A single bad frame
 	// re-sends these rather than recomputing a bogus 0 V -> 0% -> EMERGENCY.
