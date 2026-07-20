@@ -781,3 +781,42 @@ void BatteryLink::send(double voltage_v, double current_a, double remaining,
 	(void)::sendto(_fd, buf, (size_t)len, MSG_DONTWAIT,
 		       (struct sockaddr *)&addr, sizeof(addr));
 }
+
+bool BatteryLink::requestPositionReset(double lat_deg, double lon_deg, double accuracy_m, uint64_t now_us)
+{
+	if (_fd < 0) {
+		return false;
+	}
+
+	mavlink_message_t msg;
+
+	// param2 is the age of the observation in seconds - zero, this is now.
+	// param3 is the claimed one-sigma accuracy: under a metre is what selects
+	// the hard reset over a fused update. param7 (altitude) must be NaN; the
+	// message does not carry height and EKF2 checks only lat/lon for finiteness.
+	mavlink_msg_command_long_pack_chan(
+		_sysid, BATTERY_COMPID, MAVLINK_COMM_1, &msg,
+		1,					// target_system: the autopilot
+		1,					// target_component
+		43003,					// MAV_CMD_EXTERNAL_POSITION_ESTIMATE
+		0,					// confirmation
+		(float)(now_us * 1e-6),			// param1: sender timestamp
+		0.0f,					// param2: processing delay
+		(float)accuracy_m,			// param3: accuracy, metres
+		0.0f,					// param4: unused
+		(float)lat_deg,				// param5
+		(float)lon_deg,				// param6
+		NAN);					// param7: altitude not supported
+
+	uint8_t buf[MAVLINK_MAX_PACKET_LEN];
+	const int len = mavlink_msg_to_send_buffer(buf, &msg);
+
+	struct sockaddr_in addr;
+	memset(&addr, 0, sizeof(addr));
+	addr.sin_family = AF_INET;
+	addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+	addr.sin_port = htons((uint16_t)(PORT_BASE + _instance));
+
+	return ::sendto(_fd, buf, (size_t)len, MSG_DONTWAIT,
+			(struct sockaddr *)&addr, sizeof(addr)) == len;
+}

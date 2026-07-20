@@ -136,6 +136,28 @@ public:
 
 	void close();
 
+	/*
+	 * Ask PX4's estimator to hard-reset its position to a known point.
+	 *
+	 * Sends MAV_CMD_EXTERNAL_POSITION_ESTIMATE (43003) over the same onboard
+	 * MAVLink link the battery uses. EKF2 handles it in EKF2.cpp and, when the
+	 * claimed accuracy is under a metre, takes the hard-reset branch in
+	 * Ekf::resetGlobalPosToExternalObservation() rather than fusing it - the
+	 * one its own comment describes as letting a caller "send hard resets at
+	 * any time".
+	 *
+	 * This exists for a RealFlight respawn. The simulator teleports the model
+	 * back to where it entered; the bridge reports that faithfully, but EKF2
+	 * has converged state from the flight just ended and treats the jump as a
+	 * lying GPS rather than a moved aircraft. There is no HIL message for "the
+	 * vehicle has been repositioned", so this is the nearest thing PX4 offers.
+	 *
+	 * EKF2 gates it on the vehicle dead-reckoning, or being on the ground and
+	 * not fusing GNSS, so acceptance is not guaranteed on the first attempt.
+	 * Returns whether the datagram was sent, NOT whether PX4 acted on it.
+	 */
+	bool requestPositionReset(double lat_deg, double lon_deg, double accuracy_m, uint64_t now_us);
+
 	bool active() const { return _fd >= 0; }
 
 private:

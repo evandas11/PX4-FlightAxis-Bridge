@@ -1239,6 +1239,31 @@ int main(int argc, char **argv)
 				cerr << "[flightaxis_bridge] aircraft teleported " << moved
 				     << " m (RealFlight reset) - re-anchoring" << endl;
 				vehicle.invalidatePositionOffset();
+
+				/*
+				 * Re-anchoring makes the bridge report the model at home again,
+				 * which is what a freshly started session would report. It does
+				 * not make PX4 believe it. EKF2 has converged state from the
+				 * flight just ended and reads a 100 m step as a lying GPS rather
+				 * than a moved aircraft, so it rejects the position and dead-
+				 * reckons - which is the pilot's "QGC keeps flying".
+				 *
+				 * There is no HIL message for "the vehicle has been
+				 * repositioned", but PX4 does accept an external position fix
+				 * with a stated accuracy, and treats a sub-metre one as grounds
+				 * for a hard reset rather than a fusion update. Ask for it. The
+				 * estimator gates the request on dead-reckoning or being on the
+				 * ground without GNSS fusion, so it may be refused on the first
+				 * attempt and accepted moments later once the divergence starts;
+				 * that is still a recovery in seconds rather than minutes.
+				 */
+				if (battery.active()) {
+					const bool sent = battery.requestPositionReset(
+								  home_lat, home_lon, 0.5, micros());
+					cerr << "[flightaxis_bridge]   position-reset request "
+					     << (sent ? "sent" : "FAILED to send")
+					     << " to PX4 (accepted only if EKF2 allows it)" << endl;
+				}
 			}
 		}
 
