@@ -51,13 +51,32 @@ esac
 # so existing saved parameters and logs stay where they were; additional
 # instances follow PX4's own multi-instance convention from
 # Tools/simulation/sitl_multiple_run.sh, which uses "$build_path/instance_$n".
-if [ "$instance" -eq 0 ]; then
+#
+# PX4_FLIGHTAXIS_ROOTFS overrides both, because every model otherwise shares one
+# working directory and so one parameters.bson, one dataman and one log tree.
+# The airframe itself is not the problem: rcS notices that the saved
+# SYS_AUTOSTART disagrees with the one derived from PX4_SIM_MODEL and runs
+# "param reset_all" before writing the new id. What that reset does not reach is
+# dataman, so the quadplane's VTOL mission survives into a plane run and is then
+# rejected by feasibility checking; and what it does reach is every parameter
+# outside its exclusion list, so whatever you had tuned is discarded each time
+# you switch models. Point this at a per-model directory to give each airframe
+# its own parameters, missions and logs, and neither happens.
+if [ -n "$PX4_FLIGHTAXIS_ROOTFS" ]; then
+	rootfs="$PX4_FLIGHTAXIS_ROOTFS"
+elif [ "$instance" -eq 0 ]; then
 	rootfs="$build_path/rootfs" # this is the working directory
 else
 	rootfs="$build_path/instance_$instance"
 fi
 
 mkdir -p "$rootfs"
+
+# Absolutise: the mkdir above runs in the invocation directory but the pushd
+# below runs after a cd into the bridge model directory, so a relative override
+# such as PX4_FLIGHTAXIS_ROOTFS=. would create one directory and then boot PX4
+# in a different one.
+rootfs="$(cd "$rootfs" && pwd)"
 
 # To disable user input: without this PX4 opens the interactive pxh> shell, so
 # the target cannot be driven from CI or a non-tty
