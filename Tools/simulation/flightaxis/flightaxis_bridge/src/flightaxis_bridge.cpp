@@ -842,6 +842,17 @@ int main(int argc, char **argv)
 	 * the floor keeps a stationary model, whose reachable distance is zero,
 	 * from tripping on numerical noise in its own coordinates.
 	 */
+	/*
+	 * How long to keep offering PX4 a position reset after a teleport, and how
+	 * often. Five seconds covers the gap between the respawn and EKF2 entering
+	 * the dead-reckoning state that lets it accept one; 200 ms is frequent
+	 * enough not to miss a brief window and far too slow to matter as traffic.
+	 */
+	const uint64_t RESET_RETRY_WINDOW_US   = 5000000;
+	const uint64_t RESET_RETRY_INTERVAL_US = 200000;
+	uint64_t reset_retry_until_us = 0;
+	uint64_t reset_retry_next_us  = 0;
+
 	const double TELEPORT_MARGIN  = 4.0;
 	const double TELEPORT_FLOOR_M = 10.0;
 
@@ -1257,13 +1268,35 @@ int main(int argc, char **argv)
 				 * attempt and accepted moments later once the divergence starts;
 				 * that is still a recovery in seconds rather than minutes.
 				 */
-				if (battery.active()) {
-					const bool sent = battery.requestPositionReset(
-								  home_lat, home_lon, 0.5, micros());
-					cerr << "[flightaxis_bridge]   position-reset request "
-					     << (sent ? "sent" : "FAILED to send")
-					     << " to PX4 (accepted only if EKF2 allows it)" << endl;
-				}
+				reset_retry_until_us = micros() + RESET_RETRY_WINDOW_US;
+				reset_retry_next_us = 0;
+			}
+		}
+
+		/*
+		 * The reset request is retried, not fired once.
+		 *
+		 * Measured: sent at the instant of the teleport it comes back
+		 * TEMPORARILY_REJECTED, because EKF2 only accepts an external position
+		 * while the vehicle is dead-reckoning, or on the ground and not fusing
+		 * GNSS (EKF2.cpp:534). At the moment of a respawn none of that holds -
+		 * GNSS fusion was active 100% of the time in the run that produced this
+		 * - and the condition only arrives a second or two later, once the
+		 * rejected position has pushed the estimator into dead reckoning. So
+		 * keep offering it for a few seconds and let EKF2 take it when it can.
+		 *
+		 * Being accepted more than once is harmless: every request carries the
+		 * same home coordinates, which is where the model is standing.
+		 */
+		if (reset_retry_until_us != 0) {
+			const uint64_t now_us = micros();
+
+			if (now_us >= reset_retry_until_us) {
+				reset_retry_until_us = 0;
+
+			} else if (now_us >= reset_retry_next_us && battery.active()) {
+				battery.requestPositionReset(home_lat, home_lon, 0.5, now_us);
+				reset_retry_next_us = now_us + RESET_RETRY_INTERVAL_US;
 			}
 		}
 
