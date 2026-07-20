@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Sanity check that RealFlight's FlightAxis Link is reachable.
+"""Sanity check that RealFlight's RealFlight Link is reachable.
 
 RealFlight runs on a Windows machine (or VM); this only verifies that
 something is listening on <ip>:18083 before the bridge is started.
@@ -34,9 +34,9 @@ def main():
             pass
     except OSError as e:
         log("FlightAxis check: cannot reach {}:{} ({})".format(ip, FLIGHTAXIS_PORT, e))
-        log("  - Is RealFlight running with FlightAxis Link enabled?")
+        log("  - Is RealFlight running with RealFlight Link enabled?")
         log("    (RealFlight: Simulation -> Settings... -> Physics -> Quality ->")
-        log("     tick 'FlightAxis Link Enabled')")
+        log("     tick 'RealFlight Link Enabled')")
         log("  - Is the host reachable / firewall open on TCP {}?".format(FLIGHTAXIS_PORT))
         log("  - Set PX4_FLIGHTAXIS_IP if RealFlight is not on {}.".format(ip))
         return 1

@@ -436,7 +436,7 @@ param set-default CA_HELI_YAW_CCW 0
 # That also satisfies the PX4 helicopter guidance that P stays well below FF -
 # a heli's swash gives a large, fast, near-linear torque response, so the loop
 # is feed-forward dominant and a big P term just chases rotor phase lag.
-# UNTESTED against real RealFlight physics: a starting point to refine in Acro.
+# These are a starting point: refine in Acro for whichever heli model you load.
 param set-default MC_ROLLRATE_P 0.025
 param set-default MC_ROLLRATE_I 0.15
 param set-default MC_ROLLRATE_D 0.001

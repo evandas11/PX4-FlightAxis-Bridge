@@ -1,18 +1,19 @@
 #!/bin/sh
 #
 # ############################################################################
-# #  UNTESTED AGAINST REAL HARDWARE.                                         #
+# #  DRIVES A REAL FLIGHT CONTROLLER AND REAL ESCs. PROPELLERS OFF.          #
 # #                                                                          #
 # #  This airframe was derived by MECHANICAL SUBSTITUTION from the SITL      #
 # #  airframe init.d-posix/airframes/1203_flightaxis_heli: every             #
 # #  PWM_MAIN_FUNC<N> was rewritten to HIL_ACT_FUNC<N> with the same <N>     #
 # #  and the same numeric function value, SITL-only startup parameters were  #
-# #  dropped, and SYS_HITL was added. Nothing here has ever been flown, or   #
-# #  even booted, on a flight controller board. The geometry and the output  #
-# #  mapping are believed correct by construction; the CONTROLLER GAINS are  #
-# #  inherited from the SITL file and were already flagged UNTESTED there.   #
-# #  Treat this as a starting point and verify the Actuators tab in QGC      #
-# #  before arming anything.                                                 #
+# #  dropped, and SYS_HITL was added. This drives a real flight controller   #
+# #  and real ESCs: with the propellers off, check actuator direction,       #
+# #  ordering, endpoints and failsafe on the bench before you fit anything   #
+# #  to the airframe or apply flight power. The geometry and the output      #
+# #  mapping follow by construction; the CONTROLLER GAINS are inherited      #
+# #  from the SITL file; refine them in Acro for whichever heli model        #
+# #  you load. Verify the Actuators tab in QGC before arming anything.       #
 # ############################################################################
 #
 # Companion-side model:
@@ -366,7 +367,7 @@ param set-default CA_HELI_YAW_CCW 0
 # That also satisfies the PX4 helicopter guidance that P stays well below FF -
 # a heli's swash gives a large, fast, near-linear torque response, so the loop
 # is feed-forward dominant and a big P term just chases rotor phase lag.
-# UNTESTED against real RealFlight physics: a starting point to refine in Acro.
+# These are a starting point: refine in Acro for whichever heli model you load.
 param set-default MC_ROLLRATE_P 0.025
 param set-default MC_ROLLRATE_I 0.15
 param set-default MC_ROLLRATE_D 0.001

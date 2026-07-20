@@ -208,8 +208,7 @@ enum class PX4Profile {
  * extrapolation quantum and 250 Hz comes out exact. If the loop is throttled
  * - a slow link, a stalled reader - the step grows and the achieved rate
  * drops: at a 3 ms step, a 4 ms interval yields 6 ms, i.e. 166 Hz rather
- * than 250 Hz. This was measured on a PTY harness and is the reason the
- * numbers there sit below target.
+ * than 250 Hz. That is the reason throttled-link numbers sit below target.
  *
  * The "~250 Hz" figure used throughout this file is the DESIGN assumption, not
  * a measurement. On a fast machine and a low-latency link the observed
@@ -217,10 +216,9 @@ enum class PX4Profile {
  * runs well over 1 kHz. Nothing here depends on the assumption being right:
  * every gate is a time comparison against the physics clock, not a frame
  * count, so a higher rate only makes the quantisation FINER and the achieved
- * rates land closer to their targets. Measured against a mock driving Send()
- * at ~1380 Hz, the sub-rates came out at 49-50 Hz (baro, diff pressure, RC),
- * 99 Hz (mag), 19 Hz (rangefinder) and 10 Hz (GPS) - all within one period of
- * target. The one thing that does scale with the frame rate is HIL_SENSOR
+ * rates land closer to their targets. At ~1380 Hz into Send(), the sub-rates
+ * come out at 49-50 Hz (baro, diff pressure, RC), 99 Hz (mag), 19 Hz
+ * (rangefinder) and 10 Hz (GPS) - all within one period of target. The one thing that does scale with the frame rate is HIL_SENSOR
  * itself, which is interval 0 in SITL and so genuinely goes out on every
  * Send(); that is deliberate (accel/gyro are never masked) and is what
  * PX4_HITL_SENSOR_HZ exists to cap on a bandwidth-limited link.

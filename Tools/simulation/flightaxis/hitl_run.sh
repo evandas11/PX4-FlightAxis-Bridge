@@ -79,6 +79,11 @@ cat <<'EOF'
    airframe that was not rebooted, or a separately powered ESC.
    Props off is the only thing that actually protects you.
 
+   This drives a real flight controller and real ESCs. On the
+   bench, props off, check actuator direction, ordering and
+   endpoints, and exercise failsafe, before you fit anything to
+   the airframe or apply flight power.
+
 EOF
 
 echo "HITL ARGS"

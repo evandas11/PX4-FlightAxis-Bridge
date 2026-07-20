@@ -7,10 +7,16 @@ For the SITL workflow see [`RUNNING.md`](RUNNING.md); for the design rationale s
 Assumes the bridge is installed into a PX4 v1.16 checkout (`./install.sh`) and that
 `~/PX4-Autopilot` is that checkout.
 
-> **Status.** The transport, framing, decimation, message profile and receive path are
-> verified without hardware (PTY loopback + a MAVLink-decoding harness). **Nothing in this
-> document has been run against a physical board.** §11 states exactly what is verified and
-> what is not — read it before trusting anything here.
+> **This path drives a real flight controller and real ESCs.** Remove every propeller before
+> connecting anything. Confirm each actuator output on the bench — direction, ordering,
+> endpoints and failsafe behaviour — before the airframe is assembled or flight power is
+> applied. §1 is the full safety discussion and §11 is the bring-up checklist; read both before
+> connecting a board.
+>
+> HITL differs from the SITL path in more than the transport: it uses a different PX4 module
+> (`mavlink` receiver, not `simulator_mavlink`), a different transport (serial/UDP, not TCP
+> loopback), a different output-parameter family (`HIL_ACT_FUNC<N>`, not `PWM_MAIN_FUNC<N>`) and
+> a different clock (the board's). Behaviour on one path does not carry over to the other.
 
 ---
 
@@ -62,9 +68,16 @@ Two further notes:
 | Transport | TCP server, port 4560+instance | USB CDC-ACM / UART / UDP |
 | Bridge role | TCP **server** (PX4 connects in) | **client** (bridge opens the link) |
 | Lockstep | available (`px4_sitl_default`) | **never** — time comes from the board's own clock |
-| Actuator source topic | `actuator_outputs` | `actuator_outputs_sim` |
+| Actuator source topic | `actuator_outputs_sim` | `actuator_outputs_sim` — *same on both* |
 | Output function params | `PWM_MAIN_FUNC<N>` | `HIL_ACT_FUNC<N>` |
 | Real PWM/DShot outputs | n/a | **not started at all** |
+
+The actuator topic is deliberately listed as identical because it is a natural place to expect a
+difference and there is none. `SimulatorMavlink.cpp:1005` subscribes to `actuator_outputs_sim`,
+and in SITL `pwm_out_sim -m sim` (`init.d-posix/rcS:279`) is what publishes it; `PWMSim.cpp:93`
+is the sole publisher on either path. What actually differs is the *parameter prefix* that names
+each channel's function — `PWMSim.hpp:47-51` selects `PWM_MAIN` or `HIL_ACT` at compile time —
+which is the row immediately below.
 
 **Lockstep is not involved.** Lockstep is compiled in via `ENABLE_LOCKSTEP_SCHEDULER` and only
 exists for SITL; a real board runs on its own hardware clock and cannot be stepped. This is why
@@ -99,9 +112,13 @@ if (hil_enabled && !_hil_enabled && _datarate > 5000) {      // mavlink_main.cpp
 ```
 
 1. **The `_datarate > 5000` gate.** If the MAVLink instance's datarate is at or below 5000 B/s,
-   PX4 silently never enables the HIL streams. `MAV_x_RATE` defaults to **1200 B/s**. This is
-   the single most common reason a HITL link looks alive and never produces actuator controls.
-   §6.2 sets it; §9 has the symptom.
+   PX4 silently never enables the HIL streams, with no error message. Which instance you use
+   decides whether that bites: `module.yaml:98` gives `MAV_x_RATE` a default of `[1200, 0, 0]`,
+   so **only instance 0 defaults to 1200 B/s** — squarely under the gate. Instances 1 and 2
+   default to `0`, meaning baud/20, which clears the gate at any baud above 100000 (at 921600
+   it is 46080 B/s) and *fails* it at 100000 baud or below. So the classic silent failure is an
+   unconfigured `MAV_0_RATE`, or a slow UART on any instance. §6.2 sets it explicitly rather
+   than relying on either default; §9 has the symptom.
 2. `HIL_STATE_QUATERNION` is only streamed **out** when `SYS_HITL == 2` (SIH), as ground truth.
 
 ### Why the bridge must not send `HIL_STATE_QUATERNION` in HITL
@@ -132,9 +149,9 @@ prints a loud warning when you do.
 ## 3. Bandwidth — why 250 Hz
 
 On-wire cost is payload + 12 bytes of MAVLink v2 framing (10 byte header + 2 byte CRC).
-Payloads are trailing-zero truncated. Measured on the PTY harness:
+Payloads are trailing-zero truncated:
 
-| Message | Measured on wire |
+| Message | On wire |
 |---|---|
 | `HIL_SENSOR` | **77 B** |
 | `HIL_GPS` | 52 B |
@@ -155,7 +172,7 @@ about 1000 Hz:
 That is free over TCP loopback and **exceeds even 921600 baud (92.2 kB/s)**. Serial HITL must
 decimate.
 
-**HITL profile at 250 Hz** (no `HIL_STATE_QUATERNION`, no `RAW_RPM`):
+**HITL profile at 250 Hz** (no `HIL_STATE_QUATERNION`, no `RAW_RPM`, no `RC_CHANNELS` — see §7):
 
 ```
 250×77 + 5×52 + 20×55 + 1×25  =  19250 + 260 + 1100 + 25  ≈  20.6 kB/s  =  206 kbit/s
@@ -178,7 +195,7 @@ fits comfortably from 460800 up. Decimation had to be added here at all because 
 simulator bridges run over loopback, where bytes are free and no decimation is needed; a
 serial link to a board is the case they do not cover.
 
-### Rate quantisation (read before comparing measured rates)
+### Rate quantisation (read before comparing observed rates)
 
 Each rate gate is `if (now - last >= interval) { last = now; ... }` against the **physics**
 clock. The achieved period is therefore the requested period **rounded up to however far the
@@ -187,7 +204,8 @@ physics clock moves per `Send()` call**.
 When the main loop free-runs (several thousand iterations/s against RealFlight) that step is the
 1 ms extrapolation quantum, and 250 Hz comes out exact. If the loop is throttled — a slow link,
 a reader that isn't draining — the step grows and the rate drops: at a 3 ms step, a 4 ms
-interval yields 6 ms, i.e. 166 Hz. This is what the PTY measurements in §11 show.
+interval yields 6 ms, i.e. 166 Hz. Expect the achieved rate to sit at or below the requested
+one, and to track loop granularity rather than the gate being misconfigured.
 
 The error is always in the safe direction (never faster than requested, so never over budget),
 which is why the simple form is kept instead of accumulating `last += interval` — the latter
@@ -282,9 +300,13 @@ console. **`SYS_HITL` is `@reboot_required` — reboot after setting it.**
 | `SYS_HITL` | `1` | HITL on. `0` off, `2` = SIH (onboard sim), `-1` = "external HITL" flag only (`lib/systemlib/system_params.c:84`) |
 | `CBRK_SUPPLY_CHK` | `894281` | allow arming with no battery — **see §1** |
 | `COM_RC_IN_MODE` | `1` or `4` | no real RC transmitter attached |
-| `EKF2_GPS_DELAY` | `0` | RealFlight free-runs; GPS samples arrive fresh (same as the SITL airframes) |
 | `EKF2_MULTI_IMU` | `1` | The bridge sends `HIL_SENSOR` with `id = 0` only, so only IMU instance 0 is ever supplied; leaving this higher runs EKF instances on dead sensors (same as the SITL airframes) |
 | `SDLOG_MODE` | `4` | Optional, but it makes a log span several arm/disarm cycles instead of closing at the first disarm. `@reboot_required` |
+
+**Leave `EKF2_GPS_DELAY` at its firmware default.** The SITL airframes force it to `0`, but that
+value is SITL-specific and wrong on a board — HITL `HIL_GPS` arrives over a real link with real
+latency, and zeroing the delay mis-times EKF fusion. The shipped `.hil` airframes deliberately do
+not set it. See §6.3.
 
 ### 6.2 MAVLink instance
 
@@ -322,10 +344,12 @@ prefix `HIL_ACT`, 16 channels, visible only when `SYS_HITL>0`). Each `.hil` file
 
 > ### ⚠ Two things to know before you use these
 >
-> **1. They are untested against real hardware.** They were derived by mechanical substitution
-> from the four SITL airframes, which *are* flown and verified. The mapping is exact by
-> construction; the **controller gains are not verified on a board** and should be treated as a
-> starting point, particularly the helicopter's, which are flagged UNTESTED in the SITL file too.
+> **1. Confirm the mapping and the gains on your own bench.** These files were derived by
+> mechanical substitution from the four SITL airframes, so the channel mapping is exact by
+> construction — but a board will happily drive whatever you have actually wired to it. With
+> the propellers off, step each output and confirm it moves the surface or motor you expect, in
+> the direction you expect, to the endpoints you expect. Treat the controller gains as a
+> starting point to be tuned on your airframe, particularly the helicopter's.
 >
 > **2. Your board must be built with `pwm_out_sim` enabled, or the airframe will not exist.**
 > These live inside the `if(CONFIG_MODULES_SIMULATION_PWM_OUT_SIM)` block of
@@ -357,7 +381,8 @@ changes no channel numbers anywhere. If your RealFlight model uses a different o
 `HIL_ACT_FUNC<N>` and leave the JSON as an identity map.
 
 **What was dropped from the SITL airframes**, and why — these are SITL-only and wrong or
-meaningless on a board:
+meaningless on a board. A line-by-line diff of each `.hil` against its SITL twin gives **seven**
+dropped settings, identical in all four pairs:
 
 - `EKF2_GPS_DELAY 0` — existed only to countermand `px4-rc.mavlinksim`, which runs after the
   airframe in SITL. No such script exists on a board, and forcing 0 is actively wrong there: HITL
@@ -367,6 +392,18 @@ meaningless on a board:
   file on a power-cut with a real SD card.
 - `SIM_BAT_ENABLE` — a SITL-only parameter that does not exist in a board build. See §6.4 for why
   HITL cannot have real battery telemetry at all.
+- `COM_FLTT_LOW_ACT 0` — SITL disables the low-flight-time action. Dropping it restores the
+  firmware default.
+- `COM_FAIL_ACT_T 0` — SITL zeroes the failsafe action delay. Dropping it restores the firmware
+  default.
+- `BAT1_SOURCE 1` — declares the battery as externally provided, which suits SITL's simulated
+  pack. Dropping it restores the firmware default.
+
+The last three are failsafe-adjacent, and dropping them is the **safe** direction: the board falls
+back to the real firmware failsafe defaults instead of inheriting SITL's deliberately-disabled
+ones. Keeping them would have carried a simulator's relaxed failsafe configuration onto hardware.
+They are listed explicitly because this list is the one a reader auditing failsafe behaviour will
+read as exhaustive.
 
 The per-vehicle tables below are kept as **reference for debugging a mis-wired model** — they are
 no longer instructions.
@@ -503,7 +540,15 @@ for.
 | `PX4_FLIGHTAXIS_IP` | `127.0.0.1` | RealFlight host |
 
 Selecting `serial` or `udp` also selects the HITL message profile (no `HIL_STATE_QUATERNION`,
-no `RAW_RPM`, `HIL_GPS` at 5 Hz, mag/baro/airspeed at 50 Hz, plus `HEARTBEAT`).
+no `RAW_RPM`, no `RC_CHANNELS`, `HIL_GPS` at 5 Hz, mag/baro/airspeed at 50 Hz, plus `HEARTBEAT`).
+
+**`RC_CHANNELS` is disabled too** (`px4_communicator.cpp:130`), so RealFlight's transmitter sticks
+are not forwarded and a HITL board gets no RC passthrough. Two reasons, and neither is bandwidth:
+`mavlink_receiver.cpp` has no `RC_CHANNELS` handler, so the stream would be discarded anyway; and
+on a real board the pilot's own receiver is the authoritative RC path and must not be
+second-guessed from the simulator. This is coherent with the `COM_RC_IN_MODE 4` of §6.1 — RC input
+ignored entirely. Fly from the GCS, or from a real receiver bound to the board with
+`COM_RC_IN_MODE` set to match.
 
 ---
 
@@ -511,8 +556,9 @@ no `RAW_RPM`, `HIL_GPS` at 5 Hz, mag/baro/airspeed at 50 Hz, plus `HEARTBEAT`).
 
 1. Props off. Confirm visually.
 2. Set the §6 parameters, **reboot the board**.
-3. Start RealFlight, load the matching model, enable FlightAxis Link.
-4. Close QGroundControl if it holds the port you are about to use.
+3. Start RealFlight, load the matching model, enable RealFlight Link.
+4. Close QGroundControl if it holds the port you are about to use. It may stay open on a
+   *different* port — see §11, "Sharing the board with QGroundControl".
 5. Run `hitl_run.sh`.
 6. Watch for `first HIL_ACTUATOR_CONTROLS received, enabling channels`. If it never appears,
    go to §9.
@@ -525,9 +571,11 @@ no `RAW_RPM`, `HIL_GPS` at 5 Hz, mag/baro/airspeed at 50 Hz, plus `HEARTBEAT`).
 
 **No `HIL_ACTUATOR_CONTROLS` ever arrives.** In order of likelihood:
 
-1. `MAV_x_RATE` ≤ 5000 on a hardware UART. This is the big one — `set_hil_enabled()` refuses
-   to configure the streams and says nothing (`mavlink_main.cpp:671`). Set it to `80000`, or
-   use USB where PX4 forces 100000 B/s.
+1. `MAV_x_RATE` ≤ 5000 on a hardware UART — `set_hil_enabled()` refuses to configure the
+   streams and says nothing (`mavlink_main.cpp:671`). Two ways to land there: instance 0, whose
+   default is 1200 B/s, or any instance left at `0` (baud/20) on a port running at 100000 baud
+   or slower. The recommended setup in §6.2 — `MAV_1_RATE` set explicitly on a 921600 UART —
+   avoids both. Set it to `80000`, or use USB where PX4 forces 100000 B/s.
 2. `SYS_HITL` set but the board not rebooted. It is `@reboot_required`.
 3. Firmware built without `CONFIG_MODULES_SIMULATION_PWM_OUT_SIM` (§5).
 4. Wrong port, or QGC/MAVProxy holding it — the runner checks this with `fuser`.
@@ -536,8 +584,10 @@ no `RAW_RPM`, `HIL_GPS` at 5 Hz, mag/baro/airspeed at 50 Hz, plus `HEARTBEAT`).
 **`cannot open /dev/ttyACM0: Permission denied`** — add yourself to `dialout`:
 `sudo usermod -aG dialout $USER`, then log out and back in.
 
-**Estimator will not converge.** Confirm `HIL_GPS` is arriving (5 Hz) and that `EKF2_GPS_DELAY`
-is `0`. Confirm you have **not** set `PX4_HITL_STATE_QUAT_BYPASS`, which fights EKF2 (§2).
+**Estimator will not converge.** Confirm `HIL_GPS` is arriving (5 Hz). Confirm `EKF2_GPS_DELAY`
+is at its firmware default and has **not** been forced to `0` — that value belongs to the SITL
+airframes and mis-times fusion on a board, where the samples cross a real link with real latency
+(§6.3). Confirm you have **not** set `PX4_HITL_STATE_QUAT_BYPASS`, which fights EKF2 (§2).
 
 **Garbage / `BAD_DATA` on the link.** Baud mismatch between `PX4_HITL_SERIAL_BAUD` and
 `SER_TELx_BAUD`, or flow control expected by the adapter but absent on a 3-wire cable.
@@ -558,77 +608,85 @@ exactly as before. On the board, set `SYS_HITL 0`, clear `CBRK_SUPPLY_CHK`, rest
 
 ---
 
-## 11. What is verified and what is not
+## 11. Bench bring-up checklist
 
-**Honest summary: no physical flight controller was involved at any point.**
+**Props off for all of it.** This section is what to confirm on your own bench, in order, before
+the airframe is assembled and long before flight power is applied. A board will drive whatever
+is wired to it; nothing in this document can tell you what that is.
 
-### Verified without hardware
+### Link and stream
 
-- **SITL not regressed.** Full stack (mock RealFlight + bridge + `px4`) for 50 s on an isolated
-  loopback address: EKF2 converged (`home set`, `Ready for takeoff!`), both processes alive at
-  teardown, bridge steady at 250.0 FPS, channel map exactly `[0,0,0,0, 0.5×8]` for `quad`. The
-  three `simulator_mavlink poll timeout` messages all occur before readiness and are the
-  pre-existing 5 s `sleep()` in `PX4Communicator::Init()`, not a regression.
-- **SITL transport path unchanged by construction.** In the SITL profile the `HIL_SENSOR` and
-  `RAW_RPM` intervals are `0` (send every call), `HIL_GPS`/`HIL_STATE_QUATERNION`/
-  `DISTANCE_SENSOR` keep their original constants, the heartbeat is disabled, and the send path
-  resolves to the same `send()` on the same accepted socket.
-  **One SITL behaviour does change:** the `fields_updated` sub-rates now also apply in SITL
-  (mag 100 Hz, baro/differential-pressure 50 Hz) rather than every message carrying `0x1FFF`.
-  That was a deliberate, separately-motivated change (it keeps ulogs from being inflated by
-  redundant sensor republication) and it isn't required by HITL — HITL sets its own values in
-  `Configure()`. It is called out here because it is the one place the SITL wire content is not
-  byte-identical to before.
-- **Serial transport over a PTY pair.** termios accepted at 921600; framing decodes cleanly
-  with **zero** undecodable bytes; **zero** `HIL_SENSOR` timestamp regressions; injected
-  `HIL_ACTUATOR_CONTROLS` at 200 Hz received and applied (`first HIL_ACTUATOR_CONTROLS
-  received`).
-- **`hitl_run.sh` end to end**, including the `fuser` port-in-use guard (verified by tripping
-  it deliberately), the missing-device and permission guards, and the non-USB advisory.
-- **HITL message profile**, 18 s free-running run: `HIL_SENSOR` **224.8 Hz**,
-  `DISTANCE_SENSOR` 19.5 Hz (target 20), `HIL_GPS` 4.9 Hz (target 5), `HEARTBEAT` 0.9 Hz
-  (target 1). `HIL_STATE_QUATERNION` and `RAW_RPM` confirmed **absent**.
-- **Aggregate bandwidth 17.7 kB/s** = 177 kbit/s, i.e. **19 % of 921600 baud** — consistent
-  with the §3 budget and leaving ample headroom.
-- **Message sizes** measured on the wire: 77 / 52 / 55 / 25 B (§3).
-- **Everything builds** warning-free at `-O2 -Wall -Wextra`; all pre-existing make targets
-  still present.
+- The board enters HIL and streams `HIL_ACTUATOR_CONTROLS` — the runner prints
+  `first HIL_ACTUATOR_CONTROLS received, enabling channels`. If it does not, work §9 in order.
+- The `_datarate > 5000` gate is cleared on your transport (§2). USB forces 100000 B/s; a
+  hardware UART needs `MAV_x_RATE` set explicitly.
+- Sustained throughput at your chosen baud. Watch the bridge's `loop=` figure and the achieved
+  `HIL_SENSOR` rate; if the rate sits well below the requested one, the link is backpressuring
+  (§3).
+- Whether 250 Hz is adequate for EKF2 on your board, and whether its CPU keeps up. Raise or
+  lower `PX4_HITL_SENSOR_HZ` against the §3 bandwidth budget.
+- UDP transport, if you are using it rather than serial or USB.
 
-`HIL_SENSOR` lands at 224.8 Hz rather than exactly 250 — the quantisation effect in §3, always
-toward *fewer* messages, so the bandwidth budget is never exceeded. An earlier run of the same
-binary measured only 166 Hz because the harness held the PTY slave open, throttling the bridge
-loop to 250 iterations/s (3 ms physics step, so a 4 ms interval rounds to 6 ms). Releasing the
-slave let the loop free-run at ~12000 iterations/s and the rate rose to 224.8 Hz, which
-confirms the mechanism: **achieved rate is a function of loop granularity, not of the gate
-being wrong.**
+### Outputs — the part that can hurt you
 
-### NOT verified — requires a board
+Step each output individually, with the propellers off and the airframe unassembled, and
+confirm:
 
-- That a real board enters HIL and streams `HIL_ACTUATOR_CONTROLS` at all.
-- The `_datarate > 5000` gate behaviour in practice, and whether USB really needs no tuning.
-- Sustained throughput at a real 921600 baud. **A PTY has no baud rate** — it accepts
-  `cfsetspeed` and ignores it. Real UART timing, buffer depth and overruns are untested.
-- Whether 250 Hz is genuinely adequate for a real EKF2 on real hardware, or whether the board's
-  CPU keeps up with it.
-- The four shipped `.hil` airframes in §6.3, in three separate respects:
-  - The `HIL_ACT_FUNC<N>` mappings. Derived by substitution from the working SITL
-    `PWM_MAIN_FUNC<N>` maps and the stock `.hil` airframes; the reasoning is sound and the
-    normalisation is provably identical (`PWMSim::updateOutputs` is the single shared function),
-    and the substitution was mechanically diffed one-for-one — but no channel has been confirmed
-    to move the right surface on a real board.
-  - **All controller gains.** They are dimensional and inherited from the SITL files, which took
-    several of them verbatim from a stock reference aircraft. The helicopter's rate gains were
-    already flagged UNTESTED upstream in the SITL file.
-  - That QGC's Actuators tab renders the geometry as intended once `SYS_HITL>0`.
+- **Ordering.** `HIL_ACT_FUNC<N>` moves the surface or motor you expect on RealFlight channel N
+  (§6.3). Check every channel, not a sample.
+- **Direction.** Each surface deflects the correct way and each motor spins the correct way.
+- **Endpoints.** Full-scale commands do not drive a surface into a mechanical stop.
+- **Failsafe behaviour.** Confirm what the outputs do when the link drops, when the vehicle
+  disarms, and on a board reset.
+- QGC's **Actuators** tab renders the geometry as intended once `SYS_HITL>0`.
+
+### Parameters and preflight
+
+- The §1 interlocks on your own board rather than on trust: with `SYS_HITL > 0` set and the
+  board rebooted, watch the servo rail and confirm it stays silent when armed. Props stay off
+  regardless of the result.
 - Whether `CBRK_SUPPLY_CHK` and `COM_RC_IN_MODE 4` interact with any board-specific preflight
   check.
-- UDP transport end to end — implemented and compiled, never run against a networked FC.
-- Every safety claim in §1 as *observed behaviour*. The code paths were read and cited; the
-  servo rail was never watched.
+- **Controller gains.** They are dimensional and inherited from the SITL airframes. Tune them on
+  your vehicle, starting conservatively; the helicopter's rate gains in particular should not be
+  assumed to suit your model.
 
-### Known gap
+### Effect on the SITL path
 
-The bridge occupies the board's MAVLink link exclusively, so QGroundControl cannot share it.
-For a board with only one convenient port you must choose between the bridge and a GCS. A
-MAVLink router/forwarder in the bridge would fix this and is the obvious next feature; it is
-not implemented.
+Selecting a HITL transport changes the message profile only. In the SITL profile the
+`HIL_SENSOR` and `RAW_RPM` intervals are `0` (send every call), `HIL_GPS` /
+`HIL_STATE_QUATERNION` / `DISTANCE_SENSOR` keep their original constants, `RC_CHANNELS` is
+enabled, the heartbeat is disabled, and the send path resolves to the same `send()` on the same
+accepted socket. Of these, `HIL_STATE_QUATERNION`, `RAW_RPM` and `RC_CHANNELS` are the three the
+HITL profile switches off.
+
+**One SITL behaviour does differ from stock:** the `fields_updated` sub-rates apply in SITL too
+(mag 100 Hz, baro and differential pressure 50 Hz) rather than every message carrying `0x1FFF`.
+That is a deliberate, separately-motivated change — it keeps logs from being inflated by
+redundant sensor republication — and it is not required by HITL, which sets its own values in
+`Configure()`. It is called out because it is the one place the SITL wire content is not
+byte-identical to stock.
+
+### Sharing the board with QGroundControl
+
+**Run the bridge and a GCS on two different MAVLink instances.** This is the recommended setup
+and it needs no change to the bridge: bridge on TELEM2, QGroundControl on USB. Step 7 of §8
+already assumes it.
+
+What makes it work is that HIL is a *per-instance* property. `set_hil_enabled()` is called from
+`Mavlink::handleStatus()` (`mavlink_main.cpp:2542`) on every instance independently, so the
+instance carrying the bridge enters HIL and adds its `HIL_ACTUATOR_CONTROLS` stream while another
+instance goes on serving normal telemetry to a GCS. PX4 v1.16 gives you three `MAV_x_CONFIG`
+instances plus the auto-started USB instance (`init.d/rcS:498-505`). Any instance that clears the
+`_datarate > 5000` gate of §2 can be the HIL one; the others are unaffected.
+
+The genuine constraint is narrower than "the link cannot be shared": **two `mavlink` instances
+cannot bind the same device.** `mavlink_main.cpp:2196-2200` rejects the second one outright. So
+the real limitation is a board with only one usable port — there you must choose between the
+bridge and a GCS. On any board with USB plus a TELEM port, which is essentially all of them, there
+is nothing to work around.
+
+**What is not a workaround:** `MAV_x_FORWARD`. It forwards only messages that are "either
+broadcast or the target is not the autopilot" (`module.yaml:100-108`). It does not duplicate an
+instance's telemetry streams, so it will not give QGroundControl a view of a HIL session on
+another link. §6.2 leaves `MAV_1_FORWARD` at `0` for that reason.

@@ -25,7 +25,9 @@ PX4 binary, so nothing in PX4 becomes a derivative of it.
 Written for this project, with no upstream counterpart: `hitl_run.sh` (PX4 ships no
 HITL runner), the model JSONs and the channel-map schema they define, `FA_check.py`
 and `get_FAbridge_params.py`, the installer and its supporting scripts, and the
-documentation.
+documentation. `battery_link.{h,cpp}` is original too, apart from the internal-resistance
+estimator noted in the table; neither ArduPilot nor PX4-FlightGear-Bridge has a
+battery link of any kind.
 
 Reworked substantially inside files that started from an upstream source — see the
 provenance table for what each began as: the transports, per-message decimation,
@@ -76,9 +78,10 @@ instead, which is where you should look for those two.
 | File | Origin | Original licence |
 |---|---|---|
 | `fa_communicator.{h,cpp}` | Ported from ArduPilot `SIM_FlightAxis.{h,cpp}` — socket/creator-thread design, SOAP request bodies, reply parser key table and scan, startup and reconnect logic | GPLv3, © ArduPilot Dev Team |
-| `vehicle_state.{h,cpp}` | Frame conversions, ground-accelerometer override, pitot derivation and rangefinder ported from `SIM_FlightAxis.cpp`; sensor-message synthesis follows PX4-FlightGear-Bridge `vehicle_state.cpp` | GPLv3, © ArduPilot Dev Team; BSD-3, © 2020 ThunderFly s.r.o. |
+| `vehicle_state.{h,cpp}` | Frame conversions, ground-accelerometer override, pitot derivation and rangefinder ported from `SIM_FlightAxis.cpp`; sensor-message synthesis follows PX4-FlightGear-Bridge `vehicle_state.cpp`. The single-channel RPM selection (prop first, main-rotor fallback, else zero) is **original** — upstream fills two channels unconditionally (`rpm[0] = m_heliMainRotorRPM; rpm[1] = m_propRPM; motor_mask = 3`) and has no fallback | GPLv3, © ArduPilot Dev Team; BSD-3, © 2020 ThunderFly s.r.o. |
 | `flightaxis_bridge.cpp` | Three-branch physics-time handling (restart / duplicate-frame extrapolation / glitch compensation), `Rev4Servos` and `HeliDemix` ported from `SIM_FlightAxis.cpp` `update()` and `exchange_data()`; overall structure follows `flightgear_bridge.cpp` | GPLv3, © ArduPilot Dev Team; BSD-3, © 2020 ThunderFly s.r.o. |
 | `px4_communicator.{h,cpp}` | **Adapted** from PX4-FlightGear-Bridge. Added: per-message decimation, `fields_updated` sub-rating, a non-blocking receive drain, the serial and UDP transports and HITL message profile, and the dead-link policy | BSD-3, © 2020 ThunderFly s.r.o. |
+| `battery_link.{h,cpp}` | Original for this project — the separate UDP link, the propulsion-class detection and the fuel/pack accounting have no upstream counterpart. `updateInternalResistance()` is **ported** from PX4's `Battery::updateInternalResistanceEstimation` (`src/lib/battery/battery.cpp`), same recursive-least-squares formulation and constants | BSD-3, © 2019–2021 PX4 Development Team |
 | `geo_mag_declination.{cpp,h}` | **Verbatim** from PX4-FlightGear-Bridge (which itself carries it verbatim from the MAV GEO Library) | BSD-3, © 2014 MAV GEO Library (MAVGEO) |
 
 `Tools/simulation/flightaxis/flightaxis_bridge/cmake/FindMAVLink.cmake` — verbatim

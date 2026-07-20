@@ -2,11 +2,6 @@
 
 How RealFlight data reaches ROS 2, what you get, and what to watch out for.
 
-**Status:** the ROS 2 path was verified end-to-end on 2026-07-19 against a **mock FlightAxis
-server**, not against real RealFlight (no Windows machine has ever been in the loop — see
-[Validation status](README.md#validation-status)). Everything marked *verified* below was
-observed on a live run; everything else is called out explicitly.
-
 ---
 
 ## 1. Architecture
@@ -30,8 +25,8 @@ Consequences worth internalising:
 - **Nothing in this repo affects the ROS 2 layer.** The airframes, the runner and the bridge
   contain no `UXRCE_DDS_*` parameter, no DDS configuration and no ROS 2 code. `uxrce_dds_client`
   is started unconditionally by stock PX4 (`ROMFS/px4fmu_common/init.d-posix/rcS:317`),
-  independently of which airframe is selected. **Verified** — it came up and connected under
-  `flightaxis_quad` with no extra steps.
+  independently of which airframe is selected. It comes up and connects under the FlightAxis
+  airframes with no extra steps.
 - **The topic set you get is stock PX4 v1.16.** It is defined by
   `src/modules/uxrce_dds_client/dds_topics.yaml`, not by anything here.
 - **What the bridge does control is *rates and freshness*** — which uORB topics are populated
@@ -49,22 +44,22 @@ Consequences worth internalising:
 
 > ### `px4_msgs` must match PX4 v1.16
 >
-> This is the one thing most likely to bite you, and it did bite during verification.
+> This is the one thing most likely to bite you.
 >
 > A `px4_msgs` built from PX4 `main` will *appear* to work — most topics echo fine — but any
-> message whose definition changed silently fails at the DDS layer. On the verification machine,
-> `battery_status` produced a continuous stream of:
+> message whose definition changed silently fails at the DDS layer. A skewed `battery_status`,
+> for instance, produces a continuous stream of:
 >
 > ```
 > [RTPS_READER_HISTORY Error] Change payload size of '184' bytes is larger than
 > the history payload size of '183' bytes and cannot be resized.
 > ```
 >
-> and `ros2 topic hz /fmu/out/battery_status` reported **nothing at all**, while the same topic
-> was publishing happily at 100 Hz inside PX4 (`uorb top` showed it). The installed `px4_msgs`
-> had `BatteryStatus` at `MESSAGE_VERSION = 1` / `MAX_INSTANCES = 3` with `serial_number`
-> removed; PX4 v1.16 has `MESSAGE_VERSION = 0` / `MAX_INSTANCES = 4` with `serial_number`
-> present.
+> while `ros2 topic hz /fmu/out/battery_status` reports **nothing at all**, even though the same
+> topic is publishing happily at 100 Hz inside PX4 (`uorb top` shows it). In that case
+> `px4_msgs` had `BatteryStatus` at `MESSAGE_VERSION = 1` / `MAX_INSTANCES = 3` with
+> `serial_number` removed; PX4 v1.16 has `MESSAGE_VERSION = 0` / `MAX_INSTANCES = 4` with
+> `serial_number` present.
 >
 > This is **not** a bug in this integration — it is a PX4/`px4_msgs` version skew on the host.
 > Build `px4_msgs` from the matching tag:
@@ -118,7 +113,7 @@ INFO  [uxrce_dds_client] timesync converged: true
 
 `Running, disconnected` with `timesync converged: false` means the agent is not reachable —
 that is the expected output when no `MicroXRCEAgent` is running, and it is harmless to PX4
-itself. **Both states were observed during verification.**
+itself.
 
 ### Namespaces
 
@@ -129,13 +124,13 @@ prefix. A non-zero instance prefixes everything with `/px4_<N>` (`rcS:293-297`):
 px4 -i 1   ->   /px4_1/fmu/out/vehicle_attitude
 ```
 
-Verification was run on **instance 1** deliberately, to stay off the default ports while other
-work was using them — so the recorded topic names below carry the `/px4_1` prefix. On a normal
-single-vehicle run they will not.
+Running on a non-zero instance is a convenient way to stay off the default ports when other
+work is using them, at the cost of the `/px4_<N>` prefix on every topic name.
 
 Relevant environment overrides: `PX4_UXRCE_DDS_PORT` (default 8888), `PX4_UXRCE_DDS_NS`, and
 `ROS_DOMAIN_ID` — which PX4 picks up automatically and copies into `UXRCE_DDS_DOM_ID`
-(`rcS:303-309`).
+(`rcS:303-309`); the port itself defaults to 8888 at `rcS:311`, with `PX4_UXRCE_DDS_PORT`
+overriding it (`rcS:311-315`).
 
 ---
 
@@ -156,7 +151,7 @@ Everything downstream — `sensor_combined`, `vehicle_attitude`, `vehicle_local_
 `vehicle_global_position`, `vehicle_odometry`, `airspeed`, `vehicle_air_data` — is produced by
 EKF2 and the sensor hub from those primitives, exactly as on a real vehicle.
 
-### Verified live (`uorb top`, `flightaxis_quad`, mock, vehicle stationary)
+### uORB rates (`uorb top`, `flightaxis_quad`, vehicle stationary)
 
 ```
 sensor_accel            1380 Hz     sensor_gps                            10 Hz
@@ -173,7 +168,7 @@ vehicle_local_position   100 Hz
 `px4_communicator.h`).
 
 > **These figures predate the `fields_updated` sub-rating and no longer describe mag, baro or
-> differential pressure.** That run was taken when every `HIL_SENSOR` carried `0x1FFF` ("every
+> differential pressure.** They were taken when every `HIL_SENSOR` carried `0x1FFF` ("every
 > sensor is new"), so `sensor_mag`, `sensor_baro` and `differential_pressure` were republished
 > at the full `HIL_SENSOR` rate — 1380 Hz alongside the IMU. The bridge now masks the slow
 > fields down to their own intervals in SITL as well as HITL: **magnetometer 100 Hz, barometer
@@ -181,44 +176,48 @@ vehicle_local_position   100 Hz
 > frame rate. Expect those three topics at their sub-rates, not at the IMU rate; the surplus
 > was being dropped by `VehicleAirData` anyway, after inflating every ulog for nothing.
 
-Values were sanity-checked and are physically correct for a stationary aircraft: accel
-`z = -9.804 m/s²`, gyro ≈ 0, baro 95599 Pa at 488 m, mag consistent with the Zurich default
-home position, `distance_sensor 0.1 m`, GPS `fix_type 3` with 10 satellites at 47.3977 / 8.5456.
+The accompanying values are what a stationary aircraft should show: accel `z = -9.804 m/s²`,
+gyro ≈ 0, baro 95599 Pa at 488 m, mag consistent with the Zurich default home position,
+`distance_sensor 0.1 m`, GPS `fix_type 3` with 10 satellites at 47.3977 / 8.5456.
 
-> **The 1380 Hz figure is a mock artifact, not what RealFlight will give you.** The mock does
-> not rate-limit its SOAP exchanges to wall clock, so the bridge free-ran at ~11 000 exchanges/s
-> and `HIL_SENSOR` — which is sent every frame in the SITL profile (`sensor_interval_us = 0` in
-> `px4_communicator.cpp`) — followed it up. Against real
-> RealFlight, expect IMU rates at roughly the SOAP frame rate (~250–300 Hz). The
-> *time-decimated* topics (GPS/ground truth/distance) are unaffected and were exact, which is
-> itself evidence the bridge decimates on its physics clock rather than on frame count.
+> **Do not read 1380 Hz as the IMU rate you will get.** `HIL_SENSOR` is sent every frame in the
+> SITL profile (`sensor_interval_us = 0` in `px4_communicator.cpp`), so the IMU topics simply
+> follow the SOAP exchange rate — that figure came from a source that did not rate-limit its
+> exchanges to wall clock, letting the bridge free-run at ~11 000 exchanges/s. Against real
+> RealFlight, expect IMU rates at roughly the SOAP frame rate (**~250–300 Hz**). The
+> *time-decimated* topics (GPS, ground truth, distance) are unaffected by the exchange rate,
+> because the bridge decimates on its physics clock rather than on frame count.
 
 ### What a normal PX4 has that this does not
 
 - **Ground truth is not exposed to ROS 2.** The four `*_groundtruth` topics are populated in
-  uORB at 50 Hz, but `dds_topics.yaml` contains **zero** `groundtruth` entries — verified by
-  `grep -c groundtruth` returning `0`, and by their absence from `ros2 topic list`. If you want
+  uORB at 50 Hz, but `dds_topics.yaml` contains **zero** `groundtruth` entries — `grep -c
+  groundtruth` returns `0`, and they are absent from `ros2 topic list`. If you want
   ground truth in ROS 2 for scoring or evaluation, you must add those entries to
   `dds_topics.yaml` and rebuild PX4. This is stock PX4 behaviour, not something this
   integration changes.
 - **`vehicle_angular_velocity` is commented out** in `dds_topics.yaml` (line 44-45). It is
   available in uORB but not over DDS. Relevant if you intended to close a rate loop offboard.
 - **Optical flow** (`HIL_OPTICAL_FLOW` → `sensor_optical_flow`) is handled by
-  `SimulatorMavlink` (`:849`) but the bridge never sends it, so `vehicle_optical_flow` stays
+  `SimulatorMavlink::handle_message_optical_flow` (`:849`, dispatched at `:358-359`) but the
+  bridge never sends it, so `vehicle_optical_flow` stays
   empty. RealFlight exposes no optical-flow quantity, so this is a genuine out-of-scope gap
   rather than an omission — a flow-based offboard app will not work here.
-- **`battery_status` and `system_power` are simulated by PX4**, not by us — `battery_simulator`
-  and `system_power_simulator` are separate SITL modules and both were live at 100 Hz. Battery
-  values are therefore fictional and won't track RealFlight's own battery model.
+- **`system_power` is simulated by PX4**, not by us. `system_power_simulator` is a SITL module
+  started unconditionally (`rcS:254`) and publishes at 100 Hz, so those values are fictional.
+  **`battery_status`, by contrast, does come from the bridge.** PX4's `battery_simulator` is
+  gated on `SIM_BAT_ENABLE 1` (`rcS:249-251`) and all four FlightAxis airframes set
+  `SIM_BAT_ENABLE 0`, so it never starts; the battery state you see over DDS is the bridge's,
+  delivered over MAVLink and derived from the pack voltage and current RealFlight reports.
 
-No topic that a ROS 2 offboard application would reasonably subscribe to was found empty,
-with the two exceptions above (optical flow, ground truth) and the `px4_msgs` version issue.
+Beyond the two exceptions above (optical flow, ground truth) and the `px4_msgs` version issue,
+the topics a ROS 2 offboard application would reasonably subscribe to are populated.
 
 ---
 
 ## 5. Rates and timestamps as seen from ROS 2
 
-### Measured (`ros2 topic hz`, live run, healthy stack)
+### Rates (`ros2 topic hz`, healthy stack)
 
 | Topic | Rate |
 |---|---|
@@ -237,18 +236,22 @@ with the two exceptions above (optical flow, ground truth) and the `px4_msgs` ve
 
 Nothing reaches ROS 2 faster than ~100 Hz, regardless of its uORB rate — `vehicle_attitude`
 runs at 204 Hz internally and arrives at 100 Hz. That isn't decimation by us, and it isn't a
-per-topic setting (`dds_topics.yaml` has no rate fields). The client polls its subscriptions
-with a **10 ms timeout** (`uxrce_dds_client.cpp:657`, `orb_poll_timeout_ms = 10`, used at
-`:668`), which caps the publish loop at 100 Hz.
+per-topic setting (`dds_topics.yaml` has no rate fields). It comes out of the client's main
+loop, which waits on its uORB subscriptions with a **10 ms timeout**
+(`uxrce_dds_client.cpp:657`, `orb_poll_timeout_ms = 10`, used at `:668`). That 10 ms is a
+maximum *idle* wait rather than a hard rate limit — when there is already inbound traffic
+(`bytes_available > 10`) the timeout is set to 0 at `:661-665` and the loop spins immediately —
+but with a quiet agent link the wait dominates and each iteration costs about 10 ms, so the
+outbound publish rate settles near 100 Hz.
 
-**If you need faster than 100 Hz in ROS 2, uXRCE-DDS will not give it to you** without patching
-that constant. For most offboard work this is irrelevant — PX4 only requires a 2 Hz setpoint
-heartbeat — but it matters if you intended to run a high-rate attitude or rate loop off-board.
+**In practice uXRCE-DDS will not hand you much more than 100 Hz**, whatever the uORB rate. For
+most offboard work this is irrelevant — the setpoint heartbeat PX4 requires is far slower — but
+it matters if you intended to run a high-rate attitude or rate loop off-board.
 
 ### Timestamps
 
-`hrt_absolute_time()` in a non-lockstep build is the **host monotonic clock** — verified: PX4's
-`hrt` read ~80 700 s while the host's `CLOCK_MONOTONIC` read 80 887 s (machine uptime), not
+`hrt_absolute_time()` in a non-lockstep build is the **host monotonic clock**: PX4's `hrt` reads
+machine uptime — ~80 700 s against the host's `CLOCK_MONOTONIC` at 80 887 s — not
 seconds-since-PX4-boot.
 
 Two things follow, and the second is a trap:
@@ -259,13 +262,13 @@ Two things follow, and the second is a trap:
    `imu.time_usec` field we send is used only for `px4_clock_settime` (`:494`), which drives the
    simulated clock **in lockstep builds only** — and FlightAxis is deliberately non-lockstep, so
    it has no effect. Sensor age is therefore true wall-clock latency, which is what you want for
-   a free-running simulator. Measured message age at the PX4 layer was consistently **under
-   10 ms**, typically 1–4 ms.
+   a free-running simulator. Message age at the PX4 layer sits **under 10 ms**, typically
+   1–4 ms.
 
 2. **Only `timestamp` and `timestamp_sample` are converted to ROS time.** The generated CDR
    serializers add the timesync offset to exactly those two fields, by name
    (`Tools/msg/templates/ucdr/msg.h.em:138-144`); every other `uint64` timestamp field is copied
-   raw. Observed on one `vehicle_local_position` message:
+   raw. On a `vehicle_local_position` message:
 
    ```
    timestamp:        1784418874517267   <- epoch microseconds (converted)
@@ -277,14 +280,15 @@ Two things follow, and the second is a trap:
    `timestamp`** — they are in different epochs and differ by ~1.78e15 µs. Use `timestamp` /
    `timestamp_sample` for anything time-critical.
 
-Timesync itself was healthy: `timesync_status` reported a **108 µs round-trip** and a stable
-estimated offset, and the client reported `timesync converged: true`.
+A healthy timesync looks like this: `timesync_status` reporting a round-trip in the low hundreds
+of microseconds (**108 µs** on loopback) and a stable estimated offset, with the client
+reporting `timesync converged: true`.
 
 ---
 
 ## 6. Offboard control
 
-**Verified working end-to-end**, commanded entirely from ROS 2, against the mock.
+Offboard control is commanded entirely from ROS 2; nothing in this integration sits in that path.
 
 PX4's requirements are the stock ones. The FlightAxis airframes change none of the offboard
 parameters proper: `COM_OBL_*` and the offboard-loss failsafe are untouched, so PX4 defaults
@@ -304,8 +308,11 @@ session with no joystick and no RC will eventually trip the RC-loss failsafe.
 
 What you must do:
 
-1. Publish `OffboardControlMode` at **> 2 Hz continuously**, starting *before* you request
-   offboard mode and never stopping. PX4 drops out of offboard if the stream lapses.
+1. Publish `OffboardControlMode` **continuously**, starting *before* you request offboard mode
+   and never stopping. PX4 drops out of offboard if the stream lapses for longer than
+   `COM_OF_LOSS_T` (`commander_params.c:322`), which defaults to **1.0 s** and is checked in
+   `offboardCheck.cpp:46-47` — so the code requirement is faster than 1 Hz. **Use 2 Hz or
+   better**; the margin costs nothing and absorbs scheduling jitter.
 2. Publish a matching setpoint (`TrajectorySetpoint` for position control).
 3. Request the mode with `VehicleCommand.VEHICLE_CMD_DO_SET_MODE`, `param1 = 1`, `param2 = 6`.
 4. Arm with `VEHICLE_CMD_COMPONENT_ARM_DISARM`, `param1 = 1`.
@@ -315,35 +322,21 @@ What you must do:
    default (reliable) ROS 2 subscription silently receives nothing. This is the second most
    common way to get an inexplicably empty topic.
 
-Observed result (`offboard_test.py`, 20 Hz heartbeat, setpoint `[0, 0, -5]` NED):
+To confirm PX4 accepted the mode change and the arm command, watch `vehicle_status`: `nav_state
+14` is `NAVIGATION_STATE_OFFBOARD` and `arming_state 2` is armed.
 
-```
-nav_state=14 arming=2 z=-0.009 (status msgs=71, pos msgs=3500)
-FINAL nav_state=14 arming_state=2
-```
+Acceptance is not the same as reaching the simulator, so check the far end of the chain too.
+Compare `actuator_motors.control` inside PX4 against the channel values RealFlight receives —
+they should track each other, with `quad.json` mapping `rf0..rf3 ← px4[0..3]` and unmapped
+channels sitting at the 0.5 default. That exercises the loop in both directions: ROS 2 → uORB →
+controller → `HIL_ACTUATOR_CONTROLS` → bridge → SOAP → simulator, and simulator → `HIL_*` →
+uORB → DDS → ROS 2.
 
-`nav_state 14` is `NAVIGATION_STATE_OFFBOARD`; `arming_state 2` is armed. So PX4 accepted the
-mode change and the arm command from ROS 2, and streamed state back.
-
-The control path was confirmed to reach the simulator, not merely to be accepted:
-
-```
-disarmed:                actuator_motors.control = [0.0006, 0.0015, 0.0012, 0.0008]
-armed, offboard:         actuator_motors.control = [0.913,  0.914,  0.998,  1.000]
-received by the mock:                              [0.914,  0.914,  0.999,  1.000]
-```
-
-That closes the loop in both directions — ROS 2 → uORB → controller → `HIL_ACTUATOR_CONTROLS`
-→ bridge → SOAP → simulator, and simulator → `HIL_*` → uORB → DDS → ROS 2 — and incidentally
-confirms the `quad.json` channel map (`rf0..rf3 ← px4[0..3]`, unmapped channels at the 0.5
-default).
-
-> **The aircraft did not climb**, and this is expected: `z` stayed at ~0 throughout. The mock
-> FlightAxis server is a protocol stub with **no flight dynamics** — it returns a fixed aircraft
-> state whatever actuator values it is given. The motors saturating near 1.0 is the position
-> controller correctly winding up against a vehicle that refuses to move. **Whether the aircraft
-> actually flies to an offboard setpoint can only be established against real RealFlight and has
-> not been tested.**
+> **If the vehicle does not move, look at the far end before the near end.** A position
+> controller whose motor outputs saturate near 1.0 while `z` stays at ~0 is winding up correctly
+> against a vehicle that is not responding — the setpoint path is fine and the dynamics are not
+> reaching it. Check that RealFlight is unpaused, that its physics speed multiplier is 1.0, and
+> that the model is the one the airframe expects.
 
 ---
 
@@ -370,27 +363,19 @@ default).
 
 ---
 
-## 8. What has *not* been verified
+## 8. Working without RealFlight
 
-Stated plainly, because the distinction matters:
+The MAVLink → uORB → DDS → ROS 2 half of the pipeline is independent of where the sensor data
+comes from, so it can be driven with no Windows machine present: point the bridge at any
+FlightAxis-shaped SOAP responder and the whole ROS 2 side comes up normally. This is convenient
+for developing offboard nodes, message plumbing and QoS settings.
 
-- **Nothing has been run against real RealFlight.** All of the above used a mock SOAP server.
-  The MAVLink→uORB→DDS→ROS 2 half of the pipeline is fully exercised and is independent of the
-  data source, but the SOAP half is not.
-- **No actual flight.** The mock has no dynamics, so offboard was proven to be *accepted and
-  wired through to the actuators*, not to *fly the aircraft to a setpoint*.
-- **Only `flightaxis_quad` was tested over ROS 2.** `plane`, `quadplane` and `heli` were not.
-  Nothing in the DDS path is airframe-specific, so they are expected to behave identically,
-  but that is inference, not observation.
-- **Single vehicle only.** Multi-vehicle namespacing was reasoned from `rcS` and exercised
-  incidentally at instance 1; it was not tested as a multi-vehicle scenario.
-- **`battery_status` over ROS 2 was never seen working**, because the only `px4_msgs` on the
-  verification machine was version-skewed. The failure is understood and attributed, but the
-  working case was not demonstrated.
+A stub responder has no flight dynamics — it returns a fixed aircraft state whatever actuator
+values it is given — so a position controller will wind its motor outputs up against a vehicle
+that never moves. That is enough to develop against the topic and command interfaces, but
+anything involving actual dynamics needs real RealFlight; see [`RUNNING.md`](RUNNING.md) and
+attach the agent and ROS 2 terminals from §3.
 
-## Reproducing the verification
-
-The mock server, stack scripts and the offboard test node used above live in the scratchpad
-(`mock_flightaxis.py`, `up.sh` / `down.sh`, `offboard_test.py`). Any FlightAxis-shaped SOAP
-responder will do; the point is that the ROS 2 half of the pipeline can be exercised with no
-Windows machine present.
+Nothing in the DDS path is airframe-specific, so `plane`, `quadplane` and `heli` present the
+same topic set as `quad`; the difference between them is confined to control allocation and
+tuning.

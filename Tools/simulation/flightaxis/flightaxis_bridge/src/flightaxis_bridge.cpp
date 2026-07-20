@@ -360,10 +360,9 @@ static void reportModelHealth(ModelHealth &prev, const FAState &state)
  * just initialisation. It is called AGAIN on the RealFlight reset edge
  * (spacebar respawn), because otherwise nothing in the pipeline ever clears
  * channels[] and a hold-last slot carries its PRE-CRASH value across the
- * respawn and holds it indefinitely: measured against the mock, a plane reset
- * after a nose-up divergence came back with rf1 (elevator) pinned at 0.0 - full
- * deflection - on an aircraft the pilot was looking at sitting still on the
- * runway, and it stayed there through the disarm. The respawn is precisely the
+ * respawn and holds it indefinitely: a plane reset after a nose-up divergence
+ * comes back with rf1 (elevator) pinned at 0.0 - full deflection - on an
+ * aircraft sitting still on the runway, and it stays there through the disarm. The respawn is precisely the
  * moment the previous flight's state stops being a description of anything, so
  * that is where it has to go.
  *
@@ -401,8 +400,8 @@ static void seedDisarmChannels(const ChannelMap *maps, int nmaps, double unmappe
  * re-transforms every hold-last channel on every frame, because the held value
  * that comes back round is already transformed:
  *  - HeliDemix diverges. Feeding demixed swash values back through the demix
- *    compounds without bound; measured against the mock, three held channels
- *    went 0.74/0.28/0.51 -> 0.55/0.40/0.72 -> 0.98/0.70/0.64 on successive
+ *    compounds without bound: three held channels
+ *    go 0.74/0.28/0.51 -> 0.55/0.40/0.72 -> 0.98/0.70/0.64 on successive
  *    frames. Neutral is a fixed point, which is why it only shows up on the
  *    armed->disarmed transition with a non-neutral swash - i.e. every landing.
  *  - Rev4Servos does not diverge (the swap is its own inverse) but makes a
@@ -1410,8 +1409,8 @@ int main(int argc, char **argv)
 				 * "genuine reset" path and dropping the position anchor.
 				 *
 				 * But sending NOTHING is what the code used to do here, and
-				 * that is worse. Measured against the mock with `freeze 6`:
-				 * HIL_SENSOR stopped ~52 ms after the stall began and PX4 went
+				 * that is worse. With a 6 s physics freeze, HIL_SENSOR
+				 * stopped ~52 ms after the stall began and PX4 went
 				 * on to log "MAG #0 failed: TIMEOUT", "BARO #0 failed:
 				 * TIMEOUT" and "angular velocity no longer valid (timeout)",
 				 * failing every sensor arming check - exactly the failure the

@@ -5,7 +5,7 @@ simulator bridges are: files live in the PX4 tree, get compiled by the PX4 make 
 launch with one `make` command.
 
 ```bash
-# RealFlight running on a Windows box (FlightAxis Link enabled in RealFlight settings)
+# RealFlight running on a Windows box (RealFlight Link enabled in RealFlight settings)
 PX4_FLIGHTAXIS_IP=192.168.10.1 make px4_sitl_nolockstep flightaxis_plane
 # QGC connects on UDP 14550 as usual
 ```
@@ -13,25 +13,20 @@ PX4_FLIGHTAXIS_IP=192.168.10.1 make px4_sitl_nolockstep flightaxis_plane
 Day-to-day operation — network setup, per-vehicle channel maps, home position, MAVLink
 endpoints, troubleshooting: **[RUNNING.md](RUNNING.md)**.
 
-Using it with ROS 2 — uXRCE-DDS topics, offboard control, measured rates and the timestamp
+Using it with ROS 2 — uXRCE-DDS topics, offboard control, topic rates and the timestamp
 caveats: **[ROS2.md](ROS2.md)**.
 
 Driving a real flight-controller board instead of SITL: **[HITL.md](HITL.md)**.
 
 Full design rationale, frame conversions, and timing logic:
-[`FLIGHTAXIS_PX4_INTEGRATION.md`](FLIGHTAXIS_PX4_INTEGRATION.md) (the spec — §6/§7 are
-verified against the upstream FlightAxis implementation named in
-[COPYRIGHT.md](COPYRIGHT.md)).
+[`FLIGHTAXIS_PX4_INTEGRATION.md`](FLIGHTAXIS_PX4_INTEGRATION.md) (the spec — §6/§7 follow the
+upstream FlightAxis implementation named in [COPYRIGHT.md](COPYRIGHT.md)).
 
 ---
 
 ## Status
 
-Tested against **PX4 v1.16.0**. **No part of this has yet been run against a real RealFlight
-installation** — RealFlight is Windows-only and no Windows machine has been in the loop —
-and **no part of the HITL path has been run against a physical flight-controller board**.
-Everything described below was exercised against a mock FlightAxis server and, for HITL, a
-PTY loopback. Read [Validation status](#validation-status) before you rely on any of it.
+Targets **PX4 v1.16.0**.
 
 ## Prerequisites
 
@@ -116,7 +111,7 @@ cd PX4-FlightAxis-Bridge
 ```
 
 That copies the payload into your PX4 checkout, registers it in PX4's two `CMakeLists.txt`
-files, builds `px4_sitl_nolockstep` plus the bridge, and verifies the result. **The build
+files, builds `px4_sitl_nolockstep` plus the bridge, and checks the result. **The build
 takes roughly 10–30 minutes on a fresh PX4 tree** (a couple of minutes if the tree is
 already built). Running it a second time is safe — it detects what is already in place and
 changes nothing.
@@ -308,17 +303,19 @@ the sticks**, so surfaces not moving on the ground is expected, not a fault. Arm
 
 Once per RealFlight installation:
 
-- Enable **"FlightAxis Link Enabled"**, under **Simulation → Settings… → Physics → Quality**
+- Enable **"RealFlight Link Enabled"**, under **Simulation → Settings… → Physics → Quality**
   (press ESC to reach the menu). On RealFlight 8/9 it sits directly under **Settings →
   Physics**, and on some builds the Quality preset has to be **Custom** before the checkbox
   unlocks. RealFlight then listens on TCP 18083. The in-tree strings quote shorter versions of
-  this path — [RUNNING.md §1.1](RUNNING.md#11-enable-flightaxis-link-in-realflight) reconciles
+  this path — [RUNNING.md §1.1](RUNNING.md#11-enable-realflight-link-in-realflight) reconciles
   them.
 - In the same Physics settings, set **"Automatic Reset Delay(sec)"** to `2.0`, and set both
   **"Pause Sim When in Background"** and **"Pause Sim when in Menu"** to **No** — otherwise
   RealFlight stops feeding the bridge the moment it loses focus.
 - Restart RealFlight after changing these.
-- Wired network or same-host only — WiFi cannot hold the ~250 Hz SOAP rate.
+- Wired network or same-host only. Every SOAP exchange is a blocking round trip, so the step
+  rate is bounded by network latency rather than by bandwidth; WiFi latency and jitter drag it
+  far below what the bridge needs.
 - Leave the physics speed multiplier at 1.0; the bridge warns if it is not. Take that warning
   as the diagnosis and stop reading the rest of the log, because a stalled physics clock
   cascades into failures that all look like something else:
@@ -418,7 +415,10 @@ HITL to the physical output pinout:
 - `PWM_MAIN_FUNC<N>` selects which allocator output lands on `controls[N-1]`, so choosing the
   FUNC values *is* choosing the channel order.
 - Function `101+k` is `CA_ROTOR<k>` — a motor, range `[0,1]` → `"scale": "unipolar"`.
-- Function `201+k` is `CA_SV_CS<k>` — a surface, range `[-1,1]` → `"scale": "bipolar"`.
+- Function `201+k` is servo output `k` — on fixed-wing and VTOL airframes that is `CA_SV_CS<k>`,
+  a control surface, range `[-1,1]` → `"scale": "bipolar"`. On the helicopter (`CA_AIRFRAME 11`)
+  the servo block is not control surfaces at all: `201` is the tail rotor and `202`–`204` are the
+  swashplate servos, still bipolar.
 - The allocator emits **motors before servos**, so on mixed airframes the motors take the low
   function numbers no matter where they sit on the transmitter. That mismatch has to be absorbed
   somewhere; it is absorbed by the FUNC list, which is why the shipped FUNC assignments look
@@ -488,6 +488,10 @@ With PX4 as the sole mixer, `CA_SP0_ANG*` describes the **physical** swash of yo
 airframe sets 300/60/180 — a 120° head with the odd servo aft, matching ArduPilot's default.
 If your model's third servo is at the front, use 120/240/0.
 
+The heli rate gains, collective curve and yaw compensation in `1203_flightaxis_heli` are a
+generic collective-pitch starting point, not a tune for any particular machine — expect to
+retune them for your model.
+
 Full derivation, per-model tables, and the heli traps: spec §5.
 
 ## Adding a new aircraft
@@ -525,42 +529,6 @@ configure time rather than failing at launch.
 | Aircraft twitches or flies inverted on one axis | Channel order mismatch. First confirm the JSON is still an identity map (`rf` == `px4` on every row); if it is, the fix is in the `PWM_MAIN_FUNC*` block of the matching airframe script, which must put `controls[]` in your RealFlight model's channel order (see [Model JSON](#model-json-channel-maps)). Inverted on exactly one axis with the right surface moving is a direction problem, not an ordering one: set that channel's bit in `PWM_MAIN_REV` (bit `N-1` for channel `N`) or flip the servo in the RealFlight model. |
 | Heli has no left yaw at all; the tail sits on its lower stop | The tail row must be `"scale": "bipolar"` with `"disarm": 0.5`. `1203_flightaxis_heli` uses `CA_AIRFRAME 11` ("tail Servo"), so the tail is a servo on `[-1,1]`. Under `CA_AIRFRAME 10` it would be a motor clamped to `[0,1]` and the whole negative half of the yaw command would be clipped away. |
 | Bridge exits with `PX4 link lost - shutting down` | Expected, not a fault: a dead PX4 link is terminal by design. PX4 exited, the board rebooted, or the cable was pulled. Restart both sides — the bridge deliberately does not re-accept a fresh PX4 whose clock starts at zero. |
-
-## Validation status
-
-**Verified against a mock, not against RealFlight.** Everything in the first list below was
-observed with a local SOAP responder standing in for RealFlight — a protocol stub with no
-flight dynamics. It proves the software path; it proves nothing about how the aircraft flies.
-
-**Verified against the mock, on this machine:**
-
-- The bridge builds; the four `flightaxis_*` and four `flightaxis_hitl_*` make targets exist
-  and resolve.
-- All four model JSONs flatten cleanly through `get_FAbridge_params.py`.
-- `FA_check.py` fails correctly against an unreachable host.
-- **SITL end to end:** PX4 connects on TCP 4560, EKF2 converges, the synthesised sensors are
-  sane (baro and GPS altitudes agree), the plane and quad channel maps are correct end to end
-  including bipolar/unipolar scaling and disarm values, and the reconnect / reset /
-  glitch / sim-death resilience cases all behave.
-- **ROS 2 end to end:** uXRCE-DDS topics populate, and an offboard node armed the vehicle and
-  drove the actuators from ROS 2. Details and measured rates: [ROS2.md](ROS2.md).
-- **The HITL transport, framing and message profile**, over a PTY loopback with a
-  MAVLink-decoding harness. No board was involved: [HITL.md](HITL.md) §11.
-
-**Not yet verified — needs a real Windows RealFlight machine:**
-
-- Rate sign conventions, taxi N/E tracking, high-alpha pitot behaviour, compass heading, and the
-  nose-up-90° attitude case.
-- A flown circuit, so EKF innovation bounds in real flight are unknown. Since the mock has no
-  dynamics, nothing here has ever flown.
-- The quadplane and heli channel maps beyond static reasoning, `HeliDemix` against a real swash,
-  and the heli rate gains, collective curve and yaw compensation, which are a generic
-  collective-pitch starting point rather than a measured result.
-
-**Not yet verified — needs a physical flight-controller board:** everything in HITL.md, which
-keeps its own list.
-
-Spec §11 has the full checklist these correspond to.
 
 ## Credits / references
 

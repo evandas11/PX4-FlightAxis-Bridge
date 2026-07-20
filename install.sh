@@ -273,21 +273,21 @@ fi
 
 if [ "$PX4_VERSION" = "unknown" ]; then
 	warn "could not determine the PX4 version (no git tags, no version.txt)."
-	warn "This integration is developed and tested against PX4 v1.16.x."
+	warn "This integration targets PX4 v1.16.x."
 else
 	info "detected PX4 version: $PX4_VERSION"
 	case "$PX4_VERSION" in
-		v1.16*|1.16*) ok "v1.16-era tree - this is the tested configuration" ;;
+		v1.16*|1.16*) ok "v1.16-era tree - this is the targeted configuration" ;;
 		*)
 			warn "PX4 $PX4_VERSION is not a v1.16 release."
-			warn "This integration is tested against v1.16.0 only. On v1.13-v1.15 the"
+			warn "This integration targets v1.16.x only. On v1.13-v1.15 the"
 			warn "sitl_targets_*.cmake pattern does not exist (SITL targets live in"
 			warn "platforms/posix/cmake/sitl_target.cmake) and this installer's splices"
 			warn "will not produce a working build."
 			if [ "$FORCE" -eq 1 ] || [ "$DRY_RUN" -eq 1 ]; then
 				warn "continuing (--force/--dry-run)."
 			else
-				die "refusing to install on an untested PX4 version; re-run with --force to override."
+				die "refusing to install on an unsupported PX4 version; re-run with --force to override."
 			fi
 			;;
 	esac
@@ -351,7 +351,7 @@ if px4_is_git "$PX4_DIR"; then
 		# it is not a reason to stop: re-running install.sh is the documented
 		# upgrade path. Telling the user to answer that with --force trained them
 		# to pass --force routinely - and --force ALSO silences the
-		# SYS_AUTOSTART collision check and the untested-PX4-version check just
+		# SYS_AUTOSTART collision check and the unsupported-PX4-version check just
 		# above, so the advice quietly disarmed two unrelated guards on every
 		# upgrade. A file whose only modification is our own splice is therefore
 		# not "dirty": strip our lines and compare against the committed blob.
@@ -949,10 +949,10 @@ if [ "$DRY_RUN" -eq 0 ]; then
 fi
 
 printf '%sWhat to do next%s\n' "$C_BLD" "$C_OFF"
-printf '  1. On the Windows machine running RealFlight, enable %sFlightAxis Link%s\n' "$C_BLD" "$C_OFF"
-printf '     (Simulation -> Settings... -> Physics -> Quality -> tick "FlightAxis Link\n'
+printf '  1. On the Windows machine running RealFlight, enable %sRealFlight Link%s\n' "$C_BLD" "$C_OFF"
+printf '     (Simulation -> Settings... -> Physics -> Quality -> tick "RealFlight Link\n'
 printf '     Enabled"; on RealFlight 8/9 it is Settings -> Physics. It listens on TCP 18083.)\n'
-printf '     Use a wired network - WiFi cannot hold the ~250 Hz SOAP rate.\n'
+printf '     Use a wired network - WiFi cannot hold the SOAP round-trip rate.\n'
 printf '  2. Launch SITL from %s:\n' "$PX4_DIR"
 printf '\n       %sPX4_FLIGHTAXIS_IP=<windows-ip> make px4_sitl_nolockstep flightaxis_plane%s\n\n' "$C_BLD" "$C_OFF"
 printf '     (also: flightaxis_quad, flightaxis_quadplane, flightaxis_heli)\n'

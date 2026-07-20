@@ -3,6 +3,11 @@
  * This file is part of the PX4-FlightAxis-Bridge project.
  * Copyright (c) 2026 Evangels Brilliant Dasmasela
  *
+ * The recursive-least-squares internal-resistance estimator in this file is
+ * ported from PX4-Autopilot src/lib/battery/battery.cpp (Copyright (c)
+ * 2019-2021 PX4 Development Team, BSD-3-Clause). BSD-3-Clause is GPL-compatible,
+ * so both notices coexist in this combined work:
+ *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
  * the Free Software Foundation, either version 3 of the License, or

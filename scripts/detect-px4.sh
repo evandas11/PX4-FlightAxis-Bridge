@@ -41,7 +41,7 @@
 # ------------------------------------------------------------- what we own --
 #
 # ONE source of truth for "what belongs to this integration", shared by
-# install.sh, uninstall.sh and both sync scripts.
+# install.sh and uninstall.sh.
 #
 # We reserve SYS_AUTOSTART ids 1200-1219 by documentation, but we OWN exactly
 # the four names below and nothing else. That distinction is load-bearing:
