@@ -1080,6 +1080,15 @@ int main(int argc, char **argv)
 		// stop - which also stops hammering RealFlight with SOAP requests.
 		// See the dead-link policy block in px4_communicator.h.
 		if (px4.LinkLost()) {
+			if (shutdown_deadline_us != 0) {
+				// Expected: this is PX4 acting on the shutdown we asked for.
+				// Leave with the code the runner restarts on, not the one it
+				// treats as the session ending.
+				cerr << "[flightaxis_bridge]   PX4 is down - restarting" << endl;
+				fa.releaseController();
+				return EXIT_RESTART_REQUESTED;
+			}
+
 			cerr << "[flightaxis_bridge] PX4 link lost - shutting down" << endl;
 			break;
 		}
@@ -1246,7 +1255,7 @@ int main(int argc, char **argv)
 		 * glitch compensator has just swallowed a long network stall and a
 		 * legitimate frame really does span two seconds of flight.
 		 */
-		if (have_last_position) {
+		if (have_last_position && shutdown_deadline_us == 0) {
 			const double dx = state.m_aircraftPositionX_MTR - last_position_x;
 			const double dy = state.m_aircraftPositionY_MTR - last_position_y;
 			const double dz = state.m_altitudeASL_MTR - last_position_z;
@@ -1331,7 +1340,6 @@ int main(int argc, char **argv)
 					 * so rather than exiting quietly on a PX4 that is still up.
 					 */
 					shutdown_deadline_us = micros() + SHUTDOWN_WAIT_US;
-					continue;
 				}
 
 				reset_retry_until_us = micros() + RESET_RETRY_WINDOW_US;
