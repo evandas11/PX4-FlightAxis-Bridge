@@ -820,3 +820,43 @@ bool BatteryLink::requestPositionReset(double lat_deg, double lon_deg, double ac
 	return ::sendto(_fd, buf, (size_t)len, MSG_DONTWAIT,
 			(struct sockaddr *)&addr, sizeof(addr)) == len;
 }
+
+bool BatteryLink::requestReboot()
+{
+	if (_fd < 0) {
+		return false;
+	}
+
+	struct sockaddr_in addr;
+	memset(&addr, 0, sizeof(addr));
+	addr.sin_family = AF_INET;
+	addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+	addr.sin_port = htons((uint16_t)(PORT_BASE + _instance));
+
+	uint8_t buf[MAVLINK_MAX_PACKET_LEN];
+	mavlink_message_t msg;
+	bool ok = true;
+
+	// 21196 is Commander's force magic (Commander.cpp:308): disarm even in
+	// flight, which is exactly the state PX4 thinks it is in after a respawn.
+	mavlink_msg_command_long_pack_chan(
+		_sysid, BATTERY_COMPID, MAVLINK_COMM_1, &msg,
+		1, 1, 400 /* MAV_CMD_COMPONENT_ARM_DISARM */, 0,
+		0.0f,		// param1: 0 = disarm
+		21196.0f,	// param2: force
+		0, 0, 0, 0, 0);
+	int len = mavlink_msg_to_send_buffer(buf, &msg);
+	ok = (::sendto(_fd, buf, (size_t)len, MSG_DONTWAIT,
+		       (struct sockaddr *)&addr, sizeof(addr)) == len) && ok;
+
+	mavlink_msg_command_long_pack_chan(
+		_sysid, BATTERY_COMPID, MAVLINK_COMM_1, &msg,
+		1, 1, 246 /* MAV_CMD_PREFLIGHT_REBOOT_SHUTDOWN */, 0,
+		1.0f,		// param1: 1 = reboot autopilot
+		0, 0, 0, 0, 0, 0);
+	len = mavlink_msg_to_send_buffer(buf, &msg);
+	ok = (::sendto(_fd, buf, (size_t)len, MSG_DONTWAIT,
+		       (struct sockaddr *)&addr, sizeof(addr)) == len) && ok;
+
+	return ok;
+}

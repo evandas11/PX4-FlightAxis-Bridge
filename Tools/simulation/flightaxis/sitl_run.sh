@@ -152,8 +152,30 @@ fi
 # again an unexplained hang. SITL is always the bridge's tcp-server default.
 export PX4_HITL_TRANSPORT=tcp-server
 
+#
+# RESTART LOOP.
+#
+# With PX4_FLIGHTAXIS_RESTART_ON_RESET=1 the bridge exits 42 when RealFlight
+# teleports the model, having first force-disarmed and rebooted PX4. Both come
+# back here, which is the only way to give the run a genuinely fresh estimator:
+# EKF2 cannot be talked out of a converged solution - an external position reset
+# is answered TEMPORARILY_REJECTED at exactly the moment it would be useful -
+# and PX4 SITL has no equivalent of ArduPilot's EKFType::SIM to bypass it with.
+#
+# PX4 stays in the FOREGROUND so the pxh> prompt keeps working. That is why the
+# bridge reboots PX4 rather than the script killing it: the script cannot act
+# while it is blocked on the foreground process.
+#
+# Unset, or set to anything else, and this runs exactly once - the historical
+# behaviour, and still the default, because a session that restarts on every
+# respawn is not always what you want.
+pushd "$rootfs" >/dev/null
+
+while true; do
+
 "$bridge_bin" "$instance" "${FA_IP}" \
 	$fa_bridge_params &
+bridge_pid=$!
 FA_BRIDGE_PID=$!
 
 # Take everything down with this script, however it ends.
@@ -189,8 +211,6 @@ trap fa_cleanup EXIT
 trap 'fa_cleanup; exit 130' INT
 trap 'fa_cleanup; exit 143' TERM HUP
 
-pushd "$rootfs" >/dev/null
-
 # Do not exit on failure now from here on because we want the complete cleanup
 set +e
 
@@ -203,11 +223,27 @@ sitl_command="\"$sitl_bin\" -i $instance $no_pxh \"$build_path\"/etc"
 echo SITL COMMAND: $sitl_command
 
 eval $sitl_command
-# Capture PX4's status now: the script's last command would otherwise be the
-# kill below, so a PX4 segfault / param import failure / the unknown-model abort
-# in rcS would report success, and a clean Ctrl-C where the bridge had already
-# exited would report Error 1 - timing dependent, so it looks intermittent.
 px4_status=$?
+
+# Did the bridge ask for this? It exits 42 only on a detected teleport with the
+# restart option on, so anything else - a crash, a Ctrl-C, PX4 exiting by itself
+# - falls out of the loop and reports as before.
+bridge_restart=no
+
+if [ "${PX4_FLIGHTAXIS_RESTART_ON_RESET:-0}" = "1" ]; then
+	wait "$bridge_pid" 2>/dev/null
+	[ "$?" = "42" ] && bridge_restart=yes
+fi
+
+if [ "$bridge_restart" = "yes" ]; then
+	echo "[sitl_run] RealFlight reset - restarting PX4 and the bridge"
+	pkill -P $$ 2>/dev/null
+	sleep 1
+	continue
+fi
+
+break
+done
 
 popd >/dev/null
 

@@ -158,6 +158,19 @@ public:
 	 */
 	bool requestPositionReset(double lat_deg, double lon_deg, double accuracy_m, uint64_t now_us);
 
+	/*
+	 * Force-disarm and reboot PX4.
+	 *
+	 * For the respawn case, when the estimator cannot be persuaded to accept
+	 * the teleport: an estimator with no state accepts whatever it is given,
+	 * so give it a new one. Disarm first because Commander refuses
+	 * PREFLIGHT_REBOOT_SHUTDOWN while armed (Commander.cpp:1234), and forced
+	 * because after a RealFlight reset PX4 still believes it is flying.
+	 *
+	 * PX4 exits rather than restarts; sitl_run.sh is what brings it back.
+	 */
+	bool requestReboot();
+
 	bool active() const { return _fd >= 0; }
 
 private:

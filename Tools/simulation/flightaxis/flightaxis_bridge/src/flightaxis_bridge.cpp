@@ -101,6 +101,9 @@
 
 using namespace std;
 
+// Distinct exit code so sitl_run.sh can tell a requested restart from a crash.
+static constexpr int EXIT_RESTART_REQUESTED = 42;
+
 // options bitmask
 static const uint32_t OPT_RESET_POSITION = 1;
 static const uint32_t OPT_REV4_SERVOS    = 2;
@@ -848,6 +851,14 @@ int main(int argc, char **argv)
 	 * the dead-reckoning state that lets it accept one; 200 ms is frequent
 	 * enough not to miss a brief window and far too slow to matter as traffic.
 	 */
+	/*
+	 * Opt-in: restart PX4 on a respawn instead of asking its estimator to
+	 * accept a jump. Off by default because the gap is visible and a running
+	 * session is usually preferable to a correct one that keeps stopping.
+	 */
+	const char *restart_env = ::getenv("PX4_FLIGHTAXIS_RESTART_ON_RESET");
+	const bool restart_on_teleport = (restart_env != nullptr && restart_env[0] == '1');
+
 	const uint64_t RESET_RETRY_WINDOW_US   = 5000000;
 	const uint64_t RESET_RETRY_INTERVAL_US = 200000;
 	uint64_t reset_retry_until_us = 0;
@@ -1268,6 +1279,36 @@ int main(int argc, char **argv)
 				 * attempt and accepted moments later once the divergence starts;
 				 * that is still a recovery in seconds rather than minutes.
 				 */
+				if (restart_on_teleport) {
+					/*
+					 * PX4_FLIGHTAXIS_RESTART_ON_RESET: leave, and let
+					 * sitl_run.sh bring PX4 and this bridge back up.
+					 *
+					 * An estimator with no state accepts whatever it is given,
+					 * which is why a freshly started session is always correct
+					 * and a respawn is not. Everything short of a restart has to
+					 * persuade EKF2 to abandon a converged solution, and it is
+					 * built not to: an external position reset comes back
+					 * TEMPORARILY_REJECTED at the moment of the teleport,
+					 * because the vehicle is airborne and still fusing GNSS.
+					 *
+					 * The cost is a gap of a few seconds, a new log file, and a
+					 * ground station reconnect. The exit code is what tells the
+					 * runner this was deliberate rather than a crash.
+					 */
+					cerr << "[flightaxis_bridge]   restarting PX4 "
+					     << "(PX4_FLIGHTAXIS_RESTART_ON_RESET is set)" << endl;
+
+					// Force-disarm then reboot. PX4 exits; sitl_run.sh brings
+					// it and this bridge back up together.
+					if (battery.active()) {
+						battery.requestReboot();
+					}
+
+					fa.releaseController();
+					return EXIT_RESTART_REQUESTED;
+				}
+
 				reset_retry_until_us = micros() + RESET_RETRY_WINDOW_US;
 				reset_retry_next_us = 0;
 			}
