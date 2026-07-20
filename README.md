@@ -41,13 +41,21 @@ On the Linux box that builds and runs PX4:
 | **python3** | `sitl_run.sh` calls `FA_check.py` and `get_FAbridge_params.py` at launch |
 | **cmake** | builds the bridge as a PX4 `ExternalProject` |
 | **ninja or make** | either works; `install.sh` prefers ninja and falls back to `cmake --build` |
+| **QGroundControl** | connects on UDP 14550. Not optional in practice: sensor calibration and radio calibration are only possible there, and both are needed before a first flight |
+| **procps** (`pkill`, `pgrep`) | `sitl_run.sh`'s cleanup trap uses them to take PX4 and the bridge down together on Ctrl-C |
+| **git**, **tput** *(optional)* | `install.sh` uses `git` to refuse an install over uncommitted local modifications, and `tput` for coloured output; without either it still works, with that check and the colour dropped |
 | rsync *(optional)* | `install.sh` uses it to copy the payload; falls back to `cp -R` |
-| everything PX4 itself needs | see PX4's own setup docs — this repo adds no other requirement |
+| everything PX4 itself needs | see PX4's own setup docs — beyond the rows above, this repo adds no other requirement |
 
 **MAVLink headers are not a separate dependency.** They come from the PX4 build via the bundled
 `cmake/FindMAVLink.cmake`; there is nothing to install and no version to match.
 
 RealFlight itself runs on a **separate Windows machine** (or VM), reachable over a wired network.
+
+To fly manually you also need a **control source**: either a transmitter RealFlight can see on
+the Windows box (an InterLink, or any TX RealFlight accepts as an input device), whose sticks the
+bridge forwards to PX4 as RC; or a QGC virtual joystick on the Linux box. Neither is needed for a
+headless or offboard run — see [Flying it manually](#flying-it-manually).
 
 ## Repository layout
 
@@ -95,6 +103,15 @@ ROMFS/px4fmu_common/init.d-posix/airframes/
 ├── 1202_flightaxis_quadplane
 └── 1203_flightaxis_heli
     # + four entries added to that directory's CMakeLists.txt — install.sh does this
+
+ROMFS/px4fmu_common/init.d/airframes/          # note: init.d, not init.d-posix
+├── 1200_flightaxis_plane.hil
+├── 1201_flightaxis_quad.hil
+├── 1202_flightaxis_quadplane.hil
+└── 1203_flightaxis_heli.hil
+    # the HITL airframes. A real board boots from init.d, so these need their own
+    # directory and their own registration in that directory's CMakeLists.txt
+    # + four entries added there as well — install.sh does this
 ```
 
 ## Install into a PX4 tree
@@ -112,7 +129,7 @@ cd PX4-FlightAxis-Bridge
 ./install.sh
 ```
 
-That copies the payload into your PX4 checkout, registers it in PX4's two `CMakeLists.txt`
+That copies the payload into your PX4 checkout, registers it in PX4's three `CMakeLists.txt`
 files, builds `px4_sitl_nolockstep` plus the bridge, and checks the result. **The build
 takes roughly 10–30 minutes on a fresh PX4 tree** (a couple of minutes if the tree is
 already built). Running it a second time is safe — it detects what is already in place and
@@ -147,15 +164,16 @@ PX4_DIR=/path/to/PX4-Autopilot ./install.sh
 If several checkouts turn up, the installer lists them all with their versions and stops —
 disambiguate with an argument or `$PX4_DIR`. If none turn up, it says so and asks for the
 path; it never guesses or creates a directory. A candidate only counts if it structurally
-looks like PX4 (`Makefile`, `Tools/simulation/`, and both `CMakeLists.txt` files).
+looks like PX4 (`Makefile`, `Tools/simulation/`, and the `simulator_mavlink` and
+`init.d-posix/airframes` `CMakeLists.txt` files).
 
 **What it refuses to do** — an unrecognised or non-v1.16 PX4 layout; an existing
 `120[0-3]_*` airframe that is not ours (a genuine SYS_AUTOSTART collision, since those are
-the four ids it installs); uncommitted local modifications to the two PX4-owned
+the four ids it installs); uncommitted local modifications to the three PX4-owned
 `CMakeLists.txt` files. Each of those is overridable with `--force`, and none of them stops
 a `--dry-run`. The one refusal `--force` does **not** override is a missing splice anchor:
 there it aborts and tells you what to add by hand rather than guessing where your build
-system wants it. It never uses `sudo`. Both PX4-owned `CMakeLists.txt` files are backed up
+system wants it. It never uses `sudo`. All three PX4-owned `CMakeLists.txt` files are backed up
 to `<file>.flightaxis.bak` first, and everything it changed is listed at the end.
 
 Ids **1204–1219 are reserved by this document but not used**, and the installer ignores
@@ -168,7 +186,7 @@ Reverse it all at any time:
 ./uninstall.sh                 # same target resolution and --dry-run/--yes flags
 ```
 
-It undoes both registrations (restoring the backups, or — if you edited those files
+It undoes all three registrations (restoring the backups, or — if you edited those files
 afterwards — removing only the lines it added) and then deletes **exactly the files it
 installed**, listed from a manifest. Specifically:
 
@@ -228,7 +246,29 @@ apply as written (see spec §3).
    	1203_flightaxis_heli
    ```
 
-4. Build from the PX4 tree — first PX4 itself, then the bridge target:
+4. In `PX4-Autopilot/ROMFS/px4fmu_common/init.d/airframes/CMakeLists.txt` — the **`init.d`**
+   one, not the `init.d-posix` one edited in step 3 — register the four HITL airframes:
+
+   ```cmake
+   	1200_flightaxis_plane.hil
+   	1201_flightaxis_quad.hil
+   	1202_flightaxis_quadplane.hil
+   	1203_flightaxis_heli.hil
+   ```
+
+   That file is a single `px4_add_romfs_files(...)` list with `if(CONFIG_*)` guards nested
+   inside it, and the entries must land **inside the `CONFIG_MODULES_SIMULATION_PWM_OUT_SIM`
+   guard**, beside PX4's own `1001`/`1002`/`110x` HIL airframes — `install.sh` anchors its
+   splice on `1103_standard_vtol_sih.hil` for exactly this reason. Sorting them by id instead
+   would put them in the `MC_RATE_CONTROL` guard, a different block. Everything in that list is
+   tab-indented.
+
+   Skip this step and `flightaxis_hitl_*` builds cleanly while producing no ROMFS airframe at
+   all — the same failure described in step 3 of
+   [Adding a new aircraft](#adding-a-new-aircraft). It is only needed for HITL; SITL runs are
+   unaffected.
+
+5. Build from the PX4 tree — first PX4 itself, then the bridge target:
 
    ```bash
    make px4_sitl_nolockstep
@@ -267,6 +307,62 @@ up with the heading you see in the simulator, so it is worth setting all five ev
 
 Stop it with Ctrl-C in that terminal: PX4 and the bridge both exit, and the bridge hands
 RealFlight back to your transmitter on the way out.
+
+That same terminal is PX4's own interactive shell. Once it is up you get a `pxh>` prompt there,
+and every `param …` command in this document — and in RUNNING.md — is typed at it, in the
+running instance, alongside the log output. Ctrl-C at that prompt is what quits.
+
+#### Flying it manually
+
+**Out of the box the sticks do nothing, deliberately.** All four airframes ship
+`param set-default COM_RC_IN_MODE 4` — "ignore any stick input" — because a headless run
+(QGC optional, no transmitter, offboard or mission control only) has no manual control source
+at all, and 4 is the only value that skips the RC-loss failsafe. Leave it and commander ignores
+the sticks: arming in a manual mode is refused.
+
+The bridge does forward a transmitter regardless of this parameter. RealFlight echoes the
+sticks of any TX it can see back in every frame, and the bridge sends those twelve channels to
+PX4 as `RC_CHANNELS`, which `SimulatorMavlink` publishes as `input_rc` — the same topic a real
+receiver driver feeds. So `listener input_rc` shows live, moving stick values whether or not
+commander is allowed to act on them. If passthrough looks broken while `input_rc` is populated
+and moving, `COM_RC_IN_MODE` is why. (Passthrough is SITL only; for HITL it is disabled,
+because the pilot's transmitter is wired to the board and that receiver is the authoritative
+RC path.)
+
+To fly by hand, pick the value that matches your control source:
+
+```
+param set COM_RC_IN_MODE 0     # RC transmitter only
+param set COM_RC_IN_MODE 2     # transmitter and a QGC joystick, with fallback
+```
+
+Use `0` when the transmitter is the only stick source — it also keeps a QGC virtual joystick
+from competing with it. Either can be set at the `pxh>` prompt of a running instance, or added
+to the airframe file. Set at the prompt it becomes an explicitly saved value, so it outranks the
+airframe's `param set-default` on every later run in that working directory too.
+
+Enabling the sticks necessarily re-arms the RC-loss failsafe, which is why no single value
+serves both cases: PX4 overloads this one parameter for both jobs. Once it is not 4, a run that
+loses (or never has) manual control takes `NAV_RCL_ACT` — default Return — as soon as it arms.
+The long comment in `1200_flightaxis_plane` sets out the whole trade.
+
+**Then calibrate the transmitter in QGC, exactly as for real hardware:** Vehicle Setup → Radio.
+PX4 does not act on `input_rc` until `RC_MAP_*` and the per-channel `RC_MIN`/`RC_TRIM`/`RC_MAX`
+exist, so an uncalibrated transmitter is inert even with `COM_RC_IN_MODE` correct. One quirk
+survives into calibration: the **InterLink sends ch2 inverted** relative to what PX4 expects, so
+reverse channel 2 in the calibration. ArduPilot's FlightAxis backend forces `RC2_REVERSED = 1`
+for the same reason. Calibrating without reversing it gives inverted pitch.
+
+#### The very first run
+
+On a genuinely first run there is no `parameters.bson` anywhere to seed from (see
+[A working directory per model](#a-working-directory-per-model) below), so PX4 comes up with
+magnetometer and gyro *ids* but no offsets and reports `Compass 0 fault`, and then
+`Airspeed invalid` as a consequence. Nothing has gone wrong. Calibrate once in QGC —
+**Vehicle Setup → Sensors**, compass then gyroscope — and it is stored in that working
+directory for good, and is what every later directory seeds from.
+
+#### Stored values against the airframe's defaults
 
 If a stored value seems to be overriding the airframe, reset that parameter rather than the
 store: `param show -c` marks explicitly saved values with `x +`, and those outrank the
@@ -324,7 +420,9 @@ calibrate from scratch instead.
 
 Without that seed the first boot has magnetometer and gyro *ids* but no offsets, which raises
 `Compass 0 fault`; the airspeed validator then rejects the pitot as well, since it checks it
-against an EKF whose yaw the bad compass has already spoiled.
+against an EKF whose yaw the bad compass has already spoiled. The fix is the same one as on a
+first-ever run — calibrate once in QGC, see [The very first run](#the-very-first-run) — and
+[RUNNING.md §7](RUNNING.md#7-troubleshooting) goes through it in full.
 
 Give every model one and they stop reaching into each other's:
 
@@ -363,9 +461,19 @@ Multi-instance is unaffected: the variable moves the working directory and nothi
 composes with `PX4_FLIGHTAXIS_INSTANCE`, and leaving it unset gives the per-instance defaults
 exactly as before — see [RUNNING.md §6](RUNNING.md#6-multiple-instances).
 
-If PX4 refuses to start with `PX4 server already running for instance 0`, a previous run
-died without cleaning up. Remove `/tmp/px4_lock-0` and `/tmp/px4-sock-0`, and check for a
-stray `bin/px4` still holding TCP 4560.
+If PX4 refuses to start with `PX4 server already running for instance 0`, a `px4` process for
+that instance really is still alive — find it and stop it:
+
+```bash
+pgrep -a px4
+kill <pid>          # then re-run
+```
+
+The message is not a stale file. PX4 takes an `fcntl` write lock on `/tmp/px4_lock-<instance>`
+and probes it with `F_GETLK`, and the kernel drops an advisory lock as soon as the holder dies,
+so a process that has exited cannot produce this. Deleting the lock file does not clear
+anything; it only lets a second instance start alongside the first. Also check for a stray
+`bin/px4` still holding TCP 4560.
 
 ### Finding which RealFlight channel a surface is on
 
@@ -393,6 +501,12 @@ Note that **while disarmed every mapped channel is pinned to its `disarm` value 
 the sticks**, so surfaces not moving on the ground is expected, not a fault. Arm first.
 
 ## RealFlight setup
+
+Do the network setup first, and only once: finding the Windows machine's address for
+`PX4_FLIGHTAXIS_IP` (`ipconfig`), opening the Windows firewall to TCP 18083, and verifying the
+link is reachable before you launch anything are all in
+[RUNNING.md §1](RUNNING.md#1-network-setup-do-this-first), step by step. Skipping it is the
+usual reason a first run stops at `RealFlight FlightAxis not reachable`.
 
 Once per RealFlight installation:
 
@@ -613,7 +727,7 @@ configure time rather than failing at launch.
 
 | Symptom | Cause and fix |
 |---|---|
-| `RealFlight FlightAxis not reachable at <ip>:18083` | The pre-flight check failed before anything started. RealFlight not running, the link option not enabled (see [RealFlight setup](#realflight-setup)), the wrong IP in `PX4_FLIGHTAXIS_IP`, or a Windows firewall blocking TCP 18083. |
+| `RealFlight FlightAxis not reachable at <ip>:18083` | The pre-flight check failed before anything started. RealFlight not running, the link option not enabled (see [RealFlight setup](#realflight-setup)), the wrong IP in `PX4_FLIGHTAXIS_IP`, or a Windows firewall blocking TCP 18083. Finding the address and opening the firewall are [RUNNING.md §1.2](RUNNING.md#12-find-the-windows-machines-ip) and [§1.3](RUNNING.md#13-open-the-windows-firewall). |
 | `get_FAbridge_params.py failed for models/<model>.json` | The model JSON is missing, malformed, or names an unknown `Options` / `scale` value. The exact reason is printed just above. |
 | `bad channel map: RealFlight channel rfN is mapped twice` <br> `bad channel map: PX4 control index px4[N] is mapped twice` | Two rows in the model JSON share an `rf` or a `px4` index. The message names both entries; fix the JSON. The bridge refuses to start rather than silently letting one win. |
 | `WARNING: RealFlight physics speed multiplier is <x> (set it to 1.0)` | RealFlight is running fast or slow motion. All timing and sensor synthesis assume real time — reset the multiplier in RealFlight. |
