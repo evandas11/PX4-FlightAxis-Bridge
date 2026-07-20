@@ -1010,7 +1010,7 @@ When the source is `fuel`, a second line follows it:
 ```
 ↑ The raw tank reading beside the reference the bridge is dividing by, and the percentage that
 falls out. FlightAxis's field name asserts ounces and nothing upstream reads the field, so the
-unit is unverified; the bridge divides by the largest value it has seen and is therefore correct
+name is the only thing carrying the unit; the bridge divides by the largest value it has seen and is therefore correct
 whether RealFlight reports ounces, percent or a 0..1 fraction. The line is printed so that a
 *reader* can settle the question in one flight — a full tank showing `40.000`, `100.0` or `1.000`
 tells you which it is. Printed with the source line, so once at latch and again on any change of
