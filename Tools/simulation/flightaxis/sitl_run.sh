@@ -78,6 +78,29 @@ mkdir -p "$rootfs"
 # in a different one.
 rootfs="$(cd "$rootfs" && pwd)"
 
+# Seed a working directory that has no parameters of its own from the shared one,
+# so a new per-model directory starts with the sensor and radio calibration you
+# already have rather than none at all. Without this the first boot in a fresh
+# directory has magnetometer and gyro ids but no offsets, which raises "Compass 0
+# fault"; the airspeed validator then rejects the pitot too, because it checks it
+# against an EKF whose yaw the bad compass has already spoiled.
+#
+# Only when the file is absent, so this never overwrites what you have since
+# saved. Nothing else is copied -- dataman in particular stays behind, since
+# inheriting another model's mission is one of the things a per-model directory
+# exists to prevent. rcS decides what survives: an airframe change makes it run
+# "param reset_all", which keeps RC*, CAL_* and COM_FLTMODE* and drops the rest.
+#
+# Set PX4_FLIGHTAXIS_SEED=0 to start genuinely empty and calibrate from scratch.
+default_rootfs="$build_path/rootfs"
+if [ "${PX4_FLIGHTAXIS_SEED:-1}" != "0" ] &&
+   [ ! -e "$rootfs/parameters.bson" ] &&
+   [ -f "$default_rootfs/parameters.bson" ] &&
+   [ "$rootfs" != "$(cd "$default_rootfs" && pwd)" ]; then
+	cp "$default_rootfs/parameters.bson" "$rootfs/parameters.bson"
+	echo "seeded parameters.bson from $default_rootfs (calibration carried over)"
+fi
+
 # To disable user input: without this PX4 opens the interactive pxh> shell, so
 # the target cannot be driven from CI or a non-tty
 if [[ -n "$NO_PXH" ]]; then

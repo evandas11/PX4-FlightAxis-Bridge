@@ -314,6 +314,18 @@ single binary carrying every vehicle type. Their presence in the list says nothi
 airframe; nothing reads them unless the airframe selects that vehicle type. `param show -c`
 lists only the stored ones, which is the honest view of what the directory is keeping.
 
+A directory with no `parameters.bson` of its own is seeded from
+`build/px4_sitl_nolockstep/rootfs` on the way in, so a new one starts with the sensor and
+radio calibration you already have. Only when the file is absent — it never overwrites what
+you have since saved — and only that file, so no mission comes with it. What survives is then
+`rcS`'s decision: a different airframe makes it run `param reset_all`, which keeps `RC*`,
+`CAL_*` and `COM_FLTMODE*` and drops the rest. Set `PX4_FLIGHTAXIS_SEED=0` to start empty and
+calibrate from scratch instead.
+
+Without that seed the first boot has magnetometer and gyro *ids* but no offsets, which raises
+`Compass 0 fault`; the airspeed validator then rejects the pitot as well, since it checks it
+against an EKF whose yaw the bad compass has already spoiled.
+
 Give every model one and they stop reaching into each other's:
 
 ```bash
