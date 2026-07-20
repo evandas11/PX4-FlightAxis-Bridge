@@ -272,15 +272,35 @@ void VehicleState::resetPositionOffset(const FAState &fa)
 				   fa.m_aircraftPositionX_MTR,
 				   -fa.m_altitudeASL_MTR);
 
-	// Heading datum. home_yaw is where the model should point; RealFlight has
-	// just told us where it does point, and the difference is the rotation the
-	// RF world needs. Deriving it here rather than from a fixed number is what
-	// makes PX4_HOME_YAW mean the same thing whatever the RF runway happens to
-	// be aligned to.
-	if (std::isnan(home_yaw)) {
+	/*
+	 * Heading datum. home_yaw is where the model should point; RealFlight has
+	 * just told us where it does point, and the difference is the rotation the
+	 * RF world needs. Deriving it here rather than from a fixed number is what
+	 * makes PX4_HOME_YAW mean the same thing whatever the RF runway happens to
+	 * be aligned to.
+	 *
+	 * Latched ONCE, on the first capture, and deliberately not redone when a
+	 * respawn brings us back here. The position anchor must be re-captured -
+	 * the aircraft has teleported and the old origin is meaningless - but the
+	 * world rotation may not be, because it defines the frame every other
+	 * quantity is already expressed in. Re-deriving it from wherever the model
+	 * happens to point after a reset rotates that frame underneath PX4:
+	 * attitude, velocity and position all move to the new frame on the next
+	 * message while the synthetic magnetic field, which is built from the home
+	 * location and never rotated, stays in the old one. EKF2 has by then
+	 * converged on the old rotation, so the two disagree by exactly the change,
+	 * mag fusion starts failing its innovation gate, and yaw - and the position
+	 * that is dead-reckoned through it - go with it.
+	 */
+	if (yaw_datum_latched) {
+		// keep yaw_rot_rad
+
+	} else if (std::isnan(home_yaw)) {
 		yaw_rot_rad = 0.0;
+		yaw_datum_latched = true;
 
 	} else {
+		yaw_datum_latched = true;
 		Quaterniond q_rf(fa.m_orientationQuaternionW,
 				 fa.m_orientationQuaternionY,
 				 fa.m_orientationQuaternionX,

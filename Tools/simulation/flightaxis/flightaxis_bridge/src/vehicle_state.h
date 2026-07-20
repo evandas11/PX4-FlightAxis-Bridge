@@ -194,11 +194,15 @@ private:
 
 	// Heading anchor. home_yaw is the configured start heading (deg true), NAN
 	// when the feature is off. yaw_rot_rad is the rotation actually applied to
-	// the RF world, derived once per anchor in resetPositionOffset() and valid
-	// only while offset_captured is true; it is 0 whenever home_yaw is NAN, so
-	// the unconfigured path costs nothing and changes nothing.
+	// the RF world, latched ONCE in resetPositionOffset() and held for the life
+	// of the session; it is 0 whenever home_yaw is NAN, so the unconfigured path
+	// costs nothing and changes nothing. It deliberately does NOT follow the
+	// position anchor, which is re-captured on every respawn: the anchor is an
+	// origin, the rotation is the frame itself, and moving a frame that PX4 has
+	// already converged on is not something the HIL interface can express.
 	double home_yaw;	// deg true, NAN = disabled
 	double yaw_rot_rad;	// applied RF-world -> true-north rotation
+	bool yaw_datum_latched{false};
 
 	// physics time since epoch capture (us), mirrored from the main loop;
 	// getSensorMsg() / getDistanceSensorMsg() add offset_us on top
