@@ -299,10 +299,20 @@ Three things end up in there, and they are the three that make the separation wo
 
 ```
 ~/sitl/fa-rootfs/quadplane/
-├── eeprom/parameters.bson    # tuning, calibration, flight modes
+├── parameters.bson           # tuning, calibration, flight modes
+├── parameters_backup.bson    # PX4's own copy, restored if the primary is unreadable
 ├── dataman                   # missions, geofence, rally points
-└── log/                      # flight logs
+├── log/                      # flight logs
+├── etc -> …/build/px4_sitl_nolockstep/etc    # symlinks back into the build tree
+└── test_data -> …/PX4-Autopilot/test_data
 ```
+
+`parameters.bson` holds only what has actually been set — a fresh fixed-wing directory is
+around twenty entries. Every parameter compiled into the firmware still *appears* in QGC and
+in `param show`, `VT_*` and multicopter ones included, because `px4_sitl_nolockstep` is a
+single binary carrying every vehicle type. Their presence in the list says nothing about your
+airframe; nothing reads them unless the airframe selects that vehicle type. `param show -c`
+lists only the stored ones, which is the honest view of what the directory is keeping.
 
 Give every model one and they stop reaching into each other's:
 
