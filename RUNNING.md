@@ -151,6 +151,22 @@ The directory is created if missing and seeded with the calibration you already 
 same command then serves every later run — there is no separate first-run form. Full
 explanation in [*A working directory per model*](README.md#a-working-directory-per-model).
 
+**Switching from one vehicle to another** is that same rootfs argument plus two manual steps, in
+this order:
+
+1. **Ctrl-C the running target.** The bridge exits with PX4; there is nothing else to stop.
+2. **Load the matching aircraft in RealFlight.** The bridge does not choose the model — it drives
+   whatever RealFlight has loaded, so a plane airframe against a quad model flies exactly as badly
+   as that sounds.
+3. **Run the new target with its own `PX4_FLIGHTAXIS_ROOTFS`**, one directory per model. This is
+   what keeps the two models' `parameters.bson`, missions and logs apart; sharing them is the
+   `param reset_all` and stale-mission case described just above.
+
+Changing the aircraft *while the bridge is running* is also handled, but as a recovery rather than
+a workflow: RealFlight takes the controller back, and the bridge re-injects it and re-anchors —
+see the `RealFlight controller inactive - reinjecting controller` entry in §7. PX4 is still
+running the old airframe at that point, so restart it anyway.
+
 Each section below is self-contained: launch command, airframe, RealFlight model preparation,
 channel table, QGC check, gotchas, and a first-flight check for that vehicle. The
 model-preparation steps immediately below apply to all four.
@@ -165,8 +181,9 @@ Sections are HITL-agnostic — they describe SITL. For hardware-in-the-loop, see
   in the airframe script.
 - **Scale** — `unipolar` = the PX4 value is already `0..1` (motors), sent through unchanged;
   `bipolar` = the PX4 value is `-1..1` (surfaces), sent as `(v+1)/2`.
-- **Disarm** — value sent while PX4 is disarmed or the control is NaN. `hold` means "keep the
-  last output" (neutral 0.5 before the first one).
+- **Disarm** — value sent while PX4 is disarmed or the control is NaN. The flattener also accepts
+  `"disarm": -1`, meaning "keep the last output" (neutral 0.5 before the first one), but **no
+  shipped model uses it**: all four tables below state a number on every row.
 
 > ### One numbering, end to end
 >
@@ -215,7 +232,7 @@ while RealFlight always wants `[0,1]`. So:
 | What you assigned to `PWM_MAIN_FUNC<N>` | Correct `scale` for that row | `disarm` |
 |---|---|---|
 | A **Motor** (`101…112`) | `unipolar` — passed through | `0.0` |
-| Anything else — servo, control surface, flaps, gear, gimbal, peripheral | `bipolar` — sent as `(v+1)/2` | `0.5` (or `hold`) |
+| Anything else — servo, control surface, flaps, gear, gimbal, peripheral | `bipolar` — sent as `(v+1)/2` | `0.5` (or `-1` for hold-last) |
 
 **Both failure modes are silent.** A motor read as `bipolar` idles at half throttle and never
 stops; a surface read as `unipolar` loses its entire negative half and only deflects one way.
@@ -333,11 +350,11 @@ on channels 1–4, which is how RealFlight fixed-wing models are conventionally 
 
 | RF ch | PX4 | Drives | `PWM_MAIN_FUNC` | Scale | Disarm |
 |---|---|---|---|---|---|
-| 0 | `controls[0]` | aileron (PX4 **aileron left**) | 1 = 201 Servo 1 | bipolar | hold |
-| 1 | `controls[1]` | elevator | 2 = 203 Servo 3 | bipolar | hold |
+| 0 | `controls[0]` | aileron (PX4 **aileron left**) | 1 = 201 Servo 1 | bipolar | 0.5 |
+| 1 | `controls[1]` | elevator | 2 = 203 Servo 3 | bipolar | 0.5 |
 | 2 | `controls[2]` | throttle (Motor 1) | 3 = 101 Motor 1 | unipolar | **0.0** |
-| 3 | `controls[3]` | rudder | 4 = 204 Servo 4 | bipolar | hold |
-| 4 | `controls[4]` | aileron **right** — see below | 5 = 202 Servo 2 | bipolar | hold |
+| 3 | `controls[3]` | rudder | 4 = 204 Servo 4 | bipolar | 0.5 |
+| 4 | `controls[4]` | aileron **right** — see below | 5 = 202 Servo 2 | bipolar | 0.5 |
 | 5–11 | `controls[5..11]` | *unassigned* — steady 0.5 | 6–12 unset | bipolar | 0.5 |
 
 The FUNC values are non-sequential precisely because the allocator's own numbering is not the
@@ -442,15 +459,15 @@ rudder on channels 1–4, four lift motors on channels 5–8.
 
 | RF ch | PX4 | Drives | `PWM_MAIN_FUNC` | Scale | Disarm |
 |---|---|---|---|---|---|
-| 0 | `controls[0]` | aileron (PX4 **aileron left**) | 1 = 201 Servo 1 | bipolar | hold |
-| 1 | `controls[1]` | elevator | 2 = 203 Servo 3 | bipolar | hold |
+| 0 | `controls[0]` | aileron (PX4 **aileron left**) | 1 = 201 Servo 1 | bipolar | 0.5 |
+| 1 | `controls[1]` | elevator | 2 = 203 Servo 3 | bipolar | 0.5 |
 | 2 | `controls[2]` | forward / pusher throttle (Motor 5) | 3 = 105 Motor 5 | unipolar | **0.0** |
-| 3 | `controls[3]` | rudder | 4 = 204 Servo 4 | bipolar | hold |
+| 3 | `controls[3]` | rudder | 4 = 204 Servo 4 | bipolar | 0.5 |
 | 4 | `controls[4]` | lift motor 1 | 5 = 101 Motor 1 | unipolar | **0.0** |
 | 5 | `controls[5]` | lift motor 2 | 6 = 102 Motor 2 | unipolar | **0.0** |
 | 6 | `controls[6]` | lift motor 3 | 7 = 103 Motor 3 | unipolar | **0.0** |
 | 7 | `controls[7]` | lift motor 4 | 8 = 104 Motor 4 | unipolar | **0.0** |
-| 8 | `controls[8]` | aileron **right** — see below | 9 = 202 Servo 2 | bipolar | hold |
+| 8 | `controls[8]` | aileron **right** — see below | 9 = 202 Servo 2 | bipolar | 0.5 |
 | 9–11 | `controls[9..11]` | *unassigned* — steady 0.5 | 10–12 unset | bipolar | 0.5 |
 
 This is the clearest illustration of the `scale` rule: rf2 and rf4–7 are motors (`unipolar`,
@@ -570,8 +587,9 @@ unchanged by any of this — it is a property of the airframe type, and it still
 rotor first as Motor 1 = 101, then the yaw tail as Servo 1 = 201, then the swash as
 Servos 2–4 = 202–204. The FUNC list is what reorders those onto RealFlight's channels.
 
-**Every row carries an explicit `disarm`**, and `get_FAbridge_params.py` refuses to flatten
-the file if one is missing. With the demix off these rows are plain pass-through and nothing
+**Every row here carries an explicit `disarm`** — as every row of all four shipped models does,
+and `get_FAbridge_params.py` refuses to flatten the file if one is missing. The reason for
+stating them *here* is particular to the heli. With the demix off these rows are plain pass-through and nothing
 rewrites them after the fact, so holding would be safe on that ground alone — but the values
 stay stated, so that re-enabling `HeliDemix` for a CCPM model cannot quietly reintroduce the
 hazard below. The bridge also demixes out of a scratch copy and leaves the
@@ -899,11 +917,11 @@ FlightAxis check: RealFlight reachable at 192.168.10.1:18083
 ```
 [flightaxis_bridge] MAVLink to FlightAxis (RealFlight) bridge
 [flightaxis_bridge] options=0x9 unmapped_default=0.5 channels=12
-  rf0 <- px4[0] bipolar disarm=-1
-  rf1 <- px4[1] bipolar disarm=-1
+  rf0 <- px4[0] bipolar disarm=0.5
+  rf1 <- px4[1] bipolar disarm=0.5
   rf2 <- px4[2] unipolar disarm=0
-  rf3 <- px4[3] bipolar disarm=-1
-  rf4 <- px4[4] bipolar disarm=-1
+  rf3 <- px4[3] bipolar disarm=0.5
+  rf4 <- px4[4] bipolar disarm=0.5
   rf5 <- px4[5] bipolar disarm=0.5
   rf6 <- px4[6] bipolar disarm=0.5
   rf7 <- px4[7] bipolar disarm=0.5
@@ -917,7 +935,8 @@ pipe. A `reversed` here would mean someone added `"reverse": true` back to the J
 ↑ The channel map the bridge actually parsed. **Check this against §2 for your vehicle** — it is
 the fastest way to catch an edited JSON. Every shipped model is an identity map, so each row
 should read `rf<N> <- px4[N]`; anything else means the JSON has been edited (§7).
-`disarm=-1` means "hold last output". `options=0x9` is `ResetPosition|SilenceFPS`.
+No shipped model prints `disarm=-1` (hold last output) on any row — every row states a number.
+`options=0x9` is `ResetPosition|SilenceFPS`.
 
 ```
 [flightaxis_bridge] waiting for PX4 on TCP 4560 ...
@@ -934,11 +953,35 @@ INFO  [simulator_mavlink] Simulator connected on TCP port 4560.
 ↑ PX4's side of the same connection, and confirmation the right airframe was selected.
 
 ```
+[flightaxis_bridge] battery telemetry -> UDP 127.0.0.1:14580 as sysid 1
+[flightaxis_bridge]   (airframe must set SIM_BAT_ENABLE 0 so battery_simulator does not publish over it)
+```
+↑ The bridge feeds PX4's battery from RealFlight's own electrical or fuel model, over its own UDP
+link to PX4's API/offboard MAVLink port. Every shipped airframe sets `param set SIM_BAT_ENABLE 0`
+for exactly this reason, so that there is one publisher on `battery_status` and not two. On a HITL
+transport the line reads `battery telemetry disabled on <transport>` instead — see `HITL.md`.
+
+```
 [flightaxis_bridge] connecting to RealFlight at 192.168.10.1:18083
 [flightaxis_bridge] controller injected, aircraft reset
 ```
 ↑ The UAV controller interface was injected into RealFlight and (because `ResetPosition` is set)
 the aircraft was reset to the runway. RealFlight's own controls are now overridden by PX4.
+
+```
+[flightaxis_bridge] heading datum: RealFlight reports 12.4 deg, PX4_HOME_YAW asks for 235 deg -> rotating the RF world by 222.6 deg
+```
+↑ Printed once, when the heading datum is captured. Only appears if you set `PX4_HOME_YAW`; the
+QGC check below sends you looking for it. See [Home position and
+heading](#3-home-position-and-heading).
+
+```
+[flightaxis_bridge] battery source: electric (RealFlight pack voltage/current)
+```
+↑ Printed once, and again whenever the source changes. The three forms are `electric …`,
+`fuel / internal combustion …` and `synthetic (no pack and no tank seen yet; nominal full)` —
+the last means RealFlight has shown neither a pack nor a tank yet, so the bridge is sending a
+nominal full battery so preflight can pass. It is normal for the first frames.
 
 ```
 [flightaxis_bridge] first HIL_ACTUATOR_CONTROLS received, enabling channels
@@ -1091,7 +1134,13 @@ cd ~/PX4-Autopilot/Tools/simulation/flightaxis/flightaxis_bridge
 ./get_FAbridge_params.py models/plane.json
 ```
 
-Healthy output is one line of numbers, e.g. `1 0.5 4 0 1 1 0 -1 1 3 1 1 -1 2 0 0 0 0 3 4 1 0 -1`.
+Healthy output is one line of numbers — options, unmapped default, channel count, then five
+numbers (`rf`, `px4`, `scale`, `reverse`, `disarm`) per channel. For `models/plane.json`:
+
+```
+9 0.5 12 0 0 1 0 0.5 1 1 1 0 0.5 2 2 0 0 0 3 3 1 0 0.5 4 4 1 0 0.5 5 5 1 0 0.5 6 6 1 0 0.5 7 7 1 0 0.5 8 8 1 0 0.5 9 9 1 0 0.5 10 10 1 0 0.5 11 11 1 0 0.5
+```
+
 A related message, `get_FAbridge_params.py produced no parameters for …`, means it exited 0 but
 printed nothing — an empty `Channels` array.
 
@@ -1127,6 +1176,9 @@ The bridge is in `accept()` and PX4 never connected. Causes:
   also be listed in `init.d-posix/airframes/CMakeLists.txt`).
 - You built the lockstep target. The flightaxis targets only exist under
   `px4_sitl_nolockstep`.
+- The bridge was never built, in which case you get `ERROR: bridge binary not found at <path>`
+  from `sitl_run.sh` instead of a hang, and it names the fix:
+  `ninja -C <build_path> flightaxis_bridge`.
 
 Note the ordering: the bridge waits for PX4 **before** it connects to RealFlight, so a hang here
 is never a RealFlight problem.
@@ -1156,6 +1208,116 @@ RealFlight took control back — someone hit the spacebar (reset), changed aircr
 scenery. The bridge re-injects the controller every 300 ms until it sticks and re-anchors the
 position offset. Expected and self-healing; if it loops forever, RealFlight has a modal dialog
 open or the model has no FlightAxis-controllable channels.
+
+### `FlightAxis controller injection failed, retrying ...`
+
+The **startup** injection loop, not the mid-run reinject above. RealFlight answered on 18083 —
+so the network is fine and `FA_check.py` passed — but it will not hand the controller over. Two
+causes account for nearly all of it: RealFlight has a **modal dialog** open (it will not accept
+the controller while one is up), or the loaded model has **no FlightAxis-controllable channels**.
+The bridge keeps retrying and pumps HEARTBEAT to PX4 meanwhile, so it will pick up the moment you
+dismiss the dialog.
+
+### `connect to <ip>:18083 failed - is RealFlight running with FlightAxis Link enabled?`
+
+The runtime reconnect path, distinct from the pre-launch `FA_check.py` message at the top of this
+section: the bridge was already up and the SOAP socket stopped connecting. It repeats as
+`connect to <ip>:18083 still failing (N attempts)` at most once every 5 s, and prints
+`connect to <ip>:18083 recovered after N failed attempts` when it comes back. RealFlight was
+closed or restarted, the Windows box slept, or the link dropped. No action needed if it recovers.
+
+### `failed to find key <name>`
+
+The SOAP reply parsed, but a field the bridge expects was not in it. This is the signature of a
+**RealFlight version whose FlightAxis reply schema differs** from the one the parse table was
+written against. The bridge forces a controller re-init and the caller self-heals, so you may see
+it cycle. It is rare and completely opaque from any other symptom; if it repeats steadily, the
+RealFlight build is the thing that changed.
+
+### `PX4 Communicator: send to PX4 failed (N consecutive)`
+
+A `send()` to the PX4 MAVLink socket failed, with the errno appended; logged once and then at most
+once a second. An isolated one is a transient. A count that climbs means the PX4 side has stopped
+draining or is on its way out — 100 consecutive failures is one of the conditions that declares
+the link lost, so this usually precedes `PX4 link lost - shutting down` above.
+
+### `*** RealFlight model has LOST COMPONENTS (crash/breakup) ***`
+
+**Read this one carefully: nothing else will tell you.** A wing, a rotor or some other part came
+off the RealFlight model. The bridge prints, at the transition:
+
+```
+[flightaxis_bridge] *** RealFlight model has LOST COMPONENTS (crash/breakup) ***
+[flightaxis_bridge]     PX4 cannot detect this - sensors keep streaming and the aircraft looks healthy from the flight stack's side.
+[flightaxis_bridge]     Reset the aircraft in RealFlight (spacebar) to continue.
+```
+
+Everything downstream stays nominal after this. PX4 keeps receiving well-formed sensor data and
+keeps commanding actuators, into an airframe that no longer exists — so what you observe is a
+healthy flight stack fighting physics that make no sense, with no fault reported anywhere else.
+There is no recovery in software: **reset the aircraft in RealFlight (spacebar)**, after which you
+will see `RealFlight model components restored (aircraft reset)` and, in PX4, the settling
+described under [`Disarming denied: not landed`](#disarming-denied-not-landed-after-a-spacebar-reset).
+
+Related lines from the same model-health check:
+
+- `WARNING: RealFlight model has already LOST COMPONENTS at startup - reset the aircraft in
+  RealFlight (spacebar) before flying` — the model was already broken when the bridge attached.
+  A healthy model at startup prints nothing, so silence here is the expected case.
+- `RealFlight model components restored (aircraft reset)` — **benign**, the recovery line.
+
+### `*** RealFlight model is LOCKED - it will not respond to controls ***`
+
+RealFlight has the model locked; it will ignore everything the bridge sends while that lasts.
+`RealFlight model unlocked` reports the return. `WARNING: RealFlight model is LOCKED at startup -
+it will not respond to controls` is the same condition found already true when the bridge
+attached. Reported a quarter-second late: a change is only announced once the flag has held its
+new value for 250 ms.
+
+That debounce is why you may instead see:
+
+```
+[flightaxis_bridge] NOTE: RealFlight m-isLocked is FLAPPING (4+ changes in 5000 ms) - suppressing per-change lines; this flag is advisory only and no control path uses it
+```
+
+**This is benign, and it is a log-suppression notice rather than a fault.** The flag has been
+observed alternating several times a second, which used to bury the messages that actually
+explained a flight. Nothing in the bridge acts on it — it is logged and nowhere else — so
+suppressing the per-change lines deprives no control path of anything.
+
+### `RealFlight engine RUNNING` / `RealFlight engine STOPPED`
+
+**Not a fault either way.** It is normal before takeoff and after a deliberate shutdown, and it is
+printed because the failure it covers has no other symptom: an engine that quit on its own —
+flooded, out of fuel, or never started because the model needs a manual ignition — presents to
+PX4 as an aircraft that simply will not climb, with no clue anywhere else in the system.
+
+If it happens with the aircraft off the ground, the battery link says so more loudly:
+
+```
+[flightaxis_bridge] ENGINE STOPPED IN FLIGHT (fuel 12.4% remaining)
+```
+
+with `ENGINE RESTARTED IN FLIGHT (fuel …)` for the return. Both are gated on not touching the
+ground, so a normal pre-start sit on the runway and the shutdown after landing stay silent.
+
+### `WARNING: could not open the battery telemetry socket; PX4 will have no battery unless SIM_BAT_ENABLE is 1`
+
+The bridge feeds `battery_status` from RealFlight's own electrical or fuel model over a UDP link
+to PX4's API/offboard MAVLink port (§5). Every shipped airframe sets `param set SIM_BAT_ENABLE 0`
+so that this bridge is the *only* publisher — which means that if the socket does not open,
+**PX4 has no battery at all**, not a fallback one.
+
+It is not fatal to the simulation, and the message names the remedy: re-enable PX4's own simulated
+pack with
+
+```
+param set SIM_BAT_ENABLE 1
+```
+
+which gives you a synthetic battery instead of RealFlight's. Usual cause is the UDP port
+(`14580 + instance`) already being held by another SITL instance — see §6 if you are running more
+than one.
 
 ### `Disarming denied: not landed` after a spacebar reset
 
@@ -1231,7 +1393,12 @@ a time), then:
   `unipolar`, control surfaces are `bipolar`. Scaling a motor as bipolar folds `[0,1]` into
   `[0.5,1]`; scaling a servo as unipolar throws away its whole negative half.
 - **Nothing moves at all** → the RealFlight model may still have its own mixes/expo, or PX4 is
-  disarmed and the row's `disarm` is holding it.
+  disarmed and the row is sitting at its `disarm` value.
+
+To see what the bridge is actually sending, without QGC in the loop, set
+**`PX4_FA_DUMP_CHANNELS=<hz>`** on the make command line: it prints every channel's current value
+and its travel, so the channel a surface is on becomes obvious by moving the surface. Documented
+in [*Finding which RealFlight channel a surface is on*](README.md#finding-which-realflight-channel-a-surface-is-on).
 
 #### First suspect: a *saved* `PWM_MAIN_FUNC*` from an older install
 
@@ -1270,10 +1437,23 @@ Neither message names its cause, and the second is a consequence of the first.
 
 `rcS` writes the magnetometer and gyro **ids** during autoconfig but not their **offsets**, so
 a directory that has never been calibrated comes up with `CAL_MAG0_ID` set and
-`CAL_MAG0_XOFF/YOFF/ZOFF` absent. That is the compass fault. The airspeed validator then
-checks the pitot against airspeed derived from the EKF — groundspeed less wind — and a bad
-compass has already spoiled the EKF's yaw, so the innovation exceeds `ASPD_FS_INNOV` and a
-perfectly good pitot reading is rejected as well.
+`CAL_MAG0_XOFF/YOFF/ZOFF` absent. That is the compass fault.
+
+The airspeed message follows from it, but not by the route you might expect. The validator's
+innovation check — the one `ASPD_FS_INNOV` feeds — **cannot fire on the ground at all**:
+`AirspeedValidator::check_airspeed_innovation()` forces `_innovations_check_failed = false`
+unless `_in_fixed_wing_flight`, and a preflight message is by definition raised before flight.
+(For completeness, exceeding `ASPD_FS_INNOV` only starts an integrator; `ASPD_FS_INTEG` is what
+actually trips it.)
+
+What happens on the ground is the fallback. With no valid sensor index, `airspeed_selector`
+falls back to *ground-minus-wind*, and that requires `_gnss_lpos_valid`: a recent local position
+with `v_xy_valid` **and** EKF2 actively fusing GNSS position or velocity. An EKF whose yaw is
+spoiled by the missing compass calibration has not begun GNSS fusion, so the fallback is refused,
+the selected index goes to `DISABLED_INDEX`, `calibrated_airspeed_m_s` is published as NaN, and
+the preflight check reports "Airspeed invalid" on that NaN alone. So the remedy is unchanged —
+fix the compass and the airspeed message goes with it — but nothing about the pitot or
+`ASPD_FS_*` is involved.
 
 `sitl_run.sh` avoids this by seeding a working directory that has no `parameters.bson` from
 `build/px4_sitl_nolockstep/rootfs`, and says so when it does:
@@ -1287,6 +1467,68 @@ overwrites one — or the shared directory has none to give. Either calibrate in
 (**Vehicle Setup → Sensors**, compass then gyroscope) and it is stored for good, or delete
 that one file and run again to let the seed fire. `PX4_FLIGHTAXIS_SEED=0` disables seeding
 if you want a directory calibrated from scratch.
+
+### `Preflight Fail: ekf2 missing data`
+
+**Benign, and the wording is misleading.** The underlying event text is "Waiting for estimator to
+initialize"; only the MAVLink string says "Fail". You get it on every cold start and again after
+every spacebar reset, and it clears itself once EKF2 has data to work with. Give it the same
+20–30 s the QGC checklist in §5 asks for. It is the same family of message as
+[`Disarming denied: not landed`](#disarming-denied-not-landed-after-a-spacebar-reset): a
+transient consequence of the estimator settling, not a configuration problem.
+
+### `Preflight Fail: Airspeed selector module down`
+
+A **different** failure from `Airspeed invalid` above, and worth separating. This one means the
+`airspeed_selector` module has not published for more than 2 s — the module is not running or is
+not being scheduled, rather than running and declaring the airspeed unusable. In this integration
+the usual causes are a **stalled physics clock** (RealFlight paused, a modal dialog up, or the
+`rtf` collapse described in §5) or a **bridge restart** while PX4 stayed up. Fix the thing feeding
+the clock; the module recovers on its own once time advances again.
+
+### `Preflight Fail: Compass %u uncalibrated`
+
+The sibling of `Compass %u fault` above, and the same remedy: it is a working directory whose
+magnetometer has no stored offsets. Calibrate in QGC (**Vehicle Setup → Sensors**) or let
+`sitl_run.sh` seed the directory — see
+[`Compass 0 fault` and `Airspeed invalid`](#compass-0-fault-and-airspeed-invalid-in-a-working-directory-you-just-made).
+
+### `Mission rejected: Landing waypoint/pattern required` / `Switching to Mission is currently not available`
+
+These are the two strings you actually see when a **stale mission from another model** is still
+in the shared dataman (§2 preamble). Missions live in the working directory's `dataman` file, not
+in the airframe, so flying a second model in the shared
+`build/px4_sitl_nolockstep/rootfs` hands it the first model's mission — and a mission written for
+a fixed wing is rejected outright for a multirotor, or vice versa.
+
+`MIS_TKO_LAND_REQ` is the parameter that decides whether a landing item is mandatory; the shipped
+airframes leave it at its firmware default for the vehicle type, which is why the requirement
+appears without anyone having set it. Two ways to clear the mission:
+
+- **QGC → Plan → Clear** (upload an empty plan), or
+- delete the `dataman` file in the working directory with PX4 stopped.
+
+The durable fix is not to share the directory at all — give each model its own
+`PX4_FLIGHTAXIS_ROOTFS` (§2 preamble).
+
+### `vehicle_command_ack lost, generation N -> M`
+
+**Benign.** A uORB queue-overflow detector in `mavlink_main.cpp`, logged at `PX4_ERR` so it
+arrives coloured like a fault. It means a `vehicle_command_ack` was overwritten before this
+MAVLink instance read it — common as soon as several MAVLink clients are attached (QGC plus a ROS
+2 or MAVSDK client, or the extra endpoints of §4). Nothing is lost that matters; the command
+itself was executed and acknowledged to whoever asked.
+
+### Where the logs land
+
+`$rootfs/log/<date>/`, where `$rootfs` is the working directory — the shared
+`build/px4_sitl_nolockstep/rootfs`, or whatever you gave `PX4_FLIGHTAXIS_ROOTFS` (§2 preamble).
+
+These airframes `param set-default SDLOG_MODE 0`, which logs from arm to disarm rather than from
+boot (`rcS` would otherwise set 1), so
+**there is one file per flight** and the newest file in the newest dated directory is the flight
+you just flew. That also means a run in which you never armed leaves no file at all, which is
+usually the explanation for a missing log rather than a logging failure.
 
 ### Aircraft resets or teleports
 
