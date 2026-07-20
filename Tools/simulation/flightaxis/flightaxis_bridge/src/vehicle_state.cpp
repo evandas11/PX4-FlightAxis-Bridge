@@ -563,12 +563,28 @@ void VehicleState::setFAData(const FAState &fa, double dt_true)
 		rangefinder_m = std::numeric_limits<double>::quiet_NaN();
 	}
 
-	// RPM (single channel)
-	if (fa.m_propRPM > 0) {
-		rpm = fa.m_propRPM;
-
-	} else if (fa.m_heliMainRotorRPM > 0) {
+	/*
+	 * RPM (single channel). RealFlight reports two rotation rates and the bridge
+	 * has one channel to carry, so it has to choose.
+	 *
+	 * The main rotor wins when it is turning. On a helicopter both fields are
+	 * live at once - m_propRPM is the tail rotor there - and the main rotor is
+	 * the meaningful number, so testing the prop first would silently ship the
+	 * tail rotor instead. Nothing downstream could tell the two apart: the
+	 * result is a plausible wrong value, not an error.
+	 *
+	 * On every other airframe m_heliMainRotorRPM is zero, so the prop still
+	 * wins by falling through. Of the shipped models only the helicopter has a
+	 * main rotor, which is why the order matters for exactly one vehicle.
+	 *
+	 * SITL-only: the HITL profile sets rpm_interval_us = INTERVAL_DISABLED,
+	 * because mavlink_receiver.cpp has no RAW_RPM handler.
+	 */
+	if (fa.m_heliMainRotorRPM > 0) {
 		rpm = fa.m_heliMainRotorRPM;
+
+	} else if (fa.m_propRPM > 0) {
+		rpm = fa.m_propRPM;
 
 	} else {
 		rpm = 0;

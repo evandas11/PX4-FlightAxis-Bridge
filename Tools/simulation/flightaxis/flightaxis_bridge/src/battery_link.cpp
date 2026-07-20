@@ -566,17 +566,27 @@ void BatteryLink::updateInternalResistance(double voltage_v, double current_a)
 
 	const double p_norm = std::sqrt(p00 * p00 + 2.0 * p10 * p10 + p11 * p11);
 
-	if (std::isfinite(p_norm) && p_norm < _rls_p_norm) {
-		_rls_ocv    = _rls_ocv + g0 * err;
-		_rls_r      = _rls_r   + g1 * err;
+	const double ocv_new = _rls_ocv + g0 * err;
+	const double r_new   = _rls_r   + g1 * err;
+
+	// A non-finite state is rejected the same way a non-improving covariance is,
+	// rather than being written and then papered over downstream. Substituting
+	// 0 Ohm for a non-finite R - which is what this used to do - throws away a
+	// good estimate AND disables the sag correction outright, while the branch
+	// immediately below keeps R for the far milder case of an uninformative
+	// sample. Worse, the poisoned _rls_r stayed in the filter, so every later
+	// sample produced a non-finite R too and the substitution became permanent.
+	if (std::isfinite(p_norm) && p_norm < _rls_p_norm
+	    && std::isfinite(ocv_new) && std::isfinite(r_new)) {
+		_rls_ocv    = ocv_new;
+		_rls_r      = r_new;
 		_rls_p00    = p00;
 		_rls_p01    = p01;
 		_rls_p10    = p10;
 		_rls_p11    = p11;
 		_rls_p_norm = p_norm;
 
-		const double r_cell = _rls_r / (double)_cell_count;
-		_cell_r_internal = clamp(std::isfinite(r_cell) ? r_cell : 0.0, 0.0, CELL_R_MAX);
+		_cell_r_internal = clamp(_rls_r / (double)_cell_count, 0.0, CELL_R_MAX);
 
 	} else {
 		// Covariance did not improve: keep R, re-centre OCV on this sample.
