@@ -1243,6 +1243,14 @@ int main(int argc, char **argv)
 		const bool controller_dropped_edge =
 			last_controller_active && !state.m_flightAxisControllerIsActive;
 
+		// Edge: the RealFlight reset flag went clear -> set. A spacebar respawn
+		// leaves this flag at 0 on most setups, but the transmitter's own reset
+		// button DOES raise it - and it does so whatever the aircraft's position,
+		// height or attitude, a genuinely unconditional trigger. Treat it exactly
+		// like the controller drop: no distance/attitude minimum of any kind.
+		const bool reset_flag_edge =
+			!last_reset_pressed && state.m_resetButtonHasBeenPressed;
+
 		last_controller_active = state.m_flightAxisControllerIsActive;
 		last_reset_pressed = state.m_resetButtonHasBeenPressed;
 
@@ -1409,11 +1417,12 @@ int main(int argc, char **argv)
 			// the edge, so holding the flag low for many frames does not repeat
 			// it. PX4_FLIGHTAXIS_RESTART_ON_RESET=0 keeps re-anchor only, same as
 			// for the teleport path.
-			if (controller_dropped_edge) {
+			if (controller_dropped_edge || reset_flag_edge) {
 				vehicle.invalidatePositionOffset();
 				if (restart_on_teleport) {
-					cerr << "[flightaxis_bridge] controller dropped (RealFlight reset)"
-					     << " - restarting PX4"
+					cerr << "[flightaxis_bridge] "
+					     << (reset_flag_edge ? "reset button pressed" : "controller dropped")
+					     << " (RealFlight reset) - restarting PX4"
 					     << " (PX4_FLIGHTAXIS_RESTART_ON_RESET=0 disables this)" << endl;
 					if (battery.active() && !battery.requestReboot()) {
 						cerr << "[flightaxis_bridge]   WARNING: could not send the"

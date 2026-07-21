@@ -612,18 +612,27 @@ before anything here can intervene — how far depends on how much propulsion th
 **How the bridge notices.** Not from `m_resetButtonHasBeenPressed`: that field does not fire on
 a spacebar respawn. There are two signals instead, and either one triggers a reset:
 
-1. **The controller drop.** A spacebar respawn deactivates the FlightAxis controller the bridge
-   injected — `m_flightAxisControllerIsActive` goes false — so the bridge always has to
-   re-inject after a reset. That transition is **independent of how far the model moved**, so it
-   fires on *every* spacebar, including a multirotor reset while hovering right over its spawn.
-   Reaching it on the success path (a valid frame came back) means RealFlight is talking to us
-   but reports our controller gone, which is a genuine reset or aircraft change rather than a
+1. **The controller drop, or the reset flag.** A reset deactivates the FlightAxis controller the
+   bridge injected — `m_flightAxisControllerIsActive` goes false — so the bridge always has to
+   re-inject afterwards; and the transmitter's own reset button additionally raises
+   `m_resetButtonHasBeenPressed`. Either edge is **completely unconditional** — no distance,
+   height or attitude minimum of any kind — so it fires even on a reset of a model sitting
+   perfectly still. Reaching it on the success path (a valid frame came back) means RealFlight is
+   talking to us but reports the reset, which is a genuine respawn / aircraft change rather than a
    socket blip — those fault the exchange and take a different path. On this edge the bridge
    prints:
 
    ```
    [flightaxis_bridge] controller dropped (RealFlight reset) - restarting PX4
+   [flightaxis_bridge] reset button pressed (RealFlight reset) - restarting PX4
    ```
+
+   **Caveat — a plain spacebar may raise neither flag.** On some RealFlight builds the spacebar
+   respawn leaves the controller active *and* the reset flag at 0; the only trace it leaves is the
+   position jump below. A reset of a genuinely stationary model on such a build sends the bridge
+   nothing to detect — a RealFlight-API limit, not something the bridge can force. The transmitter
+   reset button (this signal) always works; a plain spacebar is reliable once the model has moved
+   at all (the position path).
 
 2. **The position discontinuity.** Instrumented over two respawns in one session, the reported
    position jumped 92.3 m and then 120.9 m in a single frame while `m_resetButtonHasBeenPressed`
