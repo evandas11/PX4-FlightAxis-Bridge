@@ -634,20 +634,24 @@ a spacebar respawn. There are two signals instead, and either one triggers a res
    reset button (this signal) always works; a plain spacebar is reliable once the model has moved
    at all (the position path).
 
-2. **The position discontinuity.** Instrumented over two respawns in one session, the reported
-   position jumped 92.3 m and then 120.9 m in a single frame while `m_resetButtonHasBeenPressed`
-   stayed `0` both times. That jump is unambiguous — frames arrive about 4 ms apart, so 92 m in
-   one of them is 23 km/s. The test compares the distance moved against the distance the reported
-   velocity could actually have covered, rather than a fixed threshold, so it stays correct when
-   the glitch compensator has just absorbed a network stall and a legitimate frame really does
-   span two seconds of flight. It catches a reset even if the controller-drop signal is missed,
-   but only once the model has moved more than a small at-rest floor (default **2 m**, override
-   with `PX4_FLIGHTAXIS_TELEPORT_FLOOR_M`). That floor only has to clear RealFlight's position
-   noise, not real motion — the velocity term already covers motion — so it stays low enough that
-   a multirotor reset near its spawn, which moves only a few metres, is caught, while still not
-   false-triggering on a stationary model. (It was 10 m originally, which is why a multirotor
-   reset close to its spawn used to go unnoticed while a plane flown well away always reset; raise
-   it again if a jittery RealFlight model trips it.) On this path the bridge prints:
+2. **The position *or attitude* discontinuity.** Instrumented over two respawns in one session,
+   the reported position jumped 92.3 m and then 120.9 m in a single frame while
+   `m_resetButtonHasBeenPressed` stayed `0` both times. That jump is unambiguous — frames arrive
+   about 4 ms apart, so 92 m in one of them is 23 km/s. The test compares the distance moved
+   against the distance the reported velocity could actually have covered, rather than a fixed
+   threshold, so it stays correct when the glitch compensator has just absorbed a network stall
+   and a legitimate frame really does span two seconds of flight. **The same rule runs on
+   attitude** — the angle between successive orientations against the angle the reported body
+   rates could have swept — because a model that flipped or crashed and is reset *near* its spawn
+   barely moves in position but its attitude snaps up to 180°, which the distance test alone would
+   miss. Either the position jump (past a tiny at-rest floor, default **5 mm**, override with
+   `PX4_FLIGHTAXIS_TELEPORT_FLOOR_M`) or the attitude jump (past ~20°) triggers the reset — so a
+   spacebar reset is caught even when the model barely shifts (a ~1 cm nudge clears the floor).
+   The floors need only sit above zero: RealFlight reports **ground-truth** position and attitude,
+   so a genuinely still model moves *exactly* zero between frames, and real flight is covered by
+   the velocity and rate terms regardless. (The distance floor was 10 m originally, which is why a
+   multirotor reset close to its spawn used to go unnoticed while a plane flown well away always
+   reset.) On this path the bridge prints:
 
    ```
    [flightaxis_bridge] aircraft teleported 92.3 m (RealFlight reset) - re-anchoring

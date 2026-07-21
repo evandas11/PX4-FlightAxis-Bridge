@@ -883,14 +883,16 @@ int main(int argc, char **argv)
 	const double TELEPORT_MARGIN  = 4.0;
 
 	// The deadband a reset must clear when the model is at rest (speed ~ 0, so
-	// the TELEPORT_MARGIN * speed term is ~ 0). It only has to sit above
-	// RealFlight's position noise, NOT above real motion - the margin term
-	// already covers motion, even across a glitch frame. Kept low so a
-	// multirotor reset near its spawn - which moves only a few metres, far under
-	// the old 10 m - is caught too, not just a plane flown well away. Raise it
-	// with PX4_FLIGHTAXIS_TELEPORT_FLOOR_M (metres) if a jittery model
-	// false-triggers; lower it to catch even smaller resets.
-	double TELEPORT_FLOOR_M = 2.0;
+	// the TELEPORT_MARGIN * speed term is ~ 0). RealFlight reports GROUND-TRUTH
+	// position, not a noisy sensor, so a genuinely stationary model moves
+	// *exactly* zero between frames - which is why this can sit at millimetres
+	// without false-triggering, while real flight is covered by the velocity
+	// term regardless. Deliberately tiny so a spacebar reset is caught even when
+	// the model barely shifts (a 1 cm nudge clears it), making the reset the top
+	// priority the pilot expects. Raise it with PX4_FLIGHTAXIS_TELEPORT_FLOOR_M
+	// (metres) only if a particular RealFlight model reports jittery position at
+	// rest and trips it.
+	double TELEPORT_FLOOR_M = 0.005;
 	if (const char *floor_env = ::getenv("PX4_FLIGHTAXIS_TELEPORT_FLOOR_M")) {
 		const double v = ::atof(floor_env);
 		if (v > 0.0) {
@@ -901,6 +903,19 @@ int main(int argc, char **argv)
 	double last_position_x = 0.0, last_position_y = 0.0, last_position_z = 0.0;
 	double last_position_t = 0.0;
 	bool have_last_position = false;
+
+	// Previous-frame attitude, for the attitude-jump reset test alongside the
+	// position one. Identity quaternion until the first real frame fills it.
+	double last_qw = 1.0, last_qx = 0.0, last_qy = 0.0, last_qz = 0.0;
+
+	// Deadband for the attitude jump when the model is not rotating (rate ~ 0,
+	// so the rate term is ~ 0): about 20 deg. Only has to sit above a steady
+	// hover's small tilt; a reset that levels a flipped or crashed model snaps
+	// far past it (up to 180 deg), so this catches a recovery reset that barely
+	// moves in POSITION - which is exactly the case the distance test misses.
+	const double ATTITUDE_FLOOR_RAD = 0.35;
+	const double DEG2RAD = 0.017453292519943295;
+	const double RAD2DEG = 57.29577951308232;
 	uint64_t last_reinject_us = 0;
 
 	// FPS reporting
@@ -1307,9 +1322,30 @@ int main(int argc, char **argv)
 			const double frame_dt = state.m_currentPhysicsTime_SEC - last_position_t;
 			const double reachable = TELEPORT_MARGIN * speed * frame_dt + TELEPORT_FLOOR_M;
 
-			if (moved > reachable) {
+			// Attitude jump, by the same rule as position: the angle between the
+			// last and current orientation, against the angle the reported body
+			// rates could actually have swept this frame plus a small floor. On a
+			// reset the orientation snaps to the spawn attitude; a flipped or
+			// crashed model reset near its spawn barely moves but its attitude
+			// jumps up to 180 deg, which the distance test cannot see.
+			double qdot = last_qw * state.m_orientationQuaternionW +
+			              last_qx * state.m_orientationQuaternionX +
+			              last_qy * state.m_orientationQuaternionY +
+			              last_qz * state.m_orientationQuaternionZ;
+			if (qdot < 0.0) { qdot = -qdot; }         // shortest arc
+			if (qdot > 1.0) { qdot = 1.0; }           // guard acos domain
+			const double turned = 2.0 * std::acos(qdot);   // radians
+			const double rate = std::sqrt(
+				state.m_rollRate_DEGpSEC  * state.m_rollRate_DEGpSEC +
+				state.m_pitchRate_DEGpSEC * state.m_pitchRate_DEGpSEC +
+				state.m_yawRate_DEGpSEC   * state.m_yawRate_DEGpSEC) * DEG2RAD;
+			const double reachable_rad =
+				TELEPORT_MARGIN * rate * frame_dt + ATTITUDE_FLOOR_RAD;
+
+			if (moved > reachable || turned > reachable_rad) {
 				cerr << "[flightaxis_bridge] aircraft teleported " << moved
-				     << " m (RealFlight reset) - re-anchoring" << endl;
+				     << " m / " << (turned * RAD2DEG)
+				     << " deg (RealFlight reset) - re-anchoring" << endl;
 				vehicle.invalidatePositionOffset();
 
 				/*
@@ -1402,6 +1438,10 @@ int main(int argc, char **argv)
 		last_position_x = state.m_aircraftPositionX_MTR;
 		last_position_y = state.m_aircraftPositionY_MTR;
 		last_position_z = state.m_altitudeASL_MTR;
+		last_qw = state.m_orientationQuaternionW;
+		last_qx = state.m_orientationQuaternionX;
+		last_qy = state.m_orientationQuaternionY;
+		last_qz = state.m_orientationQuaternionZ;
 		have_last_position = true;
 
 		// spacebar reset or aircraft change inside RealFlight: re-inject and re-anchor
