@@ -217,14 +217,19 @@ VehicleState::VehicleState(double home_lat_deg, double home_lon_deg, double home
 
 	standard_normal_distribution_ = std::normal_distribution<double>(0.0, 1.0);
 
-	// sensor noise magnitudes
-	acc_nois = 0.0001;
-	gyro_nois = 0.001;
-	mag_nois = 0.001;
-	baro_alt_nois = 0.01;
-	temp_nois = 0.01;
-	abs_pressure_nois = 0.05;
-	diff_pressure_nois = 0.01;
+	// Sensor noise magnitudes (standard deviation per channel). RealFlight
+	// hands us perfectly clean physics; each reading in fillSensorMsg() gets a
+	// Gaussian sample scaled by these before it is sent to PX4, so the signal
+	// resembles a physical sensor rather than an ideal one and the EKF does not
+	// converge with unrealistic confidence. Set any of these to 0 to feed that
+	// channel noise-free (useful for debugging, less like real hardware).
+	acc_nois = 0.0001;           // accelerometer (m/s^2)
+	gyro_nois = 0.001;           // gyroscope (rad/s)
+	mag_nois = 0.001;            // magnetometer (gauss)
+	baro_alt_nois = 0.01;        // barometric altitude (m)
+	temp_nois = 0.01;            // temperature (degC)
+	abs_pressure_nois = 0.05;    // absolute pressure (hPa)
+	diff_pressure_nois = 0.01;   // differential/pitot pressure (hPa)
 
 	// WMM earth field at home (gauss), NED - same synthesis as FG bridge, but
 	// through magTableLookup() rather than the accessors directly; see the note
