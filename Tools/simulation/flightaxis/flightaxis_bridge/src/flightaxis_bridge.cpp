@@ -1217,6 +1217,17 @@ int main(int argc, char **argv)
 			continue;
 		}
 
+		// Edge: our injected controller was active last frame and is gone this
+		// one. Reaching here means ExchangeData SUCCEEDED (we are on the success
+		// path) yet RealFlight reports the controller dropped - which is a
+		// spacebar respawn or an aircraft change, not a socket blip (a blip
+		// faults ExchangeData and takes the failure path above instead). Unlike
+		// the position-teleport test below it does not depend on how far the
+		// model moved, so a multirotor reset while hovering over its own spawn -
+		// a jump far under TELEPORT_FLOOR_M - is caught just the same.
+		const bool controller_dropped_edge =
+			last_controller_active && !state.m_flightAxisControllerIsActive;
+
 		last_controller_active = state.m_flightAxisControllerIsActive;
 		last_reset_pressed = state.m_resetButtonHasBeenPressed;
 
@@ -1372,6 +1383,33 @@ int main(int argc, char **argv)
 
 		// spacebar reset or aircraft change inside RealFlight: re-inject and re-anchor
 		if (!state.m_flightAxisControllerIsActive || state.m_resetButtonHasBeenPressed) {
+			// A spacebar respawn drops the controller (the edge computed above)
+			// but need not move the aircraft far enough for the position-teleport
+			// test to fire - a multirotor reset while hovering over its spawn
+			// barely moves. So treat the controller-drop edge as a reset in its
+			// own right, on equal footing with a teleport: re-anchor, and when
+			// restart-on-reset is enabled (the default) restart PX4 exactly as
+			// the teleport path does, so EVERY spacebar gets the clean-slate
+			// estimator a respawn needs - near spawn or far. This runs once, on
+			// the edge, so holding the flag low for many frames does not repeat
+			// it. PX4_FLIGHTAXIS_RESTART_ON_RESET=0 keeps re-anchor only, same as
+			// for the teleport path.
+			if (controller_dropped_edge) {
+				vehicle.invalidatePositionOffset();
+				if (restart_on_teleport) {
+					cerr << "[flightaxis_bridge] controller dropped (RealFlight reset)"
+					     << " - restarting PX4"
+					     << " (PX4_FLIGHTAXIS_RESTART_ON_RESET=0 disables this)" << endl;
+					if (battery.active() && !battery.requestReboot()) {
+						cerr << "[flightaxis_bridge]   WARNING: could not send the"
+						     << " shutdown request. If PX4 keeps running with"
+						     << " \"Broken pipe\" warnings, Ctrl-C the session." << endl;
+					}
+					fa.releaseController();
+					return EXIT_RESTART_REQUESTED;
+				}
+			}
+
 			// The main loop free-runs at several kHz, so this branch is entered
 			// thousands of times per second while the flag is low. startController()
 			// is three SOAP round-trips INCLUDING ResetAircraft, so reinjecting on

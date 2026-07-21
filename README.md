@@ -610,17 +610,35 @@ taken at power puts the aircraft on the runway with the prop still turning and i
 before anything here can intervene — how far depends on how much propulsion the model has.
 
 **How the bridge notices.** Not from `m_resetButtonHasBeenPressed`: that field does not fire on
-a spacebar respawn. Instrumented over two respawns in one session, the reported position jumped
-92.3 m and then 120.9 m in a single frame while the flag stayed `0` both times. The
-discontinuity is the signal instead, and it is unambiguous — frames arrive about 4 ms apart, so
-92 m in one of them is 23 km/s. The test compares the distance moved against the distance the
-reported velocity could actually have covered, rather than against a fixed threshold, so it
-stays correct when the glitch compensator has just absorbed a network stall and a legitimate
-frame really does span two seconds of flight. On detection the bridge prints:
+a spacebar respawn. There are two signals instead, and either one triggers a reset:
 
-```
-[flightaxis_bridge] aircraft teleported 92.3 m (RealFlight reset) - re-anchoring
-```
+1. **The controller drop.** A spacebar respawn deactivates the FlightAxis controller the bridge
+   injected — `m_flightAxisControllerIsActive` goes false — so the bridge always has to
+   re-inject after a reset. That transition is **independent of how far the model moved**, so it
+   fires on *every* spacebar, including a multirotor reset while hovering right over its spawn.
+   Reaching it on the success path (a valid frame came back) means RealFlight is talking to us
+   but reports our controller gone, which is a genuine reset or aircraft change rather than a
+   socket blip — those fault the exchange and take a different path. On this edge the bridge
+   prints:
+
+   ```
+   [flightaxis_bridge] controller dropped (RealFlight reset) - restarting PX4
+   ```
+
+2. **The position discontinuity.** Instrumented over two respawns in one session, the reported
+   position jumped 92.3 m and then 120.9 m in a single frame while `m_resetButtonHasBeenPressed`
+   stayed `0` both times. That jump is unambiguous — frames arrive about 4 ms apart, so 92 m in
+   one of them is 23 km/s. The test compares the distance moved against the distance the reported
+   velocity could actually have covered, rather than a fixed threshold, so it stays correct when
+   the glitch compensator has just absorbed a network stall and a legitimate frame really does
+   span two seconds of flight. It catches a reset even if the controller-drop signal is missed,
+   but only once the model has moved more than a ~10 m floor — which is why, before the
+   controller-drop signal was added, a multirotor reset *at* its spawn point went unnoticed while
+   a plane flown well away from spawn always reset. On this path the bridge prints:
+
+   ```
+   [flightaxis_bridge] aircraft teleported 92.3 m (RealFlight reset) - re-anchoring
+   ```
 
 **What a respawn does regardless of this option.** The position anchor is re-captured, so PX4 is
 told the model is back at the point it entered the world. The heading datum is *not* re-derived
