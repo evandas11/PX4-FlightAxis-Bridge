@@ -881,7 +881,22 @@ int main(int argc, char **argv)
 	uint64_t reset_retry_next_us  = 0;
 
 	const double TELEPORT_MARGIN  = 4.0;
-	const double TELEPORT_FLOOR_M = 10.0;
+
+	// The deadband a reset must clear when the model is at rest (speed ~ 0, so
+	// the TELEPORT_MARGIN * speed term is ~ 0). It only has to sit above
+	// RealFlight's position noise, NOT above real motion - the margin term
+	// already covers motion, even across a glitch frame. Kept low so a
+	// multirotor reset near its spawn - which moves only a few metres, far under
+	// the old 10 m - is caught too, not just a plane flown well away. Raise it
+	// with PX4_FLIGHTAXIS_TELEPORT_FLOOR_M (metres) if a jittery model
+	// false-triggers; lower it to catch even smaller resets.
+	double TELEPORT_FLOOR_M = 2.0;
+	if (const char *floor_env = ::getenv("PX4_FLIGHTAXIS_TELEPORT_FLOOR_M")) {
+		const double v = ::atof(floor_env);
+		if (v > 0.0) {
+			TELEPORT_FLOOR_M = v;
+		}
+	}
 
 	double last_position_x = 0.0, last_position_y = 0.0, last_position_z = 0.0;
 	double last_position_t = 0.0;

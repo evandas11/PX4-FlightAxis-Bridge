@@ -632,9 +632,13 @@ a spacebar respawn. There are two signals instead, and either one triggers a res
    velocity could actually have covered, rather than a fixed threshold, so it stays correct when
    the glitch compensator has just absorbed a network stall and a legitimate frame really does
    span two seconds of flight. It catches a reset even if the controller-drop signal is missed,
-   but only once the model has moved more than a ~10 m floor — which is why, before the
-   controller-drop signal was added, a multirotor reset *at* its spawn point went unnoticed while
-   a plane flown well away from spawn always reset. On this path the bridge prints:
+   but only once the model has moved more than a small at-rest floor (default **2 m**, override
+   with `PX4_FLIGHTAXIS_TELEPORT_FLOOR_M`). That floor only has to clear RealFlight's position
+   noise, not real motion — the velocity term already covers motion — so it stays low enough that
+   a multirotor reset near its spawn, which moves only a few metres, is caught, while still not
+   false-triggering on a stationary model. (It was 10 m originally, which is why a multirotor
+   reset close to its spawn used to go unnoticed while a plane flown well away always reset; raise
+   it again if a jittery RealFlight model trips it.) On this path the bridge prints:
 
    ```
    [flightaxis_bridge] aircraft teleported 92.3 m (RealFlight reset) - re-anchoring
