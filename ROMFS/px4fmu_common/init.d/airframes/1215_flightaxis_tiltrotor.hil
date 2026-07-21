@@ -1,0 +1,233 @@
+#!/bin/sh
+#
+# ############################################################################
+# #  DRIVES A REAL FLIGHT CONTROLLER AND REAL ESCs. PROPELLERS OFF.          #
+# #                                                                          #
+# #  This airframe was derived by MECHANICAL SUBSTITUTION from the SITL      #
+# #  airframe init.d-posix/airframes/1215_flightaxis_tiltrotor: every        #
+# #  PWM_MAIN_FUNC<N> was rewritten to HIL_ACT_FUNC<N> with the same <N>     #
+# #  and the same numeric function value, SITL-only startup parameters were  #
+# #  dropped, and SYS_HITL was added. This drives a real flight controller   #
+# #  and real ESCs: with the propellers off, check actuator direction,       #
+# #  ordering, endpoints and failsafe on the bench before you fit anything   #
+# #  to the airframe or apply flight power. The geometry and the output      #
+# #  mapping follow by construction; the CONTROLLER GAINS are inherited      #
+# #  from the SITL file and describe no particular aircraft. Treat this      #
+# #  as a starting point and verify the Actuators tab in QGC before          #
+# #  arming anything.                                                        #
+# ############################################################################
+#
+# Companion-side model:
+# Tools/simulation/flightaxis/flightaxis_bridge/models/tiltrotor.json
+#
+# @name HITL FlightAxis Tiltrotor
+#
+# @type VTOL Tiltrotor
+# @class VTOL
+#
+# @output Motor1 Rotor 1
+# @output Motor2 Rotor 2
+# @output Motor3 Rotor 3
+# @output Motor4 Rotor 4
+# @output Servo1 Aileron left
+# @output Servo2 Aileron right
+# @output Servo3 Elevator
+# @output Servo4 Rudder
+# @output Servo5 Tilt servo 1
+# @output Servo6 Tilt servo 2
+# @output Servo7 Tilt servo 3
+# @output Servo8 Tilt servo 4
+#
+
+. ${R}etc/init.d/rc.vtol_defaults
+
+# HITL: sensors and GPS arrive as MAVLink HIL_* messages, real outputs stay
+# disabled and actuator commands leave the board as HIL_ACTUATOR_CONTROLS.
+param set SYS_HITL 1
+
+param set UAVCAN_ENABLE 0
+
+# The board is on the bench with no battery attached.
+param set-default CBRK_SUPPLY_CHK 894281
+
+# Headless runs (QGC optional) have no manual control source at all. Value 4
+# ("ignore any stick input") is the only value that skips the RC-loss failsafe;
+# the firmware default of 1 does not. NAV_RCL_ACT is deliberately left at its
+# firmware default: it is unreachable once COM_RC_IN_MODE is 4, and the value 0
+# suggested for it is outside the parameter's declared range (@min 1).
+#
+# THIS ALSO BLOCKS RC PASSTHROUGH -- both a receiver wired to the board and the
+# transmitter plugged into RealFlight, which the bridge forwards to PX4 as
+# RC_CHANNELS -> input_rc. That stream is sent regardless of this parameter and
+# "listener input_rc" will show live stick values either way, but value 4 makes
+# commander ignore them, so the sticks will neither arm nor fly the aircraft.
+# If passthrough looks broken while input_rc is populated and moving, this
+# parameter is why.
+#
+# No single value serves both cases, because PX4 overloads this one parameter
+# for both jobs: the SAME value 4 is what skips the RC-loss failsafe
+# (failsafe.cpp:479, tested against RcInMode::StickInputDisabled) and what gates
+# the manual-mode arming check (modeCheck.cpp:154). Any value that enables the
+# sticks therefore necessarily re-arms the RC-loss failsafe, and a headless run
+# with no transmitter would take a failsafe action (NAV_RCL_ACT, default
+# 2 = Return) as soon as it armed. Defaulting to headless costs the transmitter
+# user exactly one line, set at the pxh> prompt or added to this file:
+#
+#     param set COM_RC_IN_MODE 0     # RC transmitter / receiver only
+#
+# Use 0 when a transmitter is the only stick source (it also keeps a QGC virtual
+# joystick from competing with it), or 2 to allow a transmitter and a QGC
+# joystick with fallback. The transmitter must then be calibrated in QGC exactly
+# as for real hardware (Vehicle Setup -> Radio): PX4 does not act on input_rc
+# until RC_MAP_* and the per-channel RC_MIN/RC_TRIM/RC_MAX are set.
+param set-default COM_RC_IN_MODE 4
+
+# Negative disables the pre-takeoff auto-disarm. rc.vtol_defaults does not set
+# it, so this would inherit the 10 s firmware default (commander_params.c:225)
+# and auto-disarm 10 s after arming if the aircraft has not left the ground -
+# which a bench test of the lift/pusher ordering always hits, and which reads
+# like a bug rather than a timer. rc.fw_defaults and rc.sc_defaults already ship
+# -1 upstream for the same reason, so the plane gets this for free and only the
+# two multirotor-based airframes need it.
+param set-default COM_DISARM_PRFLT -1
+
+# NOTE: the motor failure detector cannot fire in HITL, for any vehicle, and
+# FD_ACT_EN / FD_ACT_MOT_TOUT are therefore deliberately left at their firmware
+# defaults rather than being pre-suppressed here.
+# The undercurrent test is
+#   esc_current < esc_throttle * FD_ACT_MOT_C2T   (FD_ACT_MOT_C2T default 2.0)
+# and it needs an esc_status publication to evaluate. In HITL the outputs are
+# owned by pwm_out_sim's HIL backend, which publishes no esc_status at all (it
+# only fills actuator_outputs, which mavlink turns into HIL_ACTUATOR_CONTROLS),
+# and no real ESC telemetry is wired to the board on the bench. With no
+# esc_status the detector never evaluates, so pre-disabling it would suppress
+# nothing while permanently masking the check if you later attach real ESC
+# telemetry to a HITL rig.
+# (In SITL the equivalent conclusion holds for a different reason:
+# SimulatorMavlink there publishes esc_current = 1 + |control| * 15 while armed,
+# and 1 + 15c < 2c has no solution for any throttle c. Deliberate injection via
+# "failure esc <n> wrong" still trips it there because
+# FailureInjector::manipulateEscStatus scales the current by 0.1. That injection
+# path is NOT available in HITL, again for want of an esc_status publisher.)
+
+# ---------------------------------------------------------------------------
+# GEOMETRY LIFTED FROM PX4 13030_generic_vtol_quad_tiltrotor; channel order,
+# tilt/servo mapping and VT_*/gains are UNVALIDATED against RealFlight -- verify
+# the QGC Actuators tab and expect to retune.
+# ---------------------------------------------------------------------------
+
+# Actuator geometry (QGC Actuators tab) MUST match the "px4" output indices
+# in Tools/simulation/flightaxis/flightaxis_bridge/models/tiltrotor.json.
+#
+# HIL_ACT_FUNC<N> lands on HIL_ACTUATOR_CONTROLS.controls[N-1] -- exactly as
+# PWM_MAIN_FUNC<N> does in SITL -- so the model JSON indices are unchanged and
+# the assignments below produce:
+#
+#   controls[0]  = 101 Motor 1     rotor 1        [0,1]  -> tiltrotor.json rf0
+#   controls[1]  = 102 Motor 2     rotor 2        [0,1]  -> tiltrotor.json rf1
+#   controls[2]  = 103 Motor 3     rotor 3        [0,1]  -> tiltrotor.json rf2
+#   controls[3]  = 104 Motor 4     rotor 4        [0,1]  -> tiltrotor.json rf3
+#   controls[4]  = 201 Servo 1     aileron left   [-1,1] -> tiltrotor.json rf4
+#   controls[5]  = 202 Servo 2     aileron right  [-1,1] -> tiltrotor.json rf5
+#   controls[6]  = 203 Servo 3     elevator       [-1,1] -> tiltrotor.json rf6
+#   controls[7]  = 204 Servo 4     rudder         [-1,1] -> tiltrotor.json rf7
+#   controls[8]  = 205 Servo 5     tilt servo 1   [-1,1] -> tiltrotor.json rf8
+#   controls[9]  = 206 Servo 6     tilt servo 2   [-1,1] -> tiltrotor.json rf9
+#   controls[10] = 207 Servo 7     tilt servo 3   [-1,1] -> tiltrotor.json rf10
+#   controls[11] = 208 Servo 8     tilt servo 4   [-1,1] -> tiltrotor.json rf11
+#
+# The servo-function order follows PX4's own actuator ordering for this frame:
+# ActuatorEffectivenessTiltrotorVTOL adds the four control surfaces (CA_SV_CS*)
+# to the servo list BEFORE the four tilt servos (CA_SV_TL*), so Servo 1-4 are
+# the surfaces and Servo 5-8 the tilts. As with quadplane.json, tiltrotor.json
+# is then a PURE IDENTITY MAP: every row has rf == px4, and WHAT each channel
+# carries is decided entirely by the HIL_ACT_FUNC<N> values below. If the wrong
+# thing comes out on a RealFlight channel, change the FUNC parameter, not the
+# JSON. This channel order is UNVALIDATED against any RealFlight tiltrotor model
+# -- confirm it on the QGC Actuators tab first.
+param set-default MAV_TYPE 21
+
+param set-default VT_TYPE 1
+
+param set-default CA_AIRFRAME 3
+param set-default CA_ROTOR0_TILT 1
+param set-default CA_ROTOR1_TILT 2
+param set-default CA_ROTOR2_TILT 3
+param set-default CA_ROTOR3_TILT 4
+param set-default CA_SV_CS_COUNT 4
+param set-default CA_SV_CS0_TYPE 1
+param set-default CA_SV_CS0_TRQ_R -0.5
+param set-default CA_SV_CS1_TRQ_R 0.5
+param set-default CA_SV_CS1_TYPE 2
+param set-default CA_SV_CS2_TRQ_P 1
+param set-default CA_SV_CS2_TYPE 3
+param set-default CA_SV_CS3_TRQ_Y 1
+param set-default CA_SV_CS3_TYPE 4
+param set-default CA_SV_TL_COUNT 4
+
+# Square quadrotor X PX4 numbering
+param set-default CA_ROTOR_COUNT 4
+param set-default CA_ROTOR0_PX 1
+param set-default CA_ROTOR0_PY 1
+param set-default CA_ROTOR1_PX -1
+param set-default CA_ROTOR1_PY -1
+param set-default CA_ROTOR2_PX 1
+param set-default CA_ROTOR2_PY -1
+param set-default CA_ROTOR2_KM -0.05
+param set-default CA_ROTOR3_PX -1
+param set-default CA_ROTOR3_PY 1
+param set-default CA_ROTOR3_KM -0.05
+
+param set-default HIL_ACT_FUNC1 101
+param set-default HIL_ACT_FUNC2 102
+param set-default HIL_ACT_FUNC3 103
+param set-default HIL_ACT_FUNC4 104
+param set-default HIL_ACT_FUNC5 201
+param set-default HIL_ACT_FUNC6 202
+param set-default HIL_ACT_FUNC7 203
+param set-default HIL_ACT_FUNC8 204
+param set-default HIL_ACT_FUNC9 205
+param set-default HIL_ACT_FUNC10 206
+param set-default HIL_ACT_FUNC11 207
+param set-default HIL_ACT_FUNC12 208
+
+param set-default FW_AIRSPD_MAX 25
+param set-default NPFG_PERIOD 12
+param set-default FW_PR_FF 0.2
+param set-default FW_PR_P 0.9
+param set-default FW_P_LIM_MIN -15
+param set-default FW_RR_FF 0.1
+param set-default FW_RR_P 0.3
+param set-default FW_THR_TRIM 0.25
+param set-default FW_THR_MAX 0.6
+param set-default FW_THR_MIN 0.05
+param set-default FW_THR_ASPD_MAX 0.4
+param set-default FW_PSP_OFF 2
+
+# KNOWN-FLYABLE, NOT KNOWN-CORRECT. These three, and the FW_*/MC_* block
+# around them, are inherited from the FlightAxis quadplane family template.
+# Unlike the rotor geometry above, gains are dimensional - nothing normalises
+# them - so they describe that reference aircraft, not whichever RealFlight
+# model you load.
+# The TECS climb/sink envelope is the first thing that will misbehave if your
+# aircraft is faster or slower, followed by the airspeed and throttle limits.
+# Expect to retune rather than to trust these.
+param set-default FW_T_CLMB_MAX 8
+param set-default FW_T_SINK_MAX 2.7
+param set-default FW_T_SINK_MIN 2.2
+
+param set-default MC_AIRMODE 1
+param set-default MC_ROLL_P 4
+param set-default MC_ROLLRATE_P 0.3
+param set-default MC_YAW_P 1.6
+param set-default MC_YAWRATE_P 0.3
+
+# Was 10, copied from 1040_gazebo-classic_standard_vtol. 10 m is below
+# VT_QC_T_ALT_LOSS (20 m): a quad-chute for "loss of altitude during
+# transition" cannot fire before the aircraft has already descended through the
+# ground, so the protection that is supposed to save the airframe is
+# unreachable at the altitude this parameter picks to transition from.
+# rc.vtol_defaults ships 20, which is exactly VT_QC_T_ALT_LOSS and leaves zero
+# recovery room. 30 puts the whole quad-chute band plus a margin above terrain.
+param set-default MIS_TAKEOFF_ALT 30
+param set-default NAV_ACC_RAD 5

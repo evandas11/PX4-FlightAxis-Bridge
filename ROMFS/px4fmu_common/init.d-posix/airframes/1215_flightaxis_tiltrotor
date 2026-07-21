@@ -1,0 +1,306 @@
+#!/bin/sh
+#
+# @name FlightAxis Tiltrotor VTOL
+#
+# @type VTOL Tiltrotor
+#
+
+. ${R}etc/init.d/rc.vtol_defaults
+
+# RealFlight free-runs (no lockstep), GPS samples arrive fresh.
+# Forced with "param set": px4-rc.mavlinksim runs after this file and would
+# otherwise override the default back to 10 ms.
+param set EKF2_GPS_DELAY 0
+
+# rcS sets SDLOG_MODE 1 ("from boot until disarm"), which opens the log at boot
+# and so records the idle stretch before you ever arm. Mode 0 is "when armed
+# until disarm": one file per flight, nothing else. SDLOG_MODE is
+# @reboot_required, so this has to be a startup default, not a pxh> command.
+param set-default SDLOG_MODE 0
+
+# PX4 learns accelerometer, gyro and magnetometer offsets in flight and COMMITS
+# them as permanent calibration. On a real aircraft that tracks a bias that
+# genuinely drifts. Here every sensor is synthesised from RealFlight's state and
+# has no bias to find, so what gets learned is the estimator's own transients -
+# and then saved, so the next flight starts from them. Measured: an accelerometer
+# offset going from zero to 0.36 m/s2 within a single session, which dead-reckons
+# to roughly 21 m/s in a minute and reads as the aircraft wandering in QGC while
+# it sits still in RealFlight. It survives restarts, so the symptom looks
+# unrelated to whatever was last changed.
+param set-default SENS_IMU_AUTOCAL 0
+param set-default SENS_MAG_AUTOCAL 0
+param set-default IMU_GYRO_CAL_EN 0
+
+# The bridge supplies the battery from RealFlight's own model (pack voltage and
+# current draw, or fuel remaining on internal-combustion models), so PX4's
+# synthetic battery must be switched off or the two publishers alternate on the
+# battery_status topic and the reading flickers between them.
+#
+# The bridge sends BATTERY_STATUS on UDP 14580+instance, which reaches
+# MavlinkReceiver::handle_message_battery_status(); the simulator link on TCP
+# 4560 cannot carry it, because SimulatorMavlink::handle_message() has no
+# BATTERY_STATUS case at all. See Tools/simulation/flightaxis/flightaxis_bridge/
+# src/battery_link.h for the full reasoning.
+#
+# If the bridge cannot open that socket it says so and PX4 is left with no
+# battery: set this back to 1 in that case.
+param set SIM_BAT_ENABLE 0
+
+# Only IMU instance 0 is ever supplied: the bridge sends HIL_SENSOR with id = 0,
+# so SimulatorMavlink only ever fills _px4_accel[0]/_px4_gyro[0]. px4-rc.mavlinksim
+# asks for 3, which leaves two EKF instances running on dead sensors.
+# Forced with "param set": px4-rc.mavlinksim runs after this file and would
+# otherwise override the default back to 3. Note 0 is not an alternative --
+# EKF2.cpp clamps EKF2_MULTI_IMU to a minimum of 1 whenever SENS_IMU_MODE is 0.
+param set EKF2_MULTI_IMU 1
+
+# Headless runs (QGC optional) have no manual control source at all. Value 4
+# ("ignore any stick input") is the only value that skips the RC-loss failsafe;
+# rcS's default of 1 does not. Without this, RC-loss failsafe is avoided only by
+# the _manual_control_lost_at_arming fallback, which stops applying if manual
+# control is ever briefly present. NAV_RCL_ACT is deliberately left at its
+# firmware default: it is unreachable once COM_RC_IN_MODE is 4, and the value 0
+# suggested for it is outside the parameter's declared range (@min 1).
+#
+# THIS ALSO BLOCKS RC TRANSMITTER PASSTHROUGH, and that is a deliberate trade
+# rather than an oversight. The bridge forwards a physical transmitter plugged
+# into RealFlight to PX4 as RC_CHANNELS -> input_rc (see the RC block in
+# vehicle_state.h). That stream is sent regardless of this parameter, and
+# "listener input_rc" will show the live stick values either way - but value 4
+# makes commander ignore them, so the sticks will neither arm nor fly the
+# aircraft. If passthrough looks broken while input_rc is populated and moving,
+# this parameter is why.
+#
+# No single value serves both cases, because PX4 overloads this one parameter
+# for both jobs: the SAME value 4 is what skips the RC-loss failsafe
+# (failsafe.cpp:479, tested against RcInMode::StickInputDisabled) and what gates
+# the manual-mode arming check (modeCheck.cpp:154). Any value that enables the
+# sticks therefore necessarily re-arms the RC-loss failsafe, and a headless run
+# with no transmitter would take a failsafe action (NAV_RCL_ACT, default
+# 2 = Return) as soon as it armed. Defaulting to the transmitter case would
+# break every user who does not have one - the common case - while defaulting
+# to headless costs the transmitter user exactly one line, set at the pxh>
+# prompt or added to this file:
+#
+#     param set COM_RC_IN_MODE 0     # RC transmitter only
+#
+# Use 0 when the transmitter is the only stick source (it also keeps a QGC
+# virtual joystick from competing with it), or 2 to allow a transmitter and a
+# QGC joystick with fallback. The transmitter must then be calibrated in QGC
+# exactly as for real hardware (Vehicle Setup -> Radio): PX4 does not act on
+# input_rc until RC_MAP_* and the per-channel RC_MIN/RC_TRIM/RC_MAX are set.
+param set-default COM_RC_IN_MODE 4
+
+# PX4's remaining-flight-time failsafe cannot work with a MAVLink-injected
+# battery, and its default action is Return.
+#
+# The bridge feeds RealFlight's real pack voltage, current and fuel to PX4 as
+# BATTERY_STATUS. But mavlink_receiver's handler never sets
+# battery_status.time_remaining_s, so it keeps the zero from struct
+# initialisation. batteryCheck.cpp then reads that 0.0, PX4_ISFINITE(0.0) is
+# true, and PX4 concludes there are zero seconds of flight left - so
+# COM_FLTT_LOW_ACT 3 fires an RTL within seconds of arming, every time.
+#
+# This is structural: the estimate is not something we can supply through that
+# message, so acting on it means acting on a number PX4 never received. Set to
+# None. Low-battery protection is unaffected - BAT_LOW_THR, BAT_CRIT_THR and
+# BAT_EMERGEN_THR all act on "remaining", which the bridge does supply.
+# Forced with "param set", not set-default: a value saved from an earlier
+# session would otherwise win and bring the RTL straight back. The same
+# applies to SIM_BAT_ENABLE above - two battery publishers fighting is worse
+# than either alone. Both are requirements of this integration rather than
+# preferences, so they are not left to whatever is in parameters.bson.
+param set COM_FLTT_LOW_ACT 0
+
+# ...but COM_FLTT_LOW_ACT 0 is NOT sufficient on its own, and the reason is a
+# firmware bug rather than anything about this integration. Measured in SITL:
+# the aircraft lifted off, was forced into AUTO_LOITER 1.4 s later, sank back
+# from 0.62 m to 0.09 m, hovered there for exactly 5.00 s, and only then climbed
+# away. Reproduced a second time in the same flight, 5.01 s.
+#
+# batteryCheck.cpp:305-315 (rtlEstimateCheck) raises the
+# battery_low_remaining_time flag from "time-to-RTL >= battery time left". With
+# time_remaining_s stuck at 0.0 the comparison is true for ANY valid RTL
+# estimate, so the flag latches the instant rtl_time_estimate.valid goes high
+# while armed - 1 ms after, in the log. COM_FLTT_LOW_ACT does select the ACTION
+# for that flag, and 0 correctly selects Action::None. The action is then
+# promoted anyway:
+#
+#   framework.cpp:349-352  arms the pre-action delay for any action except
+#                          Action::Warn - Action::None is NOT excluded
+#   framework.cpp:484-489  promotes the pending action to Action::Hold while
+#                          that delay runs - Action::None is NOT excluded here
+#                          either
+#
+# So a failsafe configured to do nothing still holds the aircraft for
+# COM_FAIL_ACT_T seconds. Both guards list their exclusions explicitly and
+# simply omit None; upstream should exclude it in both places.
+#
+# COM_FAIL_ACT_T 0 takes the else branch at framework.cpp:357 and leaves
+# _current_delay at 0, so the Hold promotion never fires. THE TRADE, stated
+# plainly: this also removes the 5 s pilot-takeover grace period before every
+# OTHER failsafe acts, so a genuine failsafe now acts at once. That is the
+# lesser harm here - the grace period is being spent holding the aircraft for a
+# condition that does not exist - but it is a real change in behaviour and is
+# the first thing to put back if a genuine failsafe starts acting too eagerly.
+param set COM_FAIL_ACT_T 0
+
+# QGC reports the battery source as unset. BAT1_SOURCE defaults to 0 ("Power
+# Module"), which claims hardware that does not exist in SITL while the battery
+# actually arrives over MAVLink from the bridge. 1 = External is what the
+# parameter's own documentation describes for this case ("the system expects to
+# receive mavlink battery status messages", src/lib/battery/module.yaml:104-121).
+#
+# This is cosmetic and nothing more: MavlinkReceiver::handle_message_battery_status
+# publishes unconditionally and never reads BAT1_SOURCE, so the battery already
+# worked. It silences the QGC warning and makes the configuration honest.
+param set-default BAT1_SOURCE 1
+
+# Negative disables the pre-takeoff auto-disarm. rc.vtol_defaults does not set
+# it, so this would inherit the 10 s firmware default (commander_params.c:225)
+# and auto-disarm 10 s after arming if the aircraft has not left the ground -
+# which a bench test of the lift/pusher ordering always hits, and which reads
+# like a bug rather than a timer. rc.fw_defaults and rc.sc_defaults already ship
+# -1 upstream for the same reason, so the plane gets this for free and only the
+# two multirotor-based airframes need it.
+param set-default COM_DISARM_PRFLT -1
+
+# NOTE: the motor failure detector cannot fire in v1.16 SITL, for any vehicle.
+# The inherited comment here (copied with the values from a stock PX4
+# standard-VTOL airframe) claimed SITL reports 0 A for every ESC.
+# It does not: SimulatorMavlink publishes esc_current = 1 + |control| * 15 while
+# armed, i.e. 1-16 A. The undercurrent test is
+#   esc_current < esc_throttle * FD_ACT_MOT_C2T   (FD_ACT_MOT_C2T default 2.0)
+# and 1 + 15c < 2c has no solution for any throttle c, so the detector can never
+# trip. FD_ACT_EN 0 and FD_ACT_MOT_TOUT 500 were therefore suppressing nothing
+# and have been removed: they are left at firmware defaults so that if upstream
+# ever fixes the SITL ESC current model, detection starts working here rather
+# than staying silently masked.
+# Corollary, with one exception: no ORGANIC motor failure can be detected in
+# SITL. Deliberate injection still can - "failure esc <n> wrong" routes through
+# FailureInjector::manipulateEscStatus (FailureDetector.cpp:151-154), which
+# scales the reported current by 0.1, and 0.1*(1 + 15c) < 2c does have solutions
+# (c > 0.2) - which is also exactly where the FD_ACT_MOT_THR 0.2 arming gate on
+# the same test opens. So leaving FD_ACT_EN at its default is not merely
+# harmless: it is what keeps that injection path usable to exercise the failsafe.
+
+# ---------------------------------------------------------------------------
+# GEOMETRY LIFTED FROM PX4 13030_generic_vtol_quad_tiltrotor; channel order,
+# tilt/servo mapping and VT_*/gains are UNVALIDATED against RealFlight -- verify
+# the QGC Actuators tab and expect to retune.
+# ---------------------------------------------------------------------------
+
+# Actuator geometry (QGC Actuators tab) MUST match the "px4" output indices
+# in Tools/simulation/flightaxis/flightaxis_bridge/models/tiltrotor.json.
+#
+# PWM_MAIN_FUNC<N> lands on HIL_ACTUATOR_CONTROLS.controls[N-1], so the
+# assignments below produce:
+#
+#   controls[0]  = 101 Motor 1     rotor 1        [0,1]  -> tiltrotor.json rf0
+#   controls[1]  = 102 Motor 2     rotor 2        [0,1]  -> tiltrotor.json rf1
+#   controls[2]  = 103 Motor 3     rotor 3        [0,1]  -> tiltrotor.json rf2
+#   controls[3]  = 104 Motor 4     rotor 4        [0,1]  -> tiltrotor.json rf3
+#   controls[4]  = 201 Servo 1     aileron left   [-1,1] -> tiltrotor.json rf4
+#   controls[5]  = 202 Servo 2     aileron right  [-1,1] -> tiltrotor.json rf5
+#   controls[6]  = 203 Servo 3     elevator       [-1,1] -> tiltrotor.json rf6
+#   controls[7]  = 204 Servo 4     rudder         [-1,1] -> tiltrotor.json rf7
+#   controls[8]  = 205 Servo 5     tilt servo 1   [-1,1] -> tiltrotor.json rf8
+#   controls[9]  = 206 Servo 6     tilt servo 2   [-1,1] -> tiltrotor.json rf9
+#   controls[10] = 207 Servo 7     tilt servo 3   [-1,1] -> tiltrotor.json rf10
+#   controls[11] = 208 Servo 8     tilt servo 4   [-1,1] -> tiltrotor.json rf11
+#
+# The servo-function order follows PX4's own actuator ordering for this frame:
+# ActuatorEffectivenessTiltrotorVTOL adds the four control surfaces (CA_SV_CS*)
+# to the servo list BEFORE the four tilt servos (CA_SV_TL*), so Servo 1-4 are
+# the surfaces and Servo 5-8 the tilts. As with quadplane.json, tiltrotor.json
+# is then a PURE IDENTITY MAP: every row has rf == px4, and WHAT each channel
+# carries is decided entirely by the PWM_MAIN_FUNC<N> values below. If the wrong
+# thing comes out on a RealFlight channel, change the FUNC parameter, not the
+# JSON. This channel order is UNVALIDATED against any RealFlight tiltrotor model
+# -- confirm it on the QGC Actuators tab first.
+param set-default MAV_TYPE 21
+
+param set-default VT_TYPE 1
+
+param set-default CA_AIRFRAME 3
+param set-default CA_ROTOR0_TILT 1
+param set-default CA_ROTOR1_TILT 2
+param set-default CA_ROTOR2_TILT 3
+param set-default CA_ROTOR3_TILT 4
+param set-default CA_SV_CS_COUNT 4
+param set-default CA_SV_CS0_TYPE 1
+param set-default CA_SV_CS0_TRQ_R -0.5
+param set-default CA_SV_CS1_TRQ_R 0.5
+param set-default CA_SV_CS1_TYPE 2
+param set-default CA_SV_CS2_TRQ_P 1
+param set-default CA_SV_CS2_TYPE 3
+param set-default CA_SV_CS3_TRQ_Y 1
+param set-default CA_SV_CS3_TYPE 4
+param set-default CA_SV_TL_COUNT 4
+
+# Square quadrotor X PX4 numbering
+param set-default CA_ROTOR_COUNT 4
+param set-default CA_ROTOR0_PX 1
+param set-default CA_ROTOR0_PY 1
+param set-default CA_ROTOR1_PX -1
+param set-default CA_ROTOR1_PY -1
+param set-default CA_ROTOR2_PX 1
+param set-default CA_ROTOR2_PY -1
+param set-default CA_ROTOR2_KM -0.05
+param set-default CA_ROTOR3_PX -1
+param set-default CA_ROTOR3_PY 1
+param set-default CA_ROTOR3_KM -0.05
+
+param set-default PWM_MAIN_FUNC1 101
+param set-default PWM_MAIN_FUNC2 102
+param set-default PWM_MAIN_FUNC3 103
+param set-default PWM_MAIN_FUNC4 104
+param set-default PWM_MAIN_FUNC5 201
+param set-default PWM_MAIN_FUNC6 202
+param set-default PWM_MAIN_FUNC7 203
+param set-default PWM_MAIN_FUNC8 204
+param set-default PWM_MAIN_FUNC9 205
+param set-default PWM_MAIN_FUNC10 206
+param set-default PWM_MAIN_FUNC11 207
+param set-default PWM_MAIN_FUNC12 208
+
+param set-default FW_AIRSPD_MAX 25
+param set-default NPFG_PERIOD 12
+param set-default FW_PR_FF 0.2
+param set-default FW_PR_P 0.9
+param set-default FW_P_LIM_MIN -15
+param set-default FW_RR_FF 0.1
+param set-default FW_RR_P 0.3
+param set-default FW_THR_TRIM 0.25
+param set-default FW_THR_MAX 0.6
+param set-default FW_THR_MIN 0.05
+param set-default FW_THR_ASPD_MAX 0.4
+param set-default FW_PSP_OFF 2
+
+# KNOWN-FLYABLE, NOT KNOWN-CORRECT. These three, and the FW_*/MC_* block
+# around them, are inherited from the FlightAxis quadplane family template.
+# Unlike the rotor geometry above, gains are dimensional - nothing normalises
+# them - so they describe that reference aircraft, not whichever RealFlight
+# model you load.
+# The TECS climb/sink envelope is the first thing that will misbehave if your
+# aircraft is faster or slower, followed by the airspeed and throttle limits.
+# Expect to retune rather than to trust these.
+param set-default FW_T_CLMB_MAX 8
+param set-default FW_T_SINK_MAX 2.7
+param set-default FW_T_SINK_MIN 2.2
+
+param set-default MC_AIRMODE 1
+param set-default MC_ROLL_P 4
+param set-default MC_ROLLRATE_P 0.3
+param set-default MC_YAW_P 1.6
+param set-default MC_YAWRATE_P 0.3
+
+# Was 10, copied from 1040_gazebo-classic_standard_vtol. 10 m is below
+# VT_QC_T_ALT_LOSS (20 m): a quad-chute for "loss of altitude during
+# transition" cannot fire before the aircraft has already descended through the
+# ground, so the protection that is supposed to save the airframe is
+# unreachable at the altitude this parameter picks to transition from.
+# rc.vtol_defaults ships 20, which is exactly VT_QC_T_ALT_LOSS and leaves zero
+# recovery room. 30 puts the whole quad-chute band plus a margin above terrain.
+param set-default MIS_TAKEOFF_ALT 30
+param set-default NAV_ACC_RAD 5

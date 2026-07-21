@@ -1,0 +1,355 @@
+#!/bin/sh
+#
+# @name FlightAxis Coaxial Helicopter
+#
+# @type Helicopter
+#
+
+. ${R}etc/init.d/rc.heli_defaults
+
+# RealFlight free-runs (no lockstep), GPS samples arrive fresh.
+# Forced with "param set": px4-rc.mavlinksim runs after this file and would
+# otherwise override the default back to 10 ms.
+param set EKF2_GPS_DELAY 0
+
+# rcS sets SDLOG_MODE 1 ("from boot until disarm"), which opens the log at boot
+# and so records the idle stretch before you ever arm. Mode 0 is "when armed
+# until disarm": one file per flight, nothing else. SDLOG_MODE is
+# @reboot_required, so this has to be a startup default, not a pxh> command.
+param set-default SDLOG_MODE 0
+
+# PX4 learns accelerometer, gyro and magnetometer offsets in flight and COMMITS
+# them as permanent calibration. On a real aircraft that tracks a bias that
+# genuinely drifts. Here every sensor is synthesised from RealFlight's state and
+# has no bias to find, so what gets learned is the estimator's own transients -
+# and then saved, so the next flight starts from them. Measured: an accelerometer
+# offset going from zero to 0.36 m/s2 within a single session, which dead-reckons
+# to roughly 21 m/s in a minute and reads as the aircraft wandering in QGC while
+# it sits still in RealFlight. It survives restarts, so the symptom looks
+# unrelated to whatever was last changed.
+param set-default SENS_IMU_AUTOCAL 0
+param set-default SENS_MAG_AUTOCAL 0
+param set-default IMU_GYRO_CAL_EN 0
+
+# The bridge supplies the battery from RealFlight's own model (pack voltage and
+# current draw, or fuel remaining on internal-combustion models), so PX4's
+# synthetic battery must be switched off or the two publishers alternate on the
+# battery_status topic and the reading flickers between them.
+#
+# The bridge sends BATTERY_STATUS on UDP 14580+instance, which reaches
+# MavlinkReceiver::handle_message_battery_status(); the simulator link on TCP
+# 4560 cannot carry it, because SimulatorMavlink::handle_message() has no
+# BATTERY_STATUS case at all. See Tools/simulation/flightaxis/flightaxis_bridge/
+# src/battery_link.h for the full reasoning.
+#
+# If the bridge cannot open that socket it says so and PX4 is left with no
+# battery: set this back to 1 in that case.
+param set SIM_BAT_ENABLE 0
+
+# Only IMU instance 0 is ever supplied: the bridge sends HIL_SENSOR with id = 0,
+# so SimulatorMavlink only ever fills _px4_accel[0]/_px4_gyro[0]. px4-rc.mavlinksim
+# asks for 3, which leaves two EKF instances running on dead sensors.
+# Forced with "param set": px4-rc.mavlinksim runs after this file and would
+# otherwise override the default back to 3. Note 0 is not an alternative --
+# EKF2.cpp clamps EKF2_MULTI_IMU to a minimum of 1 whenever SENS_IMU_MODE is 0.
+param set EKF2_MULTI_IMU 1
+
+# Headless runs (QGC optional) have no manual control source at all. Value 4
+# ("ignore any stick input") is the only value that skips the RC-loss failsafe;
+# rcS's default of 1 does not. Without this, RC-loss failsafe is avoided only by
+# the _manual_control_lost_at_arming fallback, which stops applying if manual
+# control is ever briefly present. NAV_RCL_ACT is deliberately left at its
+# firmware default: it is unreachable once COM_RC_IN_MODE is 4, and the value 0
+# suggested for it is outside the parameter's declared range (@min 1).
+#
+# THIS ALSO BLOCKS RC TRANSMITTER PASSTHROUGH, and that is a deliberate trade
+# rather than an oversight. The bridge forwards a physical transmitter plugged
+# into RealFlight to PX4 as RC_CHANNELS -> input_rc (see the RC block in
+# vehicle_state.h). That stream is sent regardless of this parameter, and
+# "listener input_rc" will show the live stick values either way - but value 4
+# makes commander ignore them, so the sticks will neither arm nor fly the
+# aircraft. If passthrough looks broken while input_rc is populated and moving,
+# this parameter is why.
+#
+# No single value serves both cases, because PX4 overloads this one parameter
+# for both jobs: the SAME value 4 is what skips the RC-loss failsafe
+# (failsafe.cpp:479, tested against RcInMode::StickInputDisabled) and what gates
+# the manual-mode arming check (modeCheck.cpp:154). Any value that enables the
+# sticks therefore necessarily re-arms the RC-loss failsafe, and a headless run
+# with no transmitter would take a failsafe action (NAV_RCL_ACT, default
+# 2 = Return) as soon as it armed. Defaulting to the transmitter case would
+# break every user who does not have one - the common case - while defaulting
+# to headless costs the transmitter user exactly one line, set at the pxh>
+# prompt or added to this file:
+#
+#     param set COM_RC_IN_MODE 0     # RC transmitter only
+#
+# Use 0 when the transmitter is the only stick source (it also keeps a QGC
+# virtual joystick from competing with it), or 2 to allow a transmitter and a
+# QGC joystick with fallback. The transmitter must then be calibrated in QGC
+# exactly as for real hardware (Vehicle Setup -> Radio): PX4 does not act on
+# input_rc until RC_MAP_* and the per-channel RC_MIN/RC_TRIM/RC_MAX are set.
+param set-default COM_RC_IN_MODE 4
+
+# PX4's remaining-flight-time failsafe cannot work with a MAVLink-injected
+# battery, and its default action is Return.
+#
+# The bridge feeds RealFlight's real pack voltage, current and fuel to PX4 as
+# BATTERY_STATUS. But mavlink_receiver's handler never sets
+# battery_status.time_remaining_s, so it keeps the zero from struct
+# initialisation. batteryCheck.cpp then reads that 0.0, PX4_ISFINITE(0.0) is
+# true, and PX4 concludes there are zero seconds of flight left - so
+# COM_FLTT_LOW_ACT 3 fires an RTL within seconds of arming, every time.
+#
+# This is structural: the estimate is not something we can supply through that
+# message, so acting on it means acting on a number PX4 never received. Set to
+# None. Low-battery protection is unaffected - BAT_LOW_THR, BAT_CRIT_THR and
+# BAT_EMERGEN_THR all act on "remaining", which the bridge does supply.
+# Forced with "param set", not set-default: a value saved from an earlier
+# session would otherwise win and bring the RTL straight back. The same
+# applies to SIM_BAT_ENABLE above - two battery publishers fighting is worse
+# than either alone. Both are requirements of this integration rather than
+# preferences, so they are not left to whatever is in parameters.bson.
+param set COM_FLTT_LOW_ACT 0
+
+# ...but COM_FLTT_LOW_ACT 0 is NOT sufficient on its own, and the reason is a
+# firmware bug rather than anything about this integration. Measured in SITL:
+# the aircraft lifted off, was forced into AUTO_LOITER 1.4 s later, sank back
+# from 0.62 m to 0.09 m, hovered there for exactly 5.00 s, and only then climbed
+# away. Reproduced a second time in the same flight, 5.01 s.
+#
+# batteryCheck.cpp:305-315 (rtlEstimateCheck) raises the
+# battery_low_remaining_time flag from "time-to-RTL >= battery time left". With
+# time_remaining_s stuck at 0.0 the comparison is true for ANY valid RTL
+# estimate, so the flag latches the instant rtl_time_estimate.valid goes high
+# while armed - 1 ms after, in the log. COM_FLTT_LOW_ACT does select the ACTION
+# for that flag, and 0 correctly selects Action::None. The action is then
+# promoted anyway:
+#
+#   framework.cpp:349-352  arms the pre-action delay for any action except
+#                          Action::Warn - Action::None is NOT excluded
+#   framework.cpp:484-489  promotes the pending action to Action::Hold while
+#                          that delay runs - Action::None is NOT excluded here
+#                          either
+#
+# So a failsafe configured to do nothing still holds the aircraft for
+# COM_FAIL_ACT_T seconds. Both guards list their exclusions explicitly and
+# simply omit None; upstream should exclude it in both places.
+#
+# COM_FAIL_ACT_T 0 takes the else branch at framework.cpp:357 and leaves
+# _current_delay at 0, so the Hold promotion never fires. THE TRADE, stated
+# plainly: this also removes the 5 s pilot-takeover grace period before every
+# OTHER failsafe acts, so a genuine failsafe now acts at once. That is the
+# lesser harm here - the grace period is being spent holding the aircraft for a
+# condition that does not exist - but it is a real change in behaviour and is
+# the first thing to put back if a genuine failsafe starts acting too eagerly.
+param set COM_FAIL_ACT_T 0
+
+# QGC reports the battery source as unset. BAT1_SOURCE defaults to 0 ("Power
+# Module"), which claims hardware that does not exist in SITL while the battery
+# actually arrives over MAVLink from the bridge. 1 = External is what the
+# parameter's own documentation describes for this case ("the system expects to
+# receive mavlink battery status messages", src/lib/battery/module.yaml:104-121).
+#
+# This is cosmetic and nothing more: MavlinkReceiver::handle_message_battery_status
+# publishes unconditionally and never reads BAT1_SOURCE, so the battery already
+# worked. It silences the QGC warning and makes the configuration honest.
+param set-default BAT1_SOURCE 1
+
+# Negative disables the pre-takeoff auto-disarm. rc.heli_defaults sets 60 s,
+# which cuts a bench test of the swash/rotor response short and reads like a bug.
+param set-default COM_DISARM_PRFLT -1
+
+#
+# ############################################################################
+# #  NEEDS TUNING - UNVALIDATED AGAINST REALFLIGHT.                          #
+# #                                                                          #
+# #  CA_AIRFRAME 12 (coaxial heli). This frame was derived from the          #
+# #  single-rotor 1203_flightaxis_heli by changing CA_AIRFRAME 11 -> 12 and  #
+# #  re-doing the output mapping for a coaxial head. The swash/rotor channel #
+# #  mapping and the gains below are UNVALIDATED against RealFlight - verify  #
+# #  the QGC Actuators tab and EXPECT TO RETUNE. Nothing here has been flown. #
+# ############################################################################
+#
+
+#
+# WHO DOES THE SWASH MIXING: PX4 DOES, AND ONLY PX4.
+#
+# A collective-pitch heli needs exactly one CCPM mix between the pilot's
+# roll/pitch and the swash servos. It can live in PX4's allocator, in the
+# bridge, or in the RealFlight model - but in EXACTLY ONE of them. Two mixes in
+# series do not cancel; they compose, and roll and pitch cross-couple.
+#
+# This airframe puts it in PX4. The allocator below (CA_AIRFRAME 12 with the
+# CA_SP0_* geometry) turns roll/pitch into swash SERVO POSITIONS, and the bridge
+# passes those numbers to RealFlight completely untouched: helicoax.json is a
+# pure identity map and HeliDemix is NOT in its Options. RealFlight channel N
+# carries PX4 servo N, literally.
+#
+# HOW COAXIAL DIFFERS FROM THE SINGLE-ROTOR TEMPLATE (CA_AIRFRAME 11): there is
+# NO tail rotor. Yaw and collective are made by the two CONTRA-ROTATING MAIN
+# ROTORS, not by a tail servo and not by the swash. See
+# ActuatorEffectivenessHelicopterCoaxial.cpp:104-144:
+#   throttle       = -thrust_z * spoolup            (the collective command)
+#   rotor CW  (0)  = throttle - yaw
+#   rotor CCW (1)  = throttle + yaw
+#   swash servo i  = pitch*cos(ang_i)*arm_i - roll*sin(ang_i)*arm_i + trim
+# so collective is common rotor throttle, yaw is DIFFERENTIAL rotor throttle,
+# and the swash carries ONLY cyclic (roll/pitch) - there is no collective term
+# on the swash at all. The coaxial allocator reads only CA_SP0_* / CA_SV_CS*_TRIM
+# and COM_SPOOLUP_TIME; the CA_HELI_THR_C* / CA_HELI_PITCH_C* / CA_HELI_YAW_* /
+# CA_MAX_SVO_THROW parameters that the single-rotor template sets are NOT read
+# under type 12, so they are omitted here.
+#
+# SO THE REALFLIGHT MODEL MUST BE NON-MIXED / DIRECT-SERVO on the swash, and its
+# two rotor channels must be driven independently (upper/lower) so PX4 can make
+# yaw with the differential - see the "REQUIRED CHANGES" section below.
+
+# Actuator geometry (QGC Actuators tab) MUST match the "px4" output indices
+# in Tools/simulation/flightaxis/flightaxis_bridge/models/helicoax.json.
+#
+# DESIGN RULE: helicoax.json is a pure IDENTITY map - its "rf" and "px4" columns
+# are the same number, so PX4 output channel N is RealFlight channel N. THE
+# CHANNEL ORDERING LIVES HERE, in the PWM_MAIN_FUNC* assignments below. If the
+# order is wrong, renumber the FUNCs; do NOT re-scramble the JSON.
+#
+# Two numberings must be kept apart:
+#
+#  1. The ALLOCATOR's internal numbering. This is a property of CA_AIRFRAME and
+#     is NOT affected by anything below. CA_AIRFRAME 12 is "Helicopter
+#     (Coaxial)": ActuatorEffectivenessHelicopterCoaxial::getEffectivenessMatrix
+#     (lines 90-99) adds actuators in the order
+#       clockwise rotor (MOTORS), counter-clockwise rotor (MOTORS),
+#       then CA_SP0_COUNT swash SERVOS
+#     so the output functions are always Motor1=101 (CW rotor),
+#     Motor2=102 (CCW rotor), Servo1..Servo3 = 201..203 (swash 1..3). NOTE this
+#     differs from the single-rotor template, where a tail servo consumed
+#     Servo1=201 and pushed the swash to 202..204. There is no tail here, so the
+#     swash starts at Servo1=201.
+#
+#  2. The controls[] POSITIONS, which we choose. PWM_MAIN_FUNC<N> lands on
+#     HIL_ACTUATOR_CONTROLS.controls[N-1]. The single-rotor template reproduced
+#     ArduPilot's heli channel order; ArduPilot has no coaxial-RealFlight ground
+#     truth to copy, so this layout is a plain, verifiable choice: swash on
+#     controls[0..2] (as on the single-rotor frame), the two rotors on
+#     controls[6..7]:
+#
+#   controls[0] = 201 Servo 1     swash plate servo 1 [-1,1] -> helicoax.json rf0
+#   controls[1] = 202 Servo 2     swash plate servo 2 [-1,1] -> helicoax.json rf1
+#   controls[2] = 203 Servo 3     swash plate servo 3 [-1,1] -> helicoax.json rf2
+#   controls[6] = 101 Motor 1     clockwise main rotor [0,1] -> helicoax.json rf6
+#   controls[7] = 102 Motor 2     ccw main rotor       [0,1] -> helicoax.json rf7
+#
+# UNVALIDATED: which physical RealFlight rotor is "clockwise" vs "counter-
+# clockwise", and whether rf6/rf7 match the model's upper/lower rotor channels,
+# has not been checked against any RealFlight coaxial model. If yaw runs away or
+# reverses on liftoff, swap the two rotor channels (or the model's rotor spin
+# directions) - do NOT touch the swash triple to fix a yaw problem.
+param set-default CA_AIRFRAME 12
+
+param set-default PWM_MAIN_FUNC1 201
+param set-default PWM_MAIN_FUNC2 202
+param set-default PWM_MAIN_FUNC3 203
+# 4-6 idle. The single-rotor template used controls[3] for the tail servo; a
+# coaxial has no tail, so it is left unassigned here. helicoax.json leaves
+# rf3-5 unmapped to match.
+param set-default PWM_MAIN_FUNC4 0
+param set-default PWM_MAIN_FUNC5 0
+param set-default PWM_MAIN_FUNC6 0
+param set-default PWM_MAIN_FUNC7 101
+param set-default PWM_MAIN_FUNC8 102
+
+# Swash plate geometry. CA_SP0_ANG<i> is measured clockwise seen from above,
+# 0 = forward (+X). ActuatorEffectivenessHelicopterCoaxial.cpp:126-132 drives
+# each servo with
+#   servo_i = pitch*cos(ang_i)*arm_i - roll*sin(ang_i)*arm_i + trim
+# (no collective term - collective is rotor throttle on a coaxial).
+#
+# THESE ANGLES ARE A CLAIM ABOUT THE PHYSICAL SWASHPLATE OF YOUR REALFLIGHT
+# MODEL. Servo i must actually sit at ang_i on the model's swash, because the
+# number PX4 computes for servo i is delivered to that servo unmodified.
+#
+# 300/60/180 is a standard 120-degree head with the odd servo AFT, carried over
+# from the single-rotor template. If your coaxial model's third servo is at the
+# FRONT, use 120/240/0. Getting this wrong rotates the cyclic response, so the
+# aircraft banks when commanded to pitch. Verify against the model in
+# RealFlight's aircraft editor. UNVALIDATED for any specific coaxial model.
+param set-default CA_SP0_COUNT 3
+param set-default CA_SP0_ANG0 300
+param set-default CA_SP0_ANG1 60
+param set-default CA_SP0_ANG2 180
+
+# Equal arm lengths, the right model for a symmetric head. Pinned so a stray
+# QGC edit cannot silently skew the cyclic; change only to match a model whose
+# servo arms genuinely differ.
+param set-default CA_SP0_ARM_L0 1.0
+param set-default CA_SP0_ARM_L1 1.0
+param set-default CA_SP0_ARM_L2 1.0
+
+#
+# REQUIRED CHANGES TO THE REALFLIGHT MODEL ITSELF
+#
+# RC heli models ship configured for a human pilot, with stabilisation and
+# mixing already inside the model. All of it fights PX4 and must be removed in
+# RealFlight's aircraft editor before this airframe will fly:
+#
+#  1. Any rate/heading-hold gyro. Set it to zero gain (or plain rate mode at
+#     minimum gain) - it is an independent controller that fights PX4.
+#  2. Swashplate mixing (CCPM / eCCPM). TURN IT OFF. PX4 has already done the
+#     cyclic mix - what arrives on rf0/rf1/rf2 is three finished SERVO POSITIONS,
+#     not roll/pitch - so the model must be a NON-mixed, direct-servo head with
+#     each swash servo driven straight from its own channel. If, and only if,
+#     the CCPM cannot be disabled, move the mix to the bridge by adding
+#     "HeliDemix" to Options in helicoax.json (see the JSON's DemixComment) and
+#     never enable both.
+#  3. Rotor throttle/collective curves in the model. Flatten them - PX4 owns
+#     collective as common rotor throttle and expects a linear channel.
+#  4. Any exponential, dual rate or trim on the cyclic channels.
+#  5. The two main rotors must be independently drivable on rf6/rf7 and must
+#     spin in OPPOSITE directions - the coaxial yaw authority is the difference
+#     between them. If the model ties both rotors to one channel, PX4 cannot yaw.
+#
+# Channel usage (matches helicoax.json rf indices). rf0-2 are swash SERVO
+# POSITIONS (not axis commands); rf6/rf7 are the two rotor throttles:
+#   rf0 = swash servo 1 (at CA_SP0_ANG0 = 300 deg),
+#   rf1 = swash servo 2 (at CA_SP0_ANG1 =  60 deg),
+#   rf2 = swash servo 3 (at CA_SP0_ANG2 = 180 deg),
+#   rf6 = clockwise main rotor throttle, rf7 = counter-clockwise main rotor.
+#   rf3, rf4, rf5 are unused and idle at 0.5.
+# Reverse the channel in RealFlight (not here) if an axis responds backwards.
+
+# Rate controller. 16001_helicopter ships P=I=D=0 with FF only, but its own
+# comment says that is a bring-up state to be tuned afterwards - it leaves the
+# rate loops open, so any trim offset or disturbance integrates uncorrected and
+# the AIRCRAFT'S ATTITUDE diverges shortly after liftoff.
+# These gains instead start from values typical of collective-pitch helicopters
+# in the same normalised convention PX4 uses (torque in -1..1 per rad/s):
+# roll/pitch P 0.024 I 0.15 D 0.001 FF 0.15, yaw P 0.18 I 0.12 D 0.003 FF 0.024.
+# The values below are those rounded to two significant figures (P 0.024 -> 0.025,
+# yaw FF 0.024 -> 0.02); the difference is far inside the retuning these need
+# anyway, so do not read the exact digits as meaningful.
+# That also satisfies the PX4 helicopter guidance that P stays well below FF -
+# a heli's swash gives a large, fast, near-linear torque response, so the loop
+# is feed-forward dominant and a big P term just chases rotor phase lag.
+# INHERITED FROM THE SINGLE-ROTOR TEMPLATE AND UNVALIDATED FOR A COAXIAL - the
+# yaw gains in particular now act on differential rotor throttle, not a tail
+# servo, and should be expected to need the most retuning. Refine in Acro for
+# whichever coaxial model you load.
+param set-default MC_ROLLRATE_P 0.025
+param set-default MC_ROLLRATE_I 0.15
+param set-default MC_ROLLRATE_D 0.001
+param set-default MC_ROLLRATE_FF 0.15
+param set-default MC_PITCHRATE_P 0.025
+param set-default MC_PITCHRATE_I 0.15
+param set-default MC_PITCHRATE_D 0.001
+param set-default MC_PITCHRATE_FF 0.15
+param set-default MC_YAWRATE_P 0.18
+param set-default MC_YAWRATE_I 0.12
+param set-default MC_YAWRATE_D 0.003
+param set-default MC_YAWRATE_FF 0.02
+# Raised from the 0.30 firmware default: the I gains above (0.15 roll/pitch,
+# 0.12 yaw) are large next to the multirotor defaults because a heli's trim
+# offsets are, and 0.30 would clip the integrator before it has taken up the
+# steady swash trim.
+param set-default MC_RR_INT_LIM 0.4
+param set-default MC_YR_INT_LIM 0.4

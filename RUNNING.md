@@ -20,10 +20,29 @@ need to read the others. Everything below assumes the **`px4_sitl_nolockstep`** 
 | `flightaxis_quad` | `1201_flightaxis_quad` (1201) | Multirotor quad-X (`CA_AIRFRAME 0`) | Four motors, direct from PX4 motor outputs |
 | `flightaxis_quadplane` | `1202_flightaxis_quadplane` (1202) | Standard VTOL (`CA_AIRFRAME 2`) | 4 lift motors + pusher + 4 control surfaces |
 | `flightaxis_heli` | `1203_flightaxis_heli` (1203) | Helicopter, tail servo (`CA_AIRFRAME 11`) | Collective-pitch heli; PX4 does the CCPM mix, bridge passes swash servos through untouched |
+| `flightaxis_quadplus` | `1204_flightaxis_quadplus` (1204) | Multirotor quad-+ (`CA_AIRFRAME 0`) | Four motors on the axes |
+| `flightaxis_hexa` | `1205_flightaxis_hexa` (1205) | Hexarotor X (`CA_AIRFRAME 0`) | Six motors |
+| `flightaxis_hexaplus` | `1206_flightaxis_hexaplus` (1206) | Hexarotor + (`CA_AIRFRAME 0`) | Six motors |
+| `flightaxis_hexacoax` | `1207_flightaxis_hexacoax` (1207) | Hexarotor coaxial (`CA_AIRFRAME 0`) | Three arms, coaxial motor pairs |
+| `flightaxis_octo` | `1208_flightaxis_octo` (1208) | Octorotor X (`CA_AIRFRAME 0`) | Eight motors |
+| `flightaxis_octoplus` | `1209_flightaxis_octoplus` (1209) | Octorotor + (`CA_AIRFRAME 0`) | Eight motors |
+| `flightaxis_octocoax` | `1210_flightaxis_octocoax` (1210) | Octo coax (`CA_AIRFRAME 0`) | Four arms, coaxial motor pairs |
+| `flightaxis_dodeca` | `1211_flightaxis_dodeca` (1211) | Dodecarotor coax (`CA_AIRFRAME 0`) | Six arms, coaxial motor pairs (12) |
+| `flightaxis_tri` ⚠ | `1212_flightaxis_tri` (1212) | Tricopter Y + tilt (`CA_AIRFRAME 8`) | Three motors + tail tilt servo — **needs tuning** |
+| `flightaxis_flyingwing` | `1213_flightaxis_flyingwing` (1213) | Flying wing (`CA_AIRFRAME 1`) | Pusher motor + two elevons |
+| `flightaxis_atail` | `1214_flightaxis_atail` (1214) | Plane, V/A-tail (`CA_AIRFRAME 1`) | Motor + ailerons + V-tail ruddervators |
+| `flightaxis_tiltrotor` ⚠ | `1215_flightaxis_tiltrotor` (1215) | VTOL tiltrotor (`CA_AIRFRAME 3`) | Four tilting rotors + surfaces — **needs tuning** |
+| `flightaxis_tailsitter` ⚠ | `1216_flightaxis_tailsitter` (1216) | VTOL tailsitter (`CA_AIRFRAME 4`) | Two motors + two elevons — **needs tuning** |
+| `flightaxis_helicoax` ⚠ | `1217_flightaxis_helicoax` (1217) | Coaxial helicopter (`CA_AIRFRAME 12`) | Two contra-rotating rotors + swash, no tail — **needs tuning** |
 
 `flightaxis` on its own is an alias for `flightaxis_plane`.
 
-RealFlight is an RC flight simulator, so these four aircraft classes are what it can model.
+RealFlight is an RC flight simulator, so these aircraft classes are what it can model. The four
+frames marked ⚠ carry geometry lifted from PX4's stock airframes but not yet validated against a
+RealFlight model — their channel order, tilt/servo mapping and `VT_*`/gains want checking on the
+QGC Actuators tab before flight. The full per-frame flying walk-throughs below cover the four
+base airframes (plane, quad, quadplane, heli); the additional frames are the same workflow with
+the geometry noted in this table.
 
 ---
 
@@ -128,7 +147,11 @@ physics clock; the lockstep build will not work and the targets do not exist the
 guarded by `if(ENABLE_LOCKSTEP_SCHEDULER STREQUAL "no")`).
 
 Targets that exist: `flightaxis` (alias for plane), `flightaxis_plane`, `flightaxis_quad`,
-`flightaxis_quadplane`, `flightaxis_heli`.
+`flightaxis_quadplane`, `flightaxis_heli`, `flightaxis_quadplus`, `flightaxis_hexa`,
+`flightaxis_hexaplus`, `flightaxis_hexacoax`, `flightaxis_octo`, `flightaxis_octoplus`,
+`flightaxis_octocoax`, `flightaxis_dodeca`, `flightaxis_tri`, `flightaxis_flyingwing`,
+`flightaxis_atail`, `flightaxis_tiltrotor`, `flightaxis_tailsitter`, `flightaxis_helicoax`
+(and a `flightaxis_hitl_<name>` for each — see [HITL.md](HITL.md)).
 
 **In every command below, `192.168.10.1` is a worked example — it is the address of the Windows
 box running RealFlight.** Substitute your own: the variable is
@@ -767,6 +790,56 @@ are there: full left and full right must move the tail servo symmetrically about
 left yaw does nothing, the airframe is on `CA_AIRFRAME 10` or `rf3` is unipolar. Then bring the
 rotor to speed, raise collective to a light skid, and confirm yaw holds before lifting off.
 Expect to refine the rate gains and the collective curve for your model.
+
+---
+
+### 2.5 Additional frames (1204–1217)
+
+The fourteen frames below are the same four workflows above with different geometry. Each one's
+`CA_AIRFRAME`, `CA_ROTOR*`, `CA_SV_CS*` and `VT_*` are **lifted verbatim from the PX4 stock
+airframe named**, so the geometry is PX4's own; what you match to your RealFlight model is still
+the channel order, exactly as in §2.1–§2.4. Launch with `make px4_sitl_nolockstep flightaxis_<name>`.
+
+**Multirotors — follow the §2.2 Quad workflow.** All-motor frames, so there is no
+motors-before-servos ordering problem: `PWM_MAIN_FUNC1..N = 101..(100+N)`, and JSON channels
+`rf0..rf(N-1)` are motors (`unipolar`/`0.0`). Bring them up on the bench the same way — arm,
+nudge each motor, confirm position and spin direction against the QGC Actuators tab.
+
+| Target | Motors | PX4 stock geometry |
+|---|---|---|
+| `flightaxis_quadplus` | 4 (on the axes) | `5001_quad_+` |
+| `flightaxis_hexa` | 6 | `6001_hexa_x` |
+| `flightaxis_hexaplus` | 6 | `7001_hexa_+` |
+| `flightaxis_hexacoax` | 6 (3 coaxial arms) | `11001_hexa_cox` |
+| `flightaxis_octo` | 8 | `8001_octo_x` |
+| `flightaxis_octoplus` | 8 | `9001_octo_+` |
+| `flightaxis_octocoax` | 8 (4 coaxial arms) | `12001_octo_cox` |
+| `flightaxis_dodeca` | 12 (6 coaxial arms) | `24001_dodeca_cox` |
+
+> On a **coaxial** frame the upper and lower motor of each arm spin opposite ways — that is the
+> `CA_ROTOR*_KM` sign pattern, copied from PX4. Match your RealFlight model's motor spin
+> directions to it, or yaw authority is wrong.
+
+**`flightaxis_flyingwing`** (`3000_generic_wing`) and **`flightaxis_atail`** (`2106_albatross`)
+— follow the **§2.1 Plane** workflow. Flying wing is a pusher motor + two elevons (no rudder);
+A-tail is a motor + ailerons + two V-tail ruddervators. PX4 does the elevon / V-tail mixing, so
+in RealFlight the two surfaces must be **independent servos**, not a pre-mixed pair.
+
+**⚠ needs tuning — verify on the QGC Actuators tab before flight.** These four carry PX4-stock
+geometry whose channel order, tilt/servo mapping and `VT_*`/gains have **not** been validated
+against a RealFlight model:
+
+| Target | Frame | PX4 stock geometry | base workflow |
+|---|---|---|---|
+| `flightaxis_tri` | Tricopter Y, tail tilt servo (`CA_AIRFRAME 8`) | `14001_generic_mc_with_tilt` | §2.2 Quad, plus a yaw tilt servo |
+| `flightaxis_tiltrotor` | VTOL tiltrotor, 4 tilting rotors (`CA_AIRFRAME 3`) | `13030_generic_vtol_quad_tiltrotor` | §2.3 Quadplane |
+| `flightaxis_tailsitter` | VTOL tailsitter, 2 motors + 2 elevons (`CA_AIRFRAME 4`) | `13200_generic_vtol_tailsitter` | §2.3 Quadplane |
+| `flightaxis_helicoax` | Coaxial heli, 2 contra-rotating rotors + swash, no tail (`CA_AIRFRAME 12`) | (PX4 allocator preset) | §2.4 Helicopter |
+
+For `flightaxis_helicoax` specifically: yaw comes from **differential rotor throttle**, not a
+tail — if it runs away on lift-off, swap the two rotor channels `rf6`/`rf7` in `helicoax.json`
+(which physical rotor is clockwise is a guess). Each of these four airframes repeats this warning
+in a comment above its own geometry block.
 
 ---
 

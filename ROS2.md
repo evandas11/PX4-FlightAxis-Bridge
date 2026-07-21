@@ -218,7 +218,7 @@ gyro ≈ 0, baro 95599 Pa at 488 m, mag consistent with the Zurich default home 
 - **`system_power` is simulated by PX4**, not by us. `system_power_simulator` is a SITL module
   started unconditionally (`rcS:254`) and publishes at 100 Hz, so those values are fictional.
   **`battery_status`, by contrast, does come from the bridge.** PX4's `battery_simulator` is
-  gated on `SIM_BAT_ENABLE 1` (`rcS:249-251`) and all four FlightAxis airframes set
+  gated on `SIM_BAT_ENABLE 1` (`rcS:249-251`) and every FlightAxis airframe sets
   `SIM_BAT_ENABLE 0`, so it never starts; the battery state you see over DDS is the bridge's,
   delivered over MAVLink and derived from the pack voltage and current RealFlight reports.
 

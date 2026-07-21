@@ -1,0 +1,219 @@
+#!/bin/sh
+#
+# @name FlightAxis Flying Wing
+#
+# @type Flying Wing
+#
+
+. ${R}etc/init.d/rc.fw_defaults
+
+# RealFlight free-runs (no lockstep), GPS samples arrive fresh.
+# Forced with "param set": px4-rc.mavlinksim runs after this file and would
+# otherwise override the default back to 10 ms.
+param set EKF2_GPS_DELAY 0
+
+# rcS sets SDLOG_MODE 1 ("from boot until disarm"), which opens the log at boot
+# and so records the idle stretch before you ever arm. Mode 0 is "when armed
+# until disarm": one file per flight, nothing else. SDLOG_MODE is
+# @reboot_required, so this has to be a startup default, not a pxh> command.
+param set-default SDLOG_MODE 0
+
+# PX4 learns accelerometer, gyro and magnetometer offsets in flight and COMMITS
+# them as permanent calibration. On a real aircraft that tracks a bias that
+# genuinely drifts. Here every sensor is synthesised from RealFlight's state and
+# has no bias to find, so what gets learned is the estimator's own transients -
+# and then saved, so the next flight starts from them. Measured: an accelerometer
+# offset going from zero to 0.36 m/s2 within a single session, which dead-reckons
+# to roughly 21 m/s in a minute and reads as the aircraft wandering in QGC while
+# it sits still in RealFlight. It survives restarts, so the symptom looks
+# unrelated to whatever was last changed.
+param set-default SENS_IMU_AUTOCAL 0
+param set-default SENS_MAG_AUTOCAL 0
+param set-default IMU_GYRO_CAL_EN 0
+
+# The bridge supplies the battery from RealFlight's own model (pack voltage and
+# current draw, or fuel remaining on internal-combustion models), so PX4's
+# synthetic battery must be switched off or the two publishers alternate on the
+# battery_status topic and the reading flickers between them.
+#
+# The bridge sends BATTERY_STATUS on UDP 14580+instance, which reaches
+# MavlinkReceiver::handle_message_battery_status(); the simulator link on TCP
+# 4560 cannot carry it, because SimulatorMavlink::handle_message() has no
+# BATTERY_STATUS case at all. See Tools/simulation/flightaxis/flightaxis_bridge/
+# src/battery_link.h for the full reasoning.
+#
+# If the bridge cannot open that socket it says so and PX4 is left with no
+# battery: set this back to 1 in that case.
+param set SIM_BAT_ENABLE 0
+
+# Only IMU instance 0 is ever supplied: the bridge sends HIL_SENSOR with id = 0,
+# so SimulatorMavlink only ever fills _px4_accel[0]/_px4_gyro[0]. px4-rc.mavlinksim
+# asks for 3, which leaves two EKF instances running on dead sensors.
+# Forced with "param set": px4-rc.mavlinksim runs after this file and would
+# otherwise override the default back to 3. Note 0 is not an alternative --
+# EKF2.cpp clamps EKF2_MULTI_IMU to a minimum of 1 whenever SENS_IMU_MODE is 0.
+param set EKF2_MULTI_IMU 1
+
+# Headless runs (QGC optional) have no manual control source at all. Value 4
+# ("ignore any stick input") is the only value that skips the RC-loss failsafe;
+# rcS's default of 1 does not. Without this, RC-loss failsafe is avoided only by
+# the _manual_control_lost_at_arming fallback, which stops applying if manual
+# control is ever briefly present. NAV_RCL_ACT is deliberately left at its
+# firmware default: it is unreachable once COM_RC_IN_MODE is 4, and the value 0
+# suggested for it is outside the parameter's declared range (@min 1).
+#
+# THIS ALSO BLOCKS RC TRANSMITTER PASSTHROUGH, and that is a deliberate trade
+# rather than an oversight. The bridge forwards a physical transmitter plugged
+# into RealFlight to PX4 as RC_CHANNELS -> input_rc (see the RC block in
+# vehicle_state.h). That stream is sent regardless of this parameter, and
+# "listener input_rc" will show the live stick values either way - but value 4
+# makes commander ignore them, so the sticks will neither arm nor fly the
+# aircraft. If passthrough looks broken while input_rc is populated and moving,
+# this parameter is why.
+#
+# No single value serves both cases, because PX4 overloads this one parameter
+# for both jobs: the SAME value 4 is what skips the RC-loss failsafe
+# (failsafe.cpp:479, tested against RcInMode::StickInputDisabled) and what gates
+# the manual-mode arming check (modeCheck.cpp:154). Any value that enables the
+# sticks therefore necessarily re-arms the RC-loss failsafe, and a headless run
+# with no transmitter would take a failsafe action (NAV_RCL_ACT, default
+# 2 = Return) as soon as it armed. Defaulting to the transmitter case would
+# break every user who does not have one - the common case - while defaulting
+# to headless costs the transmitter user exactly one line, set at the pxh>
+# prompt or added to this file:
+#
+#     param set COM_RC_IN_MODE 0     # RC transmitter only
+#
+# Use 0 when the transmitter is the only stick source (it also keeps a QGC
+# virtual joystick from competing with it), or 2 to allow a transmitter and a
+# QGC joystick with fallback. The transmitter must then be calibrated in QGC
+# exactly as for real hardware (Vehicle Setup -> Radio): PX4 does not act on
+# input_rc until RC_MAP_* and the per-channel RC_MIN/RC_TRIM/RC_MAX are set.
+param set-default COM_RC_IN_MODE 4
+
+# PX4's remaining-flight-time failsafe cannot work with a MAVLink-injected
+# battery, and its default action is Return.
+#
+# The bridge feeds RealFlight's real pack voltage, current and fuel to PX4 as
+# BATTERY_STATUS. But mavlink_receiver's handler never sets
+# battery_status.time_remaining_s, so it keeps the zero from struct
+# initialisation. batteryCheck.cpp then reads that 0.0, PX4_ISFINITE(0.0) is
+# true, and PX4 concludes there are zero seconds of flight left - so
+# COM_FLTT_LOW_ACT 3 fires an RTL within seconds of arming, every time.
+#
+# This is structural: the estimate is not something we can supply through that
+# message, so acting on it means acting on a number PX4 never received. Set to
+# None. Low-battery protection is unaffected - BAT_LOW_THR, BAT_CRIT_THR and
+# BAT_EMERGEN_THR all act on "remaining", which the bridge does supply.
+# Forced with "param set", not set-default: a value saved from an earlier
+# session would otherwise win and bring the RTL straight back. The same
+# applies to SIM_BAT_ENABLE above - two battery publishers fighting is worse
+# than either alone. Both are requirements of this integration rather than
+# preferences, so they are not left to whatever is in parameters.bson.
+param set COM_FLTT_LOW_ACT 0
+
+# ...but COM_FLTT_LOW_ACT 0 is NOT sufficient on its own, and the reason is a
+# firmware bug rather than anything about this integration. Measured in SITL:
+# the aircraft lifted off, was forced into AUTO_LOITER 1.4 s later, sank back
+# from 0.62 m to 0.09 m, hovered there for exactly 5.00 s, and only then climbed
+# away. Reproduced a second time in the same flight, 5.01 s.
+#
+# batteryCheck.cpp:305-315 (rtlEstimateCheck) raises the
+# battery_low_remaining_time flag from "time-to-RTL >= battery time left". With
+# time_remaining_s stuck at 0.0 the comparison is true for ANY valid RTL
+# estimate, so the flag latches the instant rtl_time_estimate.valid goes high
+# while armed - 1 ms after, in the log. COM_FLTT_LOW_ACT does select the ACTION
+# for that flag, and 0 correctly selects Action::None. The action is then
+# promoted anyway:
+#
+#   framework.cpp:349-352  arms the pre-action delay for any action except
+#                          Action::Warn - Action::None is NOT excluded
+#   framework.cpp:484-489  promotes the pending action to Action::Hold while
+#                          that delay runs - Action::None is NOT excluded here
+#                          either
+#
+# So a failsafe configured to do nothing still holds the aircraft for
+# COM_FAIL_ACT_T seconds. Both guards list their exclusions explicitly and
+# simply omit None; upstream should exclude it in both places.
+#
+# COM_FAIL_ACT_T 0 takes the else branch at framework.cpp:357 and leaves
+# _current_delay at 0, so the Hold promotion never fires. THE TRADE, stated
+# plainly: this also removes the 5 s pilot-takeover grace period before every
+# OTHER failsafe acts, so a genuine failsafe now acts at once. That is the
+# lesser harm here - the grace period is being spent holding the aircraft for a
+# condition that does not exist - but it is a real change in behaviour and is
+# the first thing to put back if a genuine failsafe starts acting too eagerly.
+param set COM_FAIL_ACT_T 0
+
+# QGC reports the battery source as unset. BAT1_SOURCE defaults to 0 ("Power
+# Module"), which claims hardware that does not exist in SITL while the battery
+# actually arrives over MAVLink from the bridge. 1 = External is what the
+# parameter's own documentation describes for this case ("the system expects to
+# receive mavlink battery status messages", src/lib/battery/module.yaml:104-121).
+#
+# This is cosmetic and nothing more: MavlinkReceiver::handle_message_battery_status
+# publishes unconditionally and never reads BAT1_SOURCE, so the battery already
+# worked. It silences the QGC warning and makes the configuration honest.
+param set-default BAT1_SOURCE 1
+
+param set-default FW_LND_ANG 5
+param set-default FW_LND_FLALT 5
+# Flare pitch window: firmware defaults (2.5/15) are too narrow to land here
+param set-default FW_LND_FL_PMIN 9.5
+param set-default FW_LND_FL_PMAX 20
+
+param set-default NPFG_PERIOD 25
+
+param set-default FW_PR_FF 0.40
+param set-default FW_PR_I 0.05
+param set-default FW_PR_P 0.05
+
+param set-default FW_R_TC 0.45
+param set-default FW_RR_FF 0.40
+param set-default FW_RR_I 0.132
+param set-default FW_RR_P 0.085
+
+param set-default MIS_TAKEOFF_ALT 20
+
+param set-default NAV_ACC_RAD 15
+
+param set-default RWTO_TKOFF 1
+param set-default RWTO_PSP 8
+
+# Actuator geometry (QGC Actuators tab) MUST match the "px4" output indices
+# in Tools/simulation/flightaxis/flightaxis_bridge/models/flyingwing.json.
+#
+# PWM_MAIN_FUNC<N> lands on HIL_ACTUATOR_CONTROLS.controls[N-1], and the
+# assignment below is CHOSEN so that controls[] comes out in the RealFlight
+# model's own channel order (ch1 left elevon, ch2 right elevon, ch3 throttle).
+# That is the invariant: PX4 output channel N == RealFlight channel N, which
+# makes models/flyingwing.json a pure IDENTITY map (rf == px4). The ordering
+# decision lives here, in the params -- as it does in ArduPilot's
+# SERVOn_FUNCTION and in PX4's own gz bridge SIM_GZ_*_FUNC* -- not in the JSON.
+# If you change these values, fix them back until flyingwing.json can stay
+# identity; do not re-scramble flyingwing.json instead.
+#
+# A flying wing has no separate rudder or elevator: the two elevons carry both
+# pitch and roll. CA_SV_CS0 (type 5, left elevon) mixes +pitch/-roll and
+# CA_SV_CS1 (type 6, right elevon) mixes +pitch/+roll, so PX4's allocator drives
+# both from the pitch and roll torques directly.
+#
+#   controls[0] = 201 Servo 1     left elevon     [-1,1] -> flyingwing.json rf0 (RF ch1)
+#   controls[1] = 202 Servo 2     right elevon    [-1,1] -> flyingwing.json rf1 (RF ch2)
+#   controls[2] = 101 Motor 1     throttle        [0,1]  -> flyingwing.json rf2 (RF ch3)
+param set-default CA_AIRFRAME 1
+
+param set-default CA_ROTOR_COUNT 1
+param set-default CA_ROTOR0_PX 0.15
+
+param set-default CA_SV_CS_COUNT 2
+param set-default CA_SV_CS0_TYPE 5
+param set-default CA_SV_CS0_TRQ_P 0.5
+param set-default CA_SV_CS0_TRQ_R -0.5
+param set-default CA_SV_CS1_TYPE 6
+param set-default CA_SV_CS1_TRQ_P 0.5
+param set-default CA_SV_CS1_TRQ_R 0.5
+
+param set-default PWM_MAIN_FUNC1 201
+param set-default PWM_MAIN_FUNC2 202
+param set-default PWM_MAIN_FUNC3 101

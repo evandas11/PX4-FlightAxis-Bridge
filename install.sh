@@ -298,14 +298,14 @@ step "2/7  Checking for conflicts"
 
 # SYS_AUTOSTART id collisions.
 #
-# We install ids 1200-1203, so only a *different* airframe occupying one of
-# those four ids is a real collision. The check used to span the whole reserved
-# 1200-1219 range, which put it in direct conflict with README's "Adding a new
-# aircraft": a user's own 1204_flightaxis_cessna made the installer refuse
-# outright, and that refusal honoured neither --force nor --dry-run. Ids
-# 1204-1219 stay reserved by documentation, but they are the user's to use.
+# We install ids 1200-1217, so only a *different* airframe occupying one of
+# those eighteen ids is a real collision. The check must NOT span the whole
+# reserved 1200-1233 range, or it would conflict with README's "Adding a new
+# aircraft": a user's own 1220_flightaxis_cessna would make the installer refuse
+# outright, and that refusal honours neither --force nor --dry-run. Ids
+# 1218-1233 stay reserved by documentation, but they are the user's to use.
 COLLISIONS=""
-for f in "$AF_DIR"/120[0-3]_*; do
+for f in "$AF_DIR"/120[0-9]_* "$AF_DIR"/121[0-7]_*; do
 	[ -e "$f" ] || continue
 	base="$(basename "$f")"
 	case " $AIRFRAMES " in
@@ -315,7 +315,7 @@ for f in "$AF_DIR"/120[0-3]_*; do
 done
 if [ -n "$COLLISIONS" ]; then
 	MSG="SYS_AUTOSTART id collision in $AF_DIR
-$(for c in $COLLISIONS; do printf '       %s occupies one of the ids 1200-1203 that this integration installs\n' "$c"; done)
+$(for c in $COLLISIONS; do printf '       %s occupies one of the ids 1200-1217 that this integration installs\n' "$c"; done)
        Installing would give two airframes the same SYS_AUTOSTART id. Move or
        rename them, or renumber this integration (airframe files + README)."
 	if [ "$FORCE" -eq 1 ] || [ "$DRY_RUN" -eq 1 ]; then
@@ -326,7 +326,7 @@ $(for c in $COLLISIONS; do printf '       %s occupies one of the ids 1200-1203 t
        Re-run with --force to install anyway."
 	fi
 else
-	ok "no SYS_AUTOSTART collisions on the ids 1200-1203 we install"
+	ok "no SYS_AUTOSTART collisions on the ids 1200-1217 we install"
 fi
 
 # Uncommitted local modifications to files we are about to overwrite.
@@ -629,7 +629,7 @@ fi
 
 # --- 5b: the four airframe entries -----------------------------------------
 # fa_splice_airframes (scripts/detect-px4.sh) rewrites the px4_add_romfs_files()
-# list: it drops any existing flightaxis entry in our reserved 1200-1219 range,
+# list: it drops any existing flightaxis entry in our reserved 1200-1217 range,
 # then re-inserts $AIRFRAMES as one block in sorted position. It lives next to
 # the matching removal filter so install and uninstall cannot drift apart - that
 # drift is what let a CRLF tree end up with duplicated entries.
@@ -658,7 +658,7 @@ for a in $AIRFRAMES; do
 done
 
 if [ -z "$MISSING_AF" ]; then
-	ok "$AF_CMAKE_REL already lists all four flightaxis airframes (no change)"
+	ok "$AF_CMAKE_REL already lists all flightaxis airframes (no change)"
 else
 	grep -q '^px4_add_romfs_files(' "$AF_CMAKE" || die \
 "could not find the 'px4_add_romfs_files(' list in
@@ -670,10 +670,10 @@ $(for a in $AIRFRAMES; do printf '         %s\n' "$a"; done)"
 	TMP="$(tmp_for "$AF_CMAKE.flightaxis.tmp.$$")"
 	if ! fa_splice_airframes "$AF_CMAKE" "$AIRFRAMES" > "$TMP"; then
 		rm -f "$TMP"
-		die "could not find a sorted insertion point (no airframe id above 1219) inside the
+		die "could not find a sorted insertion point (no airframe id above 1217) inside the
        px4_add_romfs_files() list in
        $AF_CMAKE_REL
-       Refusing to blind-append. Register the four 120x_flightaxis_* entries manually."
+       Refusing to blind-append. Register the flightaxis 12xx_flightaxis_* entries manually."
 	fi
 	for a in $AIRFRAMES; do
 		grep -qE "^[[:space:]]*${a}[[:space:]]*$" "$TMP" \
@@ -683,7 +683,7 @@ $(for a in $AIRFRAMES; do printf '         %s\n' "$a"; done)"
 	# re-emitted every entry and still passed that check. Count them, and require
 	# every one to sit inside the px4_add_romfs_files() list.
 	# Counted with FA_ENTRY_RE (the exact four names), not an id range: a
-	# user-authored 1204_flightaxis_cessna is not ours and must not be counted,
+	# user-authored 1220_flightaxis_cessna is not ours and must not be counted,
 	# or this check fails on a tree that is perfectly correct.
 	N_ENTRIES="$(grep -cE "$FA_ENTRY_RE" "$TMP" || true)"
 	N_EXPECT="$(printf '%s\n' $AIRFRAMES | grep -c . || true)"
@@ -732,7 +732,7 @@ fi
 # fa_lists_airframe cannot be reused here: it only recognises a
 # px4_add_romfs_files( at column 0, which is right for init.d-posix but wrong
 # for this file, where every guarded list is TAB-INDENTED. Reusing it would
-# report all four as missing on every run and re-splice each time (harmless,
+# report them all as missing on every run and re-splice each time (harmless,
 # because the splice is idempotent, but it would misreport "registered" forever).
 fa_lists_hil_airframe() {
 	awk -v want="$2" '
@@ -753,7 +753,7 @@ for a in $HIL_AIRFRAMES; do
 done
 
 if [ -z "$MISSING_HIL_AF" ]; then
-	ok "$HIL_AF_CMAKE_REL already lists all four flightaxis HITL airframes (no change)"
+	ok "$HIL_AF_CMAKE_REL already lists all flightaxis HITL airframes (no change)"
 else
 	grep -q '^px4_add_romfs_files(' "$HIL_AF_CMAKE" || die \
 "could not find the 'px4_add_romfs_files(' list in
@@ -767,7 +767,7 @@ $(for a in $HIL_AIRFRAMES; do printf '         %s\n' "$a"; done)"
 		rm -f "$TMP"
 		die "could not find the anchor '$FA_HIL_ANCHOR' inside the px4_add_romfs_files()
        list in $HIL_AF_CMAKE_REL
-       Refusing to blind-append. Register the four 120x_flightaxis_*.hil entries
+       Refusing to blind-append. Register the flightaxis 12xx_flightaxis_*.hil entries
        manually, inside the CONFIG_MODULES_SIMULATION_PWM_OUT_SIM block."
 	fi
 
@@ -783,8 +783,13 @@ $(for a in $HIL_AIRFRAMES; do printf '         %s\n' "$a"; done)"
 	[ "$N_HIL" -eq "$N_HIL_EXPECT" ] || { rm -f "$TMP"; die \
 		"splice into $HIL_AF_CMAKE_REL produced $N_HIL flightaxis entries, expected $N_HIL_EXPECT
        (duplicate or stray entries - refusing to write the file)"; }
+	# Indent-tolerant open, exactly like fa_lists_hil_airframe above: our .hil
+	# entries land in the TAB-INDENTED px4_add_romfs_files( inside the
+	# CONFIG_MODULES_SIMULATION_PWM_OUT_SIM guard, so a column-0-only anchor
+	# (as init.d-posix uses) counts them all as "outside" and this invariant
+	# fails on a correct splice.
 	N_HIL_INSIDE="$(awk -v entry_re="$FA_HIL_ENTRY_RE" '
-		/^px4_add_romfs_files\(/ { inlist = 1; next }
+		/^[ \t]*px4_add_romfs_files\(/ { inlist = 1; next }
 		inlist && /^[ \t]*\)/    { inlist = 0; next }
 		inlist {
 			line = $0; sub(/\r$/, "", line)

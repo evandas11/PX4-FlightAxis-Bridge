@@ -329,7 +329,8 @@ entry in v1.16 — HIL streams are added dynamically by `set_hil_enabled()` when
 
 ### 6.3 Airframe and output mapping
 
-**Four HITL airframes are shipped.** `install.sh` places them in the PX4 tree and registers them:
+**Eighteen HITL airframes are shipped** — one per SITL airframe, same id, `.hil` suffix.
+`install.sh` places them in the PX4 tree and registers them:
 
 | `SYS_AUTOSTART` | File | Model JSON |
 |---|---|---|
@@ -337,6 +338,24 @@ entry in v1.16 — HIL streams are added dynamically by `set_hil_enabled()` when
 | 1201 | `…/1201_flightaxis_quad.hil` | `quad.json` |
 | 1202 | `…/1202_flightaxis_quadplane.hil` | `quadplane.json` |
 | 1203 | `…/1203_flightaxis_heli.hil` | `heli.json` |
+| 1204 | `…/1204_flightaxis_quadplus.hil` | `quadplus.json` |
+| 1205 | `…/1205_flightaxis_hexa.hil` | `hexa.json` |
+| 1206 | `…/1206_flightaxis_hexaplus.hil` | `hexaplus.json` |
+| 1207 | `…/1207_flightaxis_hexacoax.hil` | `hexacoax.json` |
+| 1208 | `…/1208_flightaxis_octo.hil` | `octo.json` |
+| 1209 | `…/1209_flightaxis_octoplus.hil` | `octoplus.json` |
+| 1210 | `…/1210_flightaxis_octocoax.hil` | `octocoax.json` |
+| 1211 | `…/1211_flightaxis_dodeca.hil` | `dodeca.json` |
+| 1212 | `…/1212_flightaxis_tri.hil` ⚠ | `tri.json` |
+| 1213 | `…/1213_flightaxis_flyingwing.hil` | `flyingwing.json` |
+| 1214 | `…/1214_flightaxis_atail.hil` | `atail.json` |
+| 1215 | `…/1215_flightaxis_tiltrotor.hil` ⚠ | `tiltrotor.json` |
+| 1216 | `…/1216_flightaxis_tailsitter.hil` ⚠ | `tailsitter.json` |
+| 1217 | `…/1217_flightaxis_helicoax.hil` ⚠ | `helicoax.json` |
+
+The four ⚠ frames (tilt/servo/coaxial) carry PX4-stock geometry that is not yet validated against
+a RealFlight model — check the QGC Actuators tab before applying power. **Propellers off** for any
+bench check regardless.
 
 They carry the same ids as the SITL airframes deliberately, so **1201 means "FlightAxis quad"
 whether the firmware is SITL or on a board**. They are separate files because a real board boots

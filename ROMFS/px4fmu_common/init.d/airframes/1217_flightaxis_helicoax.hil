@@ -1,0 +1,248 @@
+#!/bin/sh
+#
+# ############################################################################
+# #  DRIVES A REAL FLIGHT CONTROLLER AND REAL ESCs. PROPELLERS OFF.          #
+# #                                                                          #
+# #  This airframe was derived by MECHANICAL SUBSTITUTION from the SITL      #
+# #  airframe init.d-posix/airframes/1217_flightaxis_helicoax: every         #
+# #  PWM_MAIN_FUNC<N> was rewritten to HIL_ACT_FUNC<N> with the same <N>     #
+# #  and the same numeric function value, SITL-only startup parameters were  #
+# #  dropped, and SYS_HITL was added. This drives a real flight controller   #
+# #  and real ESCs: with the propellers off, check actuator direction,       #
+# #  ordering, endpoints and failsafe on the bench before you fit anything   #
+# #  to the airframe or apply flight power. The geometry and the output      #
+# #  mapping follow by construction; the CONTROLLER GAINS are inherited      #
+# #  from the SITL file; refine them in Acro for whichever heli model        #
+# #  you load. Verify the Actuators tab in QGC before arming anything.       #
+# #                                                                          #
+# #  NEEDS TUNING - CA_AIRFRAME 12 (coaxial). Swash/rotor channel mapping    #
+# #  and gains are UNVALIDATED against RealFlight; expect to retune.         #
+# ############################################################################
+#
+# Companion-side model:
+# Tools/simulation/flightaxis/flightaxis_bridge/models/helicoax.json
+#
+# @name HITL FlightAxis Coaxial Helicopter
+#
+# @type Helicopter
+# @class Copter
+#
+# @output Motor1 Clockwise main rotor
+# @output Motor2 Counter-clockwise main rotor
+# @output Servo1 Swash plate servo 1
+# @output Servo2 Swash plate servo 2
+# @output Servo3 Swash plate servo 3
+#
+
+. ${R}etc/init.d/rc.heli_defaults
+
+# HITL: sensors and GPS arrive as MAVLink HIL_* messages, real outputs stay
+# disabled and actuator commands leave the board as HIL_ACTUATOR_CONTROLS.
+param set SYS_HITL 1
+
+param set UAVCAN_ENABLE 0
+
+# The board is on the bench with no battery attached.
+param set-default CBRK_SUPPLY_CHK 894281
+
+# Headless runs (QGC optional) have no manual control source at all. Value 4
+# ("ignore any stick input") is the only value that skips the RC-loss failsafe;
+# the firmware default of 1 does not. NAV_RCL_ACT is deliberately left at its
+# firmware default: it is unreachable once COM_RC_IN_MODE is 4, and the value 0
+# suggested for it is outside the parameter's declared range (@min 1).
+#
+# THIS ALSO BLOCKS RC PASSTHROUGH -- both a receiver wired to the board and the
+# transmitter plugged into RealFlight, which the bridge forwards to PX4 as
+# RC_CHANNELS -> input_rc. That stream is sent regardless of this parameter and
+# "listener input_rc" will show live stick values either way, but value 4 makes
+# commander ignore them, so the sticks will neither arm nor fly the aircraft.
+# If passthrough looks broken while input_rc is populated and moving, this
+# parameter is why.
+#
+# No single value serves both cases, because PX4 overloads this one parameter
+# for both jobs: the SAME value 4 is what skips the RC-loss failsafe
+# (failsafe.cpp:479, tested against RcInMode::StickInputDisabled) and what gates
+# the manual-mode arming check (modeCheck.cpp:154). Any value that enables the
+# sticks therefore necessarily re-arms the RC-loss failsafe, and a headless run
+# with no transmitter would take a failsafe action (NAV_RCL_ACT, default
+# 2 = Return) as soon as it armed. Defaulting to headless costs the transmitter
+# user exactly one line, set at the pxh> prompt or added to this file:
+#
+#     param set COM_RC_IN_MODE 0     # RC transmitter / receiver only
+#
+# Use 0 when a transmitter is the only stick source (it also keeps a QGC virtual
+# joystick from competing with it), or 2 to allow a transmitter and a QGC
+# joystick with fallback. The transmitter must then be calibrated in QGC exactly
+# as for real hardware (Vehicle Setup -> Radio): PX4 does not act on input_rc
+# until RC_MAP_* and the per-channel RC_MIN/RC_TRIM/RC_MAX are set.
+param set-default COM_RC_IN_MODE 4
+
+# Negative disables the pre-takeoff auto-disarm. rc.heli_defaults sets 60 s,
+# which cuts a bench test of the swash/rotor response short and reads like a bug.
+param set-default COM_DISARM_PRFLT -1
+
+#
+# WHO DOES THE SWASH MIXING: PX4 DOES, AND ONLY PX4.
+#
+# A collective-pitch heli needs exactly one CCPM mix between the pilot's
+# roll/pitch and the swash servos. It can live in PX4's allocator, in the
+# bridge, or in the RealFlight model - but in EXACTLY ONE of them. Two mixes in
+# series do not cancel; they compose, and roll and pitch cross-couple.
+#
+# This airframe puts it in PX4. The allocator below (CA_AIRFRAME 12 with the
+# CA_SP0_* geometry) turns roll/pitch into swash SERVO POSITIONS, and the bridge
+# passes those numbers to RealFlight completely untouched: helicoax.json is a
+# pure identity map and HeliDemix is NOT in its Options. RealFlight channel N
+# carries PX4 servo N, literally.
+#
+# HOW COAXIAL DIFFERS FROM THE SINGLE-ROTOR TEMPLATE (CA_AIRFRAME 11): there is
+# NO tail rotor. Yaw and collective are made by the two CONTRA-ROTATING MAIN
+# ROTORS, not by a tail servo and not by the swash. See
+# ActuatorEffectivenessHelicopterCoaxial.cpp:104-144:
+#   throttle       = -thrust_z * spoolup            (the collective command)
+#   rotor CW  (0)  = throttle - yaw
+#   rotor CCW (1)  = throttle + yaw
+#   swash servo i  = pitch*cos(ang_i)*arm_i - roll*sin(ang_i)*arm_i + trim
+# so collective is common rotor throttle, yaw is DIFFERENTIAL rotor throttle,
+# and the swash carries ONLY cyclic (roll/pitch). The coaxial allocator reads
+# only CA_SP0_* / CA_SV_CS*_TRIM and COM_SPOOLUP_TIME; the CA_HELI_* / tail
+# parameters that the single-rotor template sets are NOT read under type 12.
+#
+# SO THE REALFLIGHT MODEL MUST BE NON-MIXED / DIRECT-SERVO on the swash, and its
+# two rotor channels must be driven independently (upper/lower) so PX4 can make
+# yaw with the differential - see the "REQUIRED CHANGES" section below.
+
+# Actuator geometry (QGC Actuators tab) MUST match the "px4" output indices
+# in Tools/simulation/flightaxis/flightaxis_bridge/models/helicoax.json.
+#
+# DESIGN RULE: helicoax.json is a pure IDENTITY map - its "rf" and "px4" columns
+# are the same number, so PX4 output channel N is RealFlight channel N. THE
+# CHANNEL ORDERING LIVES HERE, in the HIL_ACT_FUNC* assignments below. If the
+# order is wrong, renumber the FUNCs; do NOT re-scramble the JSON.
+#
+# Two numberings must be kept apart:
+#
+#  1. The ALLOCATOR's internal numbering. This is a property of CA_AIRFRAME and
+#     is NOT affected by anything below. CA_AIRFRAME 12 is "Helicopter
+#     (Coaxial)": getEffectivenessMatrix adds actuators in the order
+#       clockwise rotor (MOTORS), counter-clockwise rotor (MOTORS),
+#       then CA_SP0_COUNT swash SERVOS
+#     so the output functions are always Motor1=101 (CW rotor),
+#     Motor2=102 (CCW rotor), Servo1..Servo3 = 201..203 (swash 1..3). NOTE this
+#     differs from the single-rotor template, where a tail servo consumed
+#     Servo1=201 and pushed the swash to 202..204. There is no tail here.
+#
+#  2. The controls[] POSITIONS, which we choose. HIL_ACT_FUNC<N> lands on
+#     HIL_ACTUATOR_CONTROLS.controls[N-1] -- exactly as PWM_MAIN_FUNC<N> does in
+#     SITL. This layout puts the swash on controls[0..2] and the two rotors on
+#     controls[6..7]:
+#
+#   controls[0] = 201 Servo 1     swash plate servo 1 [-1,1] -> helicoax.json rf0
+#   controls[1] = 202 Servo 2     swash plate servo 2 [-1,1] -> helicoax.json rf1
+#   controls[2] = 203 Servo 3     swash plate servo 3 [-1,1] -> helicoax.json rf2
+#   controls[6] = 101 Motor 1     clockwise main rotor [0,1] -> helicoax.json rf6
+#   controls[7] = 102 Motor 2     ccw main rotor       [0,1] -> helicoax.json rf7
+#
+# UNVALIDATED: which physical RealFlight rotor is "clockwise" vs "counter-
+# clockwise", and whether rf6/rf7 match the model's upper/lower rotor channels,
+# has not been checked. If yaw runs away or reverses on liftoff, swap the two
+# rotor channels - do NOT touch the swash triple to fix a yaw problem.
+param set-default CA_AIRFRAME 12
+
+param set-default HIL_ACT_FUNC1 201
+param set-default HIL_ACT_FUNC2 202
+param set-default HIL_ACT_FUNC3 203
+# 4-6 idle. The single-rotor template used controls[3] for the tail servo; a
+# coaxial has no tail, so it is left unassigned here. helicoax.json leaves
+# rf3-5 unmapped to match.
+param set-default HIL_ACT_FUNC4 0
+param set-default HIL_ACT_FUNC5 0
+param set-default HIL_ACT_FUNC6 0
+param set-default HIL_ACT_FUNC7 101
+param set-default HIL_ACT_FUNC8 102
+
+# Swash plate geometry. CA_SP0_ANG<i> is measured clockwise seen from above,
+# 0 = forward (+X). ActuatorEffectivenessHelicopterCoaxial.cpp:126-132 drives
+# each servo with
+#   servo_i = pitch*cos(ang_i)*arm_i - roll*sin(ang_i)*arm_i + trim
+# (no collective term - collective is rotor throttle on a coaxial).
+#
+# 300/60/180 is a standard 120-degree head with the odd servo AFT, carried over
+# from the single-rotor template. If your coaxial model's third servo is at the
+# FRONT, use 120/240/0. Getting this wrong rotates the cyclic response, so the
+# aircraft banks when commanded to pitch. Verify against the model in
+# RealFlight's aircraft editor. UNVALIDATED for any specific coaxial model.
+param set-default CA_SP0_COUNT 3
+param set-default CA_SP0_ANG0 300
+param set-default CA_SP0_ANG1 60
+param set-default CA_SP0_ANG2 180
+
+# Equal arm lengths, the right model for a symmetric head. Pinned so a stray
+# QGC edit cannot silently skew the cyclic; change only to match a model whose
+# servo arms genuinely differ.
+param set-default CA_SP0_ARM_L0 1.0
+param set-default CA_SP0_ARM_L1 1.0
+param set-default CA_SP0_ARM_L2 1.0
+
+#
+# REQUIRED CHANGES TO THE REALFLIGHT MODEL ITSELF
+#
+# RC heli models ship configured for a human pilot, with stabilisation and
+# mixing already inside the model. All of it fights PX4 and must be removed in
+# RealFlight's aircraft editor before this airframe will fly:
+#
+#  1. Any rate/heading-hold gyro. Set it to zero gain (or plain rate mode at
+#     minimum gain) - it is an independent controller that fights PX4.
+#  2. Swashplate mixing (CCPM / eCCPM). TURN IT OFF. PX4 has already done the
+#     cyclic mix - what arrives on rf0/rf1/rf2 is three finished SERVO POSITIONS,
+#     not roll/pitch - so the model must be a NON-mixed, direct-servo head. If,
+#     and only if, the CCPM cannot be disabled, move the mix to the bridge by
+#     adding "HeliDemix" to Options in helicoax.json, and never enable both.
+#  3. Rotor throttle/collective curves in the model. Flatten them - PX4 owns
+#     collective as common rotor throttle and expects a linear channel.
+#  4. Any exponential, dual rate or trim on the cyclic channels.
+#  5. The two main rotors must be independently drivable on rf6/rf7 and must
+#     spin in OPPOSITE directions - the coaxial yaw authority is the difference
+#     between them. If the model ties both rotors to one channel, PX4 cannot yaw.
+#
+# Channel usage (matches helicoax.json rf indices). rf0-2 are swash SERVO
+# POSITIONS (not axis commands); rf6/rf7 are the two rotor throttles:
+#   rf0 = swash servo 1 (at CA_SP0_ANG0 = 300 deg),
+#   rf1 = swash servo 2 (at CA_SP0_ANG1 =  60 deg),
+#   rf2 = swash servo 3 (at CA_SP0_ANG2 = 180 deg),
+#   rf6 = clockwise main rotor throttle, rf7 = counter-clockwise main rotor.
+#   rf3, rf4, rf5 are unused and idle at 0.5.
+# Reverse the channel in RealFlight (not here) if an axis responds backwards.
+
+# Rate controller. 16001_helicopter ships P=I=D=0 with FF only, but its own
+# comment says that is a bring-up state to be tuned afterwards - it leaves the
+# rate loops open, so any trim offset or disturbance integrates uncorrected and
+# the AIRCRAFT'S ATTITUDE diverges shortly after liftoff.
+# These gains instead start from values typical of collective-pitch helicopters
+# in the same normalised convention PX4 uses (torque in -1..1 per rad/s):
+# roll/pitch P 0.024 I 0.15 D 0.001 FF 0.15, yaw P 0.18 I 0.12 D 0.003 FF 0.024.
+# The values below are those rounded to two significant figures (P 0.024 -> 0.025,
+# yaw FF 0.024 -> 0.02); the difference is far inside the retuning these need
+# anyway, so do not read the exact digits as meaningful.
+# INHERITED FROM THE SINGLE-ROTOR TEMPLATE AND UNVALIDATED FOR A COAXIAL - the
+# yaw gains in particular now act on differential rotor throttle, not a tail
+# servo, and should be expected to need the most retuning. Refine in Acro for
+# whichever coaxial model you load.
+param set-default MC_ROLLRATE_P 0.025
+param set-default MC_ROLLRATE_I 0.15
+param set-default MC_ROLLRATE_D 0.001
+param set-default MC_ROLLRATE_FF 0.15
+param set-default MC_PITCHRATE_P 0.025
+param set-default MC_PITCHRATE_I 0.15
+param set-default MC_PITCHRATE_D 0.001
+param set-default MC_PITCHRATE_FF 0.15
+param set-default MC_YAWRATE_P 0.18
+param set-default MC_YAWRATE_I 0.12
+param set-default MC_YAWRATE_D 0.003
+param set-default MC_YAWRATE_FF 0.02
+# Raised from the 0.30 firmware default: the I gains above (0.15 roll/pitch,
+# 0.12 yaw) are large next to the multirotor defaults because a heli's trim
+# offsets are, and 0.30 would clip the integrator before it has taken up the
+# steady swash trim.
+param set-default MC_RR_INT_LIM 0.4
+param set-default MC_YR_INT_LIM 0.4

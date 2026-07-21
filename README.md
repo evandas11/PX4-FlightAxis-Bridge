@@ -81,7 +81,7 @@ Tools/simulation/flightaxis/
     ├── FA_check.py                      # sanity-ping RealFlight :18083 before start
     ├── get_FAbridge_params.py           # models/<name>.json → bridge argv
     ├── cmake/FindMAVLink.cmake
-    ├── models/{plane,quad,quadplane,heli}.json   # RealFlight channel maps
+    ├── models/*.json                    # RealFlight channel maps, one per airframe (18)
     └── src/
         ├── flightaxis_bridge.cpp        # main loop + 4-branch physics-time handling (§7)
         ├── fa_communicator.{h,cpp}      # SOAP client, socket and reconnect logic (§8.1)
@@ -102,17 +102,19 @@ ROMFS/px4fmu_common/init.d-posix/airframes/
 ├── 1200_flightaxis_plane
 ├── 1201_flightaxis_quad
 ├── 1202_flightaxis_quadplane
-└── 1203_flightaxis_heli
-    # + four entries added to that directory's CMakeLists.txt — install.sh does this
+├── 1203_flightaxis_heli
+└── 1204_flightaxis_quadplus … 1217_flightaxis_helicoax   # 14 more frames — see "Airframes"
+    # + one entry per airframe added to that directory's CMakeLists.txt — install.sh does this
 
 ROMFS/px4fmu_common/init.d/airframes/          # note: init.d, not init.d-posix
 ├── 1200_flightaxis_plane.hil
 ├── 1201_flightaxis_quad.hil
 ├── 1202_flightaxis_quadplane.hil
-└── 1203_flightaxis_heli.hil
+├── 1203_flightaxis_heli.hil
+└── 1204_flightaxis_quadplus.hil … 1217_flightaxis_helicoax.hil   # the same 14, HITL side
     # the HITL airframes. A real board boots from init.d, so these need their own
     # directory and their own registration in that directory's CMakeLists.txt
-    # + four entries added there as well — install.sh does this
+    # + one entry per airframe added there as well — install.sh does this
 ```
 
 ## Install into a PX4 tree
@@ -177,9 +179,9 @@ there it aborts and tells you what to add by hand rather than guessing where you
 system wants it. It never uses `sudo`. All three PX4-owned `CMakeLists.txt` files are backed up
 to `<file>.flightaxis.bak` first, and everything it changed is listed at the end.
 
-Ids **1204–1219 are reserved by this document but not used**, and the installer ignores
-them entirely — that is the range for your own aircraft (see
-[Adding a new aircraft](#adding-a-new-aircraft)).
+This integration ships ids **1200–1217** (see [Airframes](#airframes)). Ids **1218–1233 are
+reserved by this document but not used**, and the installer ignores them entirely — that is the
+range for your own aircraft (see [Adding a new aircraft](#adding-a-new-aircraft)).
 
 Reverse it all at any time:
 
@@ -237,24 +239,53 @@ apply as written (see spec §3).
    commented-out or merged line will be treated as "not installed".
 
 3. In `PX4-Autopilot/ROMFS/px4fmu_common/init.d-posix/airframes/CMakeLists.txt`, register
-   the four airframes inside `px4_add_romfs_files(...)`, in sorted numeric position — after
-   the `10xx` block and before the next id above `1203` — tab-indented like its neighbours:
+   all eighteen airframes inside `px4_add_romfs_files(...)`, in sorted numeric position — after
+   the `10xx` block and before the next id above `1217` — tab-indented like its neighbours:
 
    ```cmake
    	1200_flightaxis_plane
    	1201_flightaxis_quad
    	1202_flightaxis_quadplane
    	1203_flightaxis_heli
+   	1204_flightaxis_quadplus
+   	1205_flightaxis_hexa
+   	1206_flightaxis_hexaplus
+   	1207_flightaxis_hexacoax
+   	1208_flightaxis_octo
+   	1209_flightaxis_octoplus
+   	1210_flightaxis_octocoax
+   	1211_flightaxis_dodeca
+   	1212_flightaxis_tri
+   	1213_flightaxis_flyingwing
+   	1214_flightaxis_atail
+   	1215_flightaxis_tiltrotor
+   	1216_flightaxis_tailsitter
+   	1217_flightaxis_helicoax
    ```
 
 4. In `PX4-Autopilot/ROMFS/px4fmu_common/init.d/airframes/CMakeLists.txt` — the **`init.d`**
-   one, not the `init.d-posix` one edited in step 3 — register the four HITL airframes:
+   one, not the `init.d-posix` one edited in step 3 — register the same eighteen airframes,
+   with the `.hil` suffix:
 
    ```cmake
    	1200_flightaxis_plane.hil
    	1201_flightaxis_quad.hil
    	1202_flightaxis_quadplane.hil
    	1203_flightaxis_heli.hil
+   	1204_flightaxis_quadplus.hil
+   	1205_flightaxis_hexa.hil
+   	1206_flightaxis_hexaplus.hil
+   	1207_flightaxis_hexacoax.hil
+   	1208_flightaxis_octo.hil
+   	1209_flightaxis_octoplus.hil
+   	1210_flightaxis_octocoax.hil
+   	1211_flightaxis_dodeca.hil
+   	1212_flightaxis_tri.hil
+   	1213_flightaxis_flyingwing.hil
+   	1214_flightaxis_atail.hil
+   	1215_flightaxis_tiltrotor.hil
+   	1216_flightaxis_tailsitter.hil
+   	1217_flightaxis_helicoax.hil
    ```
 
    That file is a single `px4_add_romfs_files(...)` list with `if(CONFIG_*)` guards nested
@@ -283,6 +314,50 @@ apply as written (see spec §3).
    absent. The bridge binary should appear at
    `build/px4_sitl_nolockstep/build_flightaxis_bridge/flightaxis_bridge`.
 
+### Airframes
+
+Eighteen airframes ship, one `flightaxis_<name>` (SITL) and one `flightaxis_hitl_<name>`
+(HITL) target each, at `SYS_AUTOSTART` ids `1200`–`1217`. Every one carries the identical
+FlightAxis workaround set (sensor-learning off, the bridge battery, the failsafe fixes — see
+[Stored values against the airframe's defaults](#stored-values-against-the-airframes-defaults));
+they differ only in geometry.
+
+| id   | target                    | type                | motors | notes |
+|------|---------------------------|---------------------|--------|-------|
+| 1200 | `flightaxis_plane`        | Standard plane      | 1      | |
+| 1201 | `flightaxis_quad`         | Quadrotor X         | 4      | |
+| 1202 | `flightaxis_quadplane`    | Standard VTOL       | 4 + 1  | |
+| 1203 | `flightaxis_heli`         | Helicopter          | 1 + tail | |
+| 1204 | `flightaxis_quadplus`     | Quadrotor +         | 4      | |
+| 1205 | `flightaxis_hexa`         | Hexarotor X         | 6      | |
+| 1206 | `flightaxis_hexaplus`     | Hexarotor +         | 6      | |
+| 1207 | `flightaxis_hexacoax`     | Hexarotor coaxial   | 6      | |
+| 1208 | `flightaxis_octo`         | Octorotor X         | 8      | |
+| 1209 | `flightaxis_octoplus`     | Octorotor +         | 8      | |
+| 1210 | `flightaxis_octocoax`     | Octo coax           | 8      | |
+| 1211 | `flightaxis_dodeca`       | Dodecarotor coax    | 12     | |
+| 1212 | `flightaxis_tri`          | Tricopter Y + tilt  | 3 + servo | ⚠ needs tuning |
+| 1213 | `flightaxis_flyingwing`   | Flying wing         | 1 + 2 elevons | |
+| 1214 | `flightaxis_atail`        | Plane, V/A-tail     | 1 + surfaces | |
+| 1215 | `flightaxis_tiltrotor`    | VTOL tiltrotor      | 4 + tilts | ⚠ needs tuning |
+| 1216 | `flightaxis_tailsitter`   | VTOL tailsitter     | 2 + 2 elevons | ⚠ needs tuning |
+| 1217 | `flightaxis_helicoax`     | Coaxial helicopter  | 2 rotors + swash | ⚠ needs tuning |
+
+**Geometry** is lifted verbatim from PX4's own stock airframe for each frame (`5001_quad_+`,
+`6001_hexa_x`, `8001_octo_x`, `24001_dodeca_cox`, `3000_generic_wing`, `13030_generic_vtol_quad_tiltrotor`,
+and so on). Because PX4 normalises the mixing matrix, the arm-length **magnitudes never matter** —
+only the **symmetry** and the **`CA_ROTOR*_KM` signs** (spin directions) do — so no geometry
+value needs adjusting to your particular RealFlight model. What you *do* match to your model is
+the **channel order**, through `PWM_MAIN_FUNC*` and the model JSON (an identity pipe — see
+[Model JSON: channel maps](#model-json-channel-maps)).
+
+**⚠ needs tuning.** The four tilt/servo/coaxial frames are complete and build, but their
+channel order, tilt/servo mapping and `VT_*`/controller gains are **lifted from PX4 defaults and
+not yet validated against a RealFlight model**. Each such airframe says so in a comment above its
+geometry block. Verify the **QGC → Vehicle Setup → Actuators** tab against your model before
+arming, and expect to retune. (For the coaxial helicopter, if yaw runs away on lift-off, swap the
+two rotor channels `rf6`/`rf7` in `helicoax.json` — which physical rotor is clockwise is a guess.)
+
 ### Run it
 
 Both methods end in the same place. Use this form — the home position pinned to the field
@@ -299,7 +374,13 @@ PX4_HOME_YAW=235 \
 make px4_sitl_nolockstep flightaxis_quadplane
 ```
 
-(also `flightaxis_quad`, `flightaxis_quadplane`, `flightaxis_heli`; QGC connects on UDP 14550)
+Swap the target for any of the eighteen frames — `flightaxis_plane`, `flightaxis_quad`,
+`flightaxis_quadplane`, `flightaxis_heli`, `flightaxis_quadplus`, `flightaxis_hexa`,
+`flightaxis_hexaplus`, `flightaxis_hexacoax`, `flightaxis_octo`, `flightaxis_octoplus`,
+`flightaxis_octocoax`, `flightaxis_dodeca`, `flightaxis_tri`, `flightaxis_flyingwing`,
+`flightaxis_atail`, `flightaxis_tiltrotor`, `flightaxis_tailsitter`, `flightaxis_helicoax`
+— see [Airframes](#airframes) for the full list and which need tuning. QGC connects on
+UDP 14550 either way.
 
 `PX4_FLIGHTAXIS_IP` defaults to `127.0.0.1`, so it can be left out only when RealFlight is on
 this same machine; anything else and it is required. Leaving the rest out puts home at PX4's
@@ -316,7 +397,7 @@ running instance, alongside the log output. Ctrl-C at that prompt is what quits.
 
 #### Flying it manually
 
-**Out of the box the sticks do nothing, deliberately.** All four airframes ship
+**Out of the box the sticks do nothing, deliberately.** All eighteen airframes ship
 `param set-default COM_RC_IN_MODE 4` — "ignore any stick input" — because a headless run
 (QGC optional, no transmitter, offboard or mission control only) has no manual control source
 at all, and 4 is the only value that skips the RC-loss failsafe. Leave it and commander ignores
@@ -405,7 +486,7 @@ Three things end up in there, and they are the three that make the separation wo
 └── test_data -> …/PX4-Autopilot/test_data
 ```
 
-`log/` fills one file per flight rather than one per boot: all four airframes set
+`log/` fills one file per flight rather than one per boot: all eighteen airframes set
 `SDLOG_MODE 0` ("when armed until disarm"), against rcS's own `1` ("from boot until disarm"),
 which would otherwise record every idle stretch before you ever armed. It is
 `@reboot_required`, so it is a startup default and not something to change at the `pxh>` prompt.
@@ -772,11 +853,11 @@ wants `[0,1]`), `disarm`, and the option transforms:
 
 | Option | Effect |
 |---|---|
-| `ResetPosition` | issue `ResetAircraft` on startup, so every run begins from a known state. On by default in all four shipped models. |
+| `ResetPosition` | issue `ResetAircraft` on startup, so every run begins from a known state. On by default in all eighteen shipped models. |
 | `Rev4Servos` | swap RealFlight channels 1–4 with 5–8 wholesale, for RF models built that way. **Do not enable it on a model whose FUNC params already produce the right order** — every shipped model, `quadplane.json` included — as it can only swap a correct order into a wrong one. |
 | `HeliDemix` | **Off by default** — see "Swash mixing" below. Converts the three swash servo outputs back into the roll/pitch/collective triple a CCPM RealFlight model expects (`roll=(s1−s2)/1.732`, `pitch=((s1+s2)/2−s3)/1.5`, `col=(s1+s2+s3)/3`). The two divisors normalise the raw differences to unit gain — without them the cyclic saturates at 0.577 of commanded roll and 0.667 of pitch. They are exact only for the swash geometry `1203_flightaxis_heli` forces via `CA_SP0_ANG*` = 300/60/180, which is why that airframe pins the angles and the arm lengths. **The divisors are ours; ArduPilot's `SIM_FlightAxis.cpp:348-350` has no equivalent** and leaves roll and pitch in the ratio 2/√3 on the 120° head both projects use. The channel *order* follows ArduPilot (swash 1–3, tail 4, RSC 8); the demix *gains* deliberately do not. |
 | `HeliDemix` + `Rev4Servos` | **Mutually exclusive — `get_FAbridge_params.py` rejects the pair and the bridge will not start.** `Rev4Servos` runs first, so the demix would read the swapped-in rf4–6 instead of the swash servos and emit a constant roll 0 / pitch 0 / collective 0.5 — a swashplate frozen dead centre on an armed aircraft, with nothing in the output to show it. Refused at load time because the failure is silent; the full account is in [RUNNING.md §2.4](RUNNING.md#when-to-re-enable-helidemix). |
-| `SilenceFPS` | suppress the periodic `exchanges=… rtf=… glitches=…` line on stderr. **On in all four shipped models** — it prints once a second forever and buries everything else in the terminal. The alarms still print: each swallowed glitch gets its own `glitch 0.62s` line and an out-of-range realtime factor still warns, both independently of this option. Drop it from `Options` if you want the running heartbeat back. |
+| `SilenceFPS` | suppress the periodic `exchanges=… rtf=… glitches=…` line on stderr. **On in all eighteen shipped models** — it prints once a second forever and buries everything else in the terminal. The alarms still print: each swallowed glitch gets its own `glitch 0.62s` line and an out-of-range realtime factor still warns, both independently of this option. Drop it from `Options` if you want the running heartbeat back. |
 
 ### Swash mixing (helicopter)
 
@@ -815,7 +896,7 @@ Full derivation, per-model tables, and the heli traps: spec §5.
 ## Adding a new aircraft
 
 Three steps. **Number your airframe in the
-1204–1219 range** — those ids are reserved for exactly this and the installer and
+1218–1233 range** — those ids are reserved for exactly this and the installer and
 uninstaller leave them, and your model JSONs, strictly alone:
 
 1. New `Tools/simulation/flightaxis/flightaxis_bridge/models/<name>.json` (channel map — see

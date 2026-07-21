@@ -43,39 +43,40 @@
 # ONE source of truth for "what belongs to this integration", shared by
 # install.sh and uninstall.sh.
 #
-# We reserve SYS_AUTOSTART ids 1200-1219 by documentation, but we OWN exactly
-# the four names below and nothing else. That distinction is load-bearing:
+# We reserve SYS_AUTOSTART ids 1200-1233 by documentation, but we OWN exactly
+# the eighteen names below (1200-1217) and nothing else; 1218-1233 stay the
+# user's. That distinction is load-bearing:
 # README's "Adding a new aircraft" tells users to add their own
 # 12xx_flightaxis_<name>, and an ownership test written as a range regex made
-# uninstall.sh silently de-register a user's 1204_flightaxis_cessna from
+# uninstall.sh silently de-register a user's 1220_flightaxis_cessna from
 # px4_add_romfs_files() while leaving the file on disk - their airframe stopped
 # reaching the ROMFS and the only symptom was a silent hang at "waiting for PX4
 # on TCP 4560". Every matcher below is therefore built from these names, so
 # anything the user adds is invisible to us and survives untouched.
-FA_AIRFRAMES='1200_flightaxis_plane 1201_flightaxis_quad 1202_flightaxis_quadplane 1203_flightaxis_heli'
-FA_MODELS='plane quad quadplane heli'
+FA_AIRFRAMES='1200_flightaxis_plane 1201_flightaxis_quad 1202_flightaxis_quadplane 1203_flightaxis_heli 1204_flightaxis_quadplus 1205_flightaxis_hexa 1206_flightaxis_hexaplus 1207_flightaxis_hexacoax 1208_flightaxis_octo 1209_flightaxis_octoplus 1210_flightaxis_octocoax 1211_flightaxis_dodeca 1212_flightaxis_tri 1213_flightaxis_flyingwing 1214_flightaxis_atail 1215_flightaxis_tiltrotor 1216_flightaxis_tailsitter 1217_flightaxis_helicoax'
+FA_MODELS='plane quad quadplane heli quadplus hexa hexaplus hexacoax octo octoplus octocoax dodeca tri flyingwing atail tiltrotor tailsitter helicoax'
 
 # The HITL airframes. Same ids, so SYS_AUTOSTART 1200 means "FlightAxis plane"
 # whether the firmware is SITL or on a board; the ".hil" suffix is a real
 # parser-recognised extension (srcparser.py) and the two ROMFS trees are
 # separate, so there is no collision. A board boots from init.d, never
 # init.d-posix, which is why these cannot simply be the same files.
-FA_HIL_AIRFRAMES='1200_flightaxis_plane.hil 1201_flightaxis_quad.hil 1202_flightaxis_quadplane.hil 1203_flightaxis_heli.hil'
+FA_HIL_AIRFRAMES='1200_flightaxis_plane.hil 1201_flightaxis_quad.hil 1202_flightaxis_quadplane.hil 1203_flightaxis_heli.hil 1204_flightaxis_quadplus.hil 1205_flightaxis_hexa.hil 1206_flightaxis_hexaplus.hil 1207_flightaxis_hexacoax.hil 1208_flightaxis_octo.hil 1209_flightaxis_octoplus.hil 1210_flightaxis_octocoax.hil 1211_flightaxis_dodeca.hil 1212_flightaxis_tri.hil 1213_flightaxis_flyingwing.hil 1214_flightaxis_atail.hil 1215_flightaxis_tiltrotor.hil 1216_flightaxis_tailsitter.hil 1217_flightaxis_helicoax.hil'
 
 # Anchor for the HITL splice. Deliberately anchored rather than sorted-inserted,
 # which is what the init.d-posix splice does: this list is one big
 # px4_add_romfs_files() with if(CONFIG_*) guards INSIDE it, and the .hil
 # airframes must land inside the CONFIG_MODULES_SIMULATION_PWM_OUT_SIM guard
 # next to PX4's own 1001/1002/110x HIL airframes. A sorted insert would put them
-# before the first id above 1203, which is inside the MC_RATE_CONTROL guard -
+# before the first id above 1217, which is inside the MC_RATE_CONTROL guard -
 # the wrong block entirely, and it would silently change when they ship.
 FA_HIL_ANCHOR='1103_standard_vtol_sih.hil'
 
 # The highest id we own. The splicer inserts our block before the first list
-# entry above this, so a user's 1204 entry sorts after ours and stays put.
-FA_MAX_ID=1203
+# entry above this, so a user's 1218 entry sorts after ours and stays put.
+FA_MAX_ID=1217
 
-# An entry of ours, as an ERE. Exact alternation of the four names - never a
+# An entry of ours, as an ERE. Exact alternation of the owned names - never a
 # range - and whitespace/CRLF tolerant so install and uninstall agree on a
 # tab-indented or CRLF file. [[:space:]] is POSIX and works in awk and grep -E
 # alike; \r is always stripped before matching, so it cannot leak in here.
@@ -87,8 +88,8 @@ FA_ENTRY_RE="^[[:space:]]*($_fa_alt)[[:space:]]*\$"
 unset _fa_alt _fa_a
 
 # The same, for the HITL entries. Built the same way and for the same reason:
-# an exact alternation of the four names, never an id range, so a user-authored
-# 1204_flightaxis_cessna.hil is never matched, moved or deleted by us.
+# an exact alternation of the owned names, never an id range, so a user-authored
+# 1220_flightaxis_cessna.hil is never matched, moved or deleted by us.
 # NOTE the '.' in each name is escaped - unescaped, "1200_flightaxis_plane.hil"
 # as an ERE also matches "1200_flightaxis_planeXhil", and this regex drives a
 # DELETE path in the uninstaller.
@@ -414,8 +415,8 @@ fa_splice_airframes() {
 			}
 
 			# Sorted insertion point: first list entry with an id above ours.
-			# The bound is our highest owned id (1203), not the top of the
-			# reserved range: a user-authored 1204_flightaxis_cessna is not ours
+			# The bound is our highest owned id (1217), not the top of the
+			# reserved range: a user-authored 1220_flightaxis_cessna is not ours
 			# to move, and inserting before it keeps the list sorted.
 			if (!done && line ~ /^[ \t]*[0-9]+_/) {
 				n = line

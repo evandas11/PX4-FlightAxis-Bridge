@@ -4,7 +4,7 @@
 #
 #   ./uninstall.sh [PATH_TO_PX4] [--dry-run] [--yes]
 #
-# Reverses install.sh exactly: deletes the flightaxis payload and the four
+# Reverses install.sh exactly: deletes the flightaxis payload and all the
 # airframes, and removes the two splices from the PX4-owned CMakeLists.txt
 # files (restoring the .flightaxis.bak backups when they still match, otherwise
 # removing precisely the lines we added so unrelated later edits survive).
@@ -296,7 +296,7 @@ EOF
 		printf '    %sFAIL%s %s still includes %s\n' "$C_RED" "$C_OFF" "$SIM_CMAKE_REL" "$INCLUDE_LINE" >&2
 		LEFT=1
 	fi
-	# FA_ENTRY_RE, not an id range: a user's own 1204_flightaxis_cessna entry is
+	# FA_ENTRY_RE, not an id range: a user's own 1220_flightaxis_cessna entry is
 	# not ours, is intentionally left registered, and must not fail this check.
 	if grep -qE "$FA_ENTRY_RE" "$AF_CMAKE" 2>/dev/null; then
 		printf '    %sFAIL%s %s still lists our flightaxis airframes\n' "$C_RED" "$C_OFF" "$AF_CMAKE_REL" >&2

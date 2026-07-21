@@ -38,7 +38,7 @@ offset when the reset flag is set, and everything built around that here
 (detecting the respawn from the teleport instead, waiting for the model to
 settle, cutting the throttle, asking EKF2 to reset its position, and the
 restart-on-respawn path) has no upstream counterpart; the rangefinder path and
-sensor synthesis in `vehicle_state.*`; and the four airframes with their
+sensor synthesis in `vehicle_state.*`; and the airframes with their
 control-allocation and parameter configuration.
 
 ## Third-party notices — required, do not remove

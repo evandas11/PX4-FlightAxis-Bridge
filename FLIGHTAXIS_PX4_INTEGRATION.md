@@ -123,7 +123,7 @@ PX4-Autopilot/
     ├── 1201_flightaxis_quad
     ├── 1202_flightaxis_quadplane
     ├── 1203_flightaxis_heli
-    └── CMakeLists.txt                                # MODIFIED: the four airframes (§3.2)
+    └── CMakeLists.txt                                # MODIFIED: the flightaxis airframes (§3.2)
 ```
 
 Two registrations live in files PX4 owns, and both are mandatory — see §3.2. In particular the
@@ -490,7 +490,7 @@ Three heli-specific traps, all documented inside `heli.json`:
 - `UnmappedDefault` is the value sent on every RealFlight channel the map does not mention.
 - `Options` (a bit per option, flattened to a bitmask by `get_FAbridge_params.py`): `ResetPosition` (=1, ResetAircraft on startup, default), `Rev4Servos` (=2, swap ch1–4 ↔ 5–8 wholesale for RF models built that way — do **not** enable it on a model whose FUNC params already produce the right order, such as the quadplane, since it can only swap a correct order into a wrong one), `HeliDemix` (=4, **not enabled on any shipped model**; swash servos → RF roll/pitch/collective: `roll=(s1−s2)/1.732`, `pitch=((s1+s2)/2−s3)/1.5`, `col=(s1+s2+s3)/3`, recentered 0..1 — the divisors are gain normalisation, see below — for CCPM RealFlight models whose own mixing cannot be disabled), `SilenceFPS` (=8, suppresses the bridge's periodic frame-rate line; the realtime-factor and
 physics-multiplier warnings are *not* silenced by it, since those report a degraded simulation
-rather than a statistic). All four shipped models flatten to **9** (`ResetPosition|SilenceFPS`).
+rather than a statistic). Every shipped model flattens to **9** (`ResetPosition|SilenceFPS`).
 - **`HeliDemix` and `Rev4Servos` together are refused at load time**, by
   `get_FAbridge_params.py`, rather than accepted and applied. The bridge runs `Rev4Servos`
   first, so the demix would consume the *post*-swap slots — `rf4`–`rf6` rather than the swash
