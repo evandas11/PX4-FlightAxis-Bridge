@@ -1011,3 +1011,9 @@ GPL-compatible.
 
 This covers the files in this repository only. The bridge is a standalone executable
 that talks to PX4 over MAVLink — installing it does not relicense your PX4 checkout.
+
+**Trademarks.** RealFlight and FlightAxis are trademarks of their respective owners, used
+here only to name the product and protocol this bridge interoperates with. This is an
+independent, unofficial project — not affiliated with, endorsed by, or sponsored by the
+makers of RealFlight — and it contains no RealFlight software or assets. See
+[COPYRIGHT.md](COPYRIGHT.md#trademarks).

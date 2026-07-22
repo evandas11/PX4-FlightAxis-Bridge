@@ -51,6 +51,18 @@ Removing them would make this repository non-compliant and would put its distrib
 at risk — so they stay, and they are what makes the copyright claim above credible
 rather than overbroad.
 
+## Trademarks
+
+RealFlight and FlightAxis are trademarks of their respective owners. They appear here
+only to name the product this bridge interoperates with and the link protocol it speaks
+— nominative use, not a claim of ownership. This is an independent, unofficial project:
+it is **not affiliated with, endorsed by, or sponsored by** the makers of RealFlight, and
+it contains **no RealFlight software, assets, or source code**. It talks to RealFlight's
+published FlightAxis SOAP interface from the outside; the protocol knowledge here comes
+from ArduPilot's GPLv3 implementation (below), not from any RealFlight material. ArduPilot,
+the upstream this is ported from, carries no such notice in its own `SIM_FlightAxis`
+sources — this section is added out of courtesy, not obligation.
+
 ## Why GPLv3 and not BSD-3
 
 The bridge is not an independent implementation of the FlightAxis protocol. Its
