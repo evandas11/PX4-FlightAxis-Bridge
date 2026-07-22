@@ -900,9 +900,51 @@ int main(int argc, char **argv)
 		}
 	}
 
+	// Disarm spooldown. PX4 has no post-disarm actuator ramp: the instant the
+	// vehicle disarms, every channel snaps to its disarm value, cutting a heli's
+	// rotor throttle at once. PX4_FLIGHTAXIS_DISARM_SPOOLDOWN_S, set above zero,
+	// makes the bridge instead ramp each MOTOR channel (the unipolar rows) from
+	// the wire value it was last armed at down to its disarm value over that many
+	// seconds. Servos - the swash and tail on a heli - are untouched and go to
+	// their disarm value immediately, so only the rotor winds down slowly. Opt-in
+	// and OFF by default (0): a multirotor must never keep its motors turning
+	// after a disarm, so this is never active unless explicitly asked for.
+	double disarm_spooldown_s = 0.0;
+	if (const char *sd_env = ::getenv("PX4_FLIGHTAXIS_DISARM_SPOOLDOWN_S")) {
+		const double v = ::atof(sd_env);
+		if (v > 0.0) {
+			disarm_spooldown_s = v;
+		}
+	}
+	if (disarm_spooldown_s > 0.0) {
+		cerr << "[flightaxis_bridge] disarm spooldown: motor channels ramp to idle over "
+		     << disarm_spooldown_s << " s after disarm" << endl;
+	}
+	bool spd_was_armed = false;
+	uint64_t spd_start_us = 0;
+	uint64_t spd_end_us = 0;
+	double spd_captured[RF_CHANNELS] = {};
+
 	double last_position_x = 0.0, last_position_y = 0.0, last_position_z = 0.0;
 	double last_position_t = 0.0;
 	bool have_last_position = false;
+
+	// Reset detection is ARMED only after the vehicle has been armed once, and the
+	// reason is the whole point of restart-on-reset: it exists to hand EKF2 a clean
+	// slate after it has CONVERGED on a flight that no longer exists. Before the
+	// first arm there is no such flight - the estimator is still initialising - so a
+	// position or attitude discontinuity in that window is the spawn settle, not a
+	// respawn to recover from. A heli sits tall on a narrow skid stance, and after
+	// the startup ResetAircraft RealFlight settles it a few centimetres over the
+	// first frames; against the 5 mm floor that reads as a teleport and restarts PX4
+	// before the aircraft has ever flown - the "Broken pipe" flood on startup, and
+	// the coin-flip where it depends on whether the settle happens to straddle two
+	// sampled frames. A genuine mid-flight respawn always comes AFTER an arm, so it
+	// is still caught. Re-anchoring before the first arm is unnecessary too:
+	// VehicleState's offset_captured flag re-anchors on the next frame regardless.
+	// The latch is one-way - once armed, every later reset (armed or disarmed) is
+	// policed for the rest of the session.
+	bool armed_at_least_once = false;
 
 	// Previous-frame attitude, for the attitude-jump reset test alongside the
 	// position one. Identity quaternion until the first real frame fills it.
@@ -1127,6 +1169,56 @@ int main(int argc, char **argv)
 
 		buildChannels(vehicle, maps, nmaps, unmapped_default, options, channels, tx_channels);
 
+		// Disarm spooldown: ramp the motor channels down instead of letting them
+		// snap to their disarm value (see disarm_spooldown_s above). Operates on
+		// the final wire values in tx_channels, so it is correct whatever the
+		// option post-passes did, and is a no-op unless the variable is set.
+		if (disarm_spooldown_s > 0.0) {
+			const bool armed_now = vehicle.receivedFirstControls() && vehicle.armed();
+			const uint64_t sd_now_us = micros();
+
+			if (armed_now) {
+				// Track the live throttle each armed frame so the ramp starts
+				// from the value the rotor was actually turning at.
+				for (int i = 0; i < nmaps; i++) {
+					const ChannelMap &m = maps[i];
+					if (m.scale == 0 && m.rf >= 0 && m.rf < RF_CHANNELS) {
+						spd_captured[m.rf] = tx_channels[m.rf];
+					}
+				}
+				spd_end_us = 0;			// re-armed: abandon any ramp in flight
+
+			} else if (spd_was_armed) {
+				// armed -> disarmed edge: open the ramp window
+				spd_start_us = sd_now_us;
+				spd_end_us = sd_now_us + (uint64_t)(disarm_spooldown_s * 1e6);
+				cerr << "[flightaxis_bridge] disarm spooldown: ramping motor(s) to idle over "
+				     << disarm_spooldown_s << " s" << endl;
+			}
+
+			if (!armed_now && spd_end_us != 0) {
+				if (sd_now_us >= spd_end_us) {
+					spd_end_us = 0;		// window elapsed; disarm values stand
+
+				} else {
+					const double frac = (double)(sd_now_us - spd_start_us)
+							    / (double)(spd_end_us - spd_start_us);
+					const double ramp = constrain(1.0 - frac, 0.0, 1.0);	// 1 -> 0
+					for (int i = 0; i < nmaps; i++) {
+						const ChannelMap &m = maps[i];
+						if (m.scale != 0 || m.rf < 0 || m.rf >= RF_CHANNELS) {
+							continue;
+						}
+						const double target = constrain(m.disarm >= 0.0 ? m.disarm : 0.0, 0.0, 1.0);
+						const double from = spd_captured[m.rf];
+						tx_channels[m.rf] = constrain(target + (from - target) * ramp, 0.0, 1.0);
+					}
+				}
+			}
+
+			spd_was_armed = armed_now;
+		}
+
 		/*
 		 * PX4_FA_DUMP_CHANNELS=<hz>: print what is actually on the wire.
 		 *
@@ -1288,6 +1380,12 @@ int main(int argc, char **argv)
 			announced_first_controls = true;
 		}
 
+		// Latch the first arm. Gates the reset-driven restarts below so the startup
+		// spawn settle is never policed - see armed_at_least_once above.
+		if (vehicle.armed()) {
+			armed_at_least_once = true;
+		}
+
 		/*
 		 * TELEPORT DETECTION.
 		 *
@@ -1306,7 +1404,7 @@ int main(int argc, char **argv)
 		 * glitch compensator has just swallowed a long network stall and a
 		 * legitimate frame really does span two seconds of flight.
 		 */
-		if (have_last_position) {
+		if (have_last_position && armed_at_least_once) {
 			const double dx = state.m_aircraftPositionX_MTR - last_position_x;
 			const double dy = state.m_aircraftPositionY_MTR - last_position_y;
 			const double dz = state.m_altitudeASL_MTR - last_position_z;
@@ -1457,7 +1555,7 @@ int main(int argc, char **argv)
 			// the edge, so holding the flag low for many frames does not repeat
 			// it. PX4_FLIGHTAXIS_RESTART_ON_RESET=0 keeps re-anchor only, same as
 			// for the teleport path.
-			if (controller_dropped_edge || reset_flag_edge) {
+			if ((controller_dropped_edge || reset_flag_edge) && armed_at_least_once) {
 				vehicle.invalidatePositionOffset();
 				if (restart_on_teleport) {
 					cerr << "[flightaxis_bridge] "

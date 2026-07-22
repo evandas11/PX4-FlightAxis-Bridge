@@ -588,9 +588,10 @@ deliberately not enabled**; see "Who does the swash mixing" below.
 
 **RealFlight aircraft:** a collective-pitch heli wired **direct-servo, with its own CCPM
 mixing switched off** — three swash servos on channels 1–3, tail on 4, rotor speed
-controller on channel 8, each channel straight through to the matching servo. This is
-**ArduPilot's own heli channel order and its default (non-demixed) convention**, so a
-model already set up for an ArduPilot pilot needs no re-mapping.
+controller on channel 9, each channel straight through to the matching servo. The swash and
+tail order is **ArduPilot's own heli channel convention**; the rotor speed controller has been
+**moved off ArduPilot's default channel 8 to channel 9** to match a RealFlight model whose ESC
+is wired there (see the note under the table).
 
 | RF ch | PX4 | Drives | `PWM_MAIN_FUNC` | Scale | Disarm |
 |---|---|---|---|---|---|
@@ -598,12 +599,14 @@ model already set up for an ArduPilot pilot needs no re-mapping.
 | 1 | `controls[1]` | swash plate servo 2 | 2 = 203 Servo 3 | bipolar | **0.5** |
 | 2 | `controls[2]` | swash plate servo 3 | 3 = 204 Servo 4 | bipolar | **0.5** |
 | 3 | `controls[3]` | tail rotor pitch / yaw (Servo 1) | 4 = 201 Servo 1 | bipolar | **0.5** |
-| 4–6 | `controls[4..6]` | *unassigned* — steady 0.5 | 5–7 explicitly `0` | bipolar | 0.5 |
-| 7 | `controls[7]` | main rotor / RSC (Motor 1) | 8 = 101 Motor 1 | unipolar | **0.0** |
-| 8–11 | `controls[8..11]` | *unassigned* — steady 0.5 | 9–12 unset | bipolar | 0.5 |
+| 4–7 | `controls[4..7]` | *unassigned* — steady 0.5 | 5–8 explicitly `0` | bipolar | 0.5 |
+| 8 | `controls[8]` | main rotor / RSC (Motor 1) | 9 = 101 Motor 1 | unipolar | **0.0** |
+| 9–11 | `controls[9..11]` | *unassigned* — steady 0.5 | 10–12 unset | bipolar | 0.5 |
 
-RF ch5–7 stay idle to keep ArduPilot parity (below); they are mapped rows now, but with their
-FUNC at `0` they emit a steady neutral 0.5 exactly as before.
+RF ch5–8 stay idle (their FUNC is `0`, a steady neutral 0.5); the main rotor was moved from
+ch8 to **ch9**, so `heli.json` rf8 is `unipolar` disarm `0.0` (the motor) and rf7 reverts to
+`bipolar` disarm `0.5`. The scale column and the FUNC assignment must always agree — a Motor
+function needs `unipolar` disarm `0.0`, a servo or an unassigned channel needs `bipolar` `0.5`.
 
 That layout is taken from ArduPilot: `AP_MotorsHeli_Swash.cpp:201-202` defaults the three
 swash servos to `SERVO1/2/3` (`k_motor1/2/3` = 33/34/35), `AP_MotorsHeli_Single.cpp:207`
@@ -611,12 +614,13 @@ swash servos to `SERVO1/2/3` (`k_motor1/2/3` = 33/34/35), `AP_MotorsHeli_Single.
 `AP_MotorsHeli.h:34` (`#define AP_MOTORS_HELI_RSC CH_8`) puts the rotor speed controller on
 `SERVO8` (`k_heli_rsc` = 31). `SIM_FlightAxis.cpp` ships output channel N as RealFlight
 channel N unpermuted, so ArduPilot's RealFlight heli is swash on 1–3, tail on 4, throttle on
-8, with 5–7 idle — which is exactly the table above.
+8, with 5–7 idle. This model keeps the swash/tail order but **moves the throttle/RSC to
+channel 9**, so its rotor channel is the one difference from ArduPilot's layout above.
 
-Airframe side: `PWM_MAIN_FUNC1..4 = 202, 203, 204, 201` and `PWM_MAIN_FUNC8 = 101`
-(`FUNC5..7` explicitly 0) →
+Airframe side: `PWM_MAIN_FUNC1..4 = 202, 203, 204, 201` and `PWM_MAIN_FUNC9 = 101`
+(`FUNC5..8` explicitly 0) →
 `controls[0..2]`=Servos 2–4, the swash plate servos 1–3, `[3]`=Servo 1 yaw tail,
-`[7]`=Motor 1 main rotor. Note that the allocator's own numbering under `CA_AIRFRAME 11` is
+`[8]`=Motor 1 main rotor. Note that the allocator's own numbering under `CA_AIRFRAME 11` is
 unchanged by any of this — it is a property of the airframe type, and it still puts the main
 rotor first as Motor 1 = 101, then the yaw tail as Servo 1 = 201, then the swash as
 Servos 2–4 = 202–204. The FUNC list is what reorders those onto RealFlight's channels.
@@ -1336,6 +1340,40 @@ Set it to `0` if you would rather keep a session alive across a respawn and acce
 divergence described in §7 — which is a reasonable trade when you are debugging something that
 takes a while to reach and a respawn was incidental, and a poor one when you actually intend to
 keep flying afterwards.
+
+### 6.2 `PX4_FLIGHTAXIS_DISARM_SPOOLDOWN_S` (helicopter rotor wind-down)
+
+**Off by default.** PX4 has no post-disarm actuator ramp: the moment the vehicle disarms every
+channel snaps to its disarm value, which cuts a heli's rotor throttle instantly. Set this variable
+to a number of seconds and the bridge instead **ramps each motor channel** (the `unipolar` rows —
+`rf8` on the heli) from the throttle it was last armed at down to its disarm value over that time,
+so the rotor winds down gracefully. Servos — the swash and tail — are untouched and go to neutral
+(0.5) at once; only the rotor is ramped.
+
+```bash
+PX4_FLIGHTAXIS_DISARM_SPOOLDOWN_S=15 \
+PX4_FLIGHTAXIS_ROOTFS=~/sitl/PX4/Heli PX4_FLIGHTAXIS_IP=192.168.10.1 \
+make px4_sitl_nolockstep flightaxis_heli
+```
+
+On the disarm edge the bridge prints `disarm spooldown: ramping motor(s) to idle over 15 s`. If
+you re-arm during the window the ramp is abandoned and the live throttle takes over again.
+
+- **It is opt-in for a reason.** The ramp applies to *every* motor channel, so on a **multirotor**
+  it would keep the props turning for the whole window after a disarm — never set it there. It is
+  meant for the helicopter (and coaxial heli), where the single rotor channel is the only motor.
+- **It does not delay the disarm itself.** PX4 is already disarmed the instant you command it —
+  the estimator, logging and arming state all reflect that. Only the rotor channel on the wire to
+  RealFlight is ramped, so the model's rotor spins down instead of stopping dead. There is no PX4
+  parameter for this; the delay lives entirely in the bridge.
+- **Wind-down also happens for free without this.** Cutting the throttle to 0 lets RealFlight's
+  rotor autorotate down under its own inertia; this variable makes the *commanded* throttle trail
+  off smoothly on top of that, which matters if your model's governor cuts head speed hard at zero
+  throttle.
+
+For the alternative — cutting the rotor *before* you disarm while keeping the swash live — map an
+RC switch to PX4's engage-main-motor function (`RC_MAP_ENG_MOT`); that is the built-in heli path
+and needs a physical transmitter with `COM_RC_IN_MODE` allowing RC input.
 
 ---
 

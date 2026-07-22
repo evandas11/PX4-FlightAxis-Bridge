@@ -16,8 +16,8 @@
         {"rf": 4,  "px4": 4,  "scale": "bipolar",  "disarm": 0.5,  "comment": "unassigned                <- controls[4]  PWM_MAIN_FUNC5 = 0, set it to use"},
         {"rf": 5,  "px4": 5,  "scale": "bipolar",  "disarm": 0.5,  "comment": "unassigned                <- controls[5]  PWM_MAIN_FUNC6 = 0, set it to use"},
         {"rf": 6,  "px4": 6,  "scale": "bipolar",  "disarm": 0.5,  "comment": "unassigned                <- controls[6]  PWM_MAIN_FUNC7 = 0, set it to use"},
-        {"rf": 7,  "px4": 7,  "scale": "unipolar", "disarm": 0.0,  "comment": "main rotor RSC / throttle <- controls[7]  PWM_MAIN_FUNC8 = 101 Motor 1 (ArduPilot SERVO8 HeliRSC)"},
-        {"rf": 8,  "px4": 8,  "scale": "bipolar",  "disarm": 0.5,  "comment": "unassigned                <- controls[8]  set PWM_MAIN_FUNC9 to use"},
+        {"rf": 7,  "px4": 7,  "scale": "bipolar",  "disarm": 0.5,  "comment": "unassigned                <- controls[7]  PWM_MAIN_FUNC8 = 0 (main rotor moved to ch9), set it to use"},
+        {"rf": 8,  "px4": 8,  "scale": "unipolar", "disarm": 0.0,  "comment": "main rotor RSC / throttle <- controls[8]  PWM_MAIN_FUNC9 = 101 Motor 1 (moved here from ch8; not ArduPilot's SERVO8 default)"},
         {"rf": 9,  "px4": 9,  "scale": "bipolar",  "disarm": 0.5,  "comment": "unassigned                <- controls[9]  set PWM_MAIN_FUNC10 to use"},
         {"rf": 10, "px4": 10, "scale": "bipolar",  "disarm": 0.5,  "comment": "unassigned                <- controls[10] set PWM_MAIN_FUNC11 to use"},
         {"rf": 11, "px4": 11, "scale": "bipolar",  "disarm": 0.5,  "comment": "unassigned                <- controls[11] set PWM_MAIN_FUNC12 to use"}

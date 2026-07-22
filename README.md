@@ -20,6 +20,9 @@ caveats: **[ROS2.md](ROS2.md)**.
 
 Driving a real flight-controller board instead of SITL: **[HITL.md](HITL.md)**.
 
+Motor spin direction (CW/CCW) and reverse per airframe, for setting up the model in RealFlight
+against QGC: **[docs/realflight-px4-motor-mapping.md](docs/realflight-px4-motor-mapping.md)**.
+
 Full design rationale, frame conversions, and timing logic:
 [`FLIGHTAXIS_PX4_INTEGRATION.md`](FLIGHTAXIS_PX4_INTEGRATION.md) (the spec — §6/§7 follow the
 upstream FlightAxis implementation named in [COPYRIGHT.md](COPYRIGHT.md)).
@@ -657,6 +660,20 @@ a spacebar respawn. There are two signals instead, and either one triggers a res
    [flightaxis_bridge] aircraft teleported 92.3 m (RealFlight reset) - re-anchoring
    ```
 
+**Reset detection is armed only after the first arm.** Both signals above are ignored until PX4
+has been armed once in the session. The restart exists to hand EKF2 a clean slate after it has
+*converged* on a flight that no longer exists; before the first arm there is no such flight, so a
+position or attitude discontinuity in that window is the spawn settle, not a respawn. This matters
+in practice for the helicopter: it sits tall on a narrow skid stance, and after the startup
+`ResetAircraft` RealFlight settles it a few centimetres over the first frames. Against the 5 mm
+floor that read as a teleport and restarted PX4 *before the aircraft had ever flown* — a flood of
+`Failed sending mavlink message: Broken pipe` at startup, and worse, it was a coin-flip that
+depended on whether the settle happened to straddle two sampled frames (so the same command
+sometimes started cleanly and sometimes did not, and re-launching "fixed" it at random). Gating on
+the first arm removes that entirely: startup is always clean, and a genuine mid-flight respawn —
+which is always after an arm — is still caught. The latch is one-way; once armed, every later
+reset, armed or disarmed, is policed for the rest of the session.
+
 **What a respawn does regardless of this option.** The position anchor is re-captured, so PX4 is
 told the model is back at the point it entered the world. The heading datum is *not* re-derived
 — it is latched once per session, because it defines the frame every other quantity is expressed
@@ -720,6 +737,15 @@ the model does not use — fix that in RealFlight, or repoint `PWM_MAIN_FUNC<N>`
 
 Note that **while disarmed every mapped channel is pinned to its `disarm` value and ignores
 the sticks**, so surfaces not moving on the ground is expected, not a fault. Arm first.
+
+**Helicopter rotor spooldown on disarm.** By default disarm cuts the rotor throttle instantly —
+PX4 has no post-disarm ramp. Set `PX4_FLIGHTAXIS_DISARM_SPOOLDOWN_S=<seconds>` and the bridge
+ramps each motor channel (the `unipolar` rows — `rf8` on the heli) from its last armed throttle
+down to its disarm value over that time, so the rotor winds down gracefully; servos still go to
+neutral at once. It is **off by default and opt-in**, because on a multirotor it would keep every
+prop turning after a disarm — use it only on the heli. Full notes, and the alternative of cutting
+the rotor *before* disarm with an RC engage-main-motor switch (`RC_MAP_ENG_MOT`), are in
+[RUNNING.md §6.2](RUNNING.md).
 
 ## RealFlight setup
 

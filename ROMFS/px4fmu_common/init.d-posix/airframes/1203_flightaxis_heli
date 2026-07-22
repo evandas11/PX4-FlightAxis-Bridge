@@ -233,7 +233,7 @@ param set-default COM_DISARM_PRFLT -1
 #   controls[1] = 203 Servo 3     swash plate servo 2 [-1,1] -> heli.json rf1
 #   controls[2] = 204 Servo 4     swash plate servo 3 [-1,1] -> heli.json rf2
 #   controls[3] = 201 Servo 1     yaw tail servo      [-1,1] -> heli.json rf3
-#   controls[7] = 101 Motor 1     main rotor / RSC    [0,1]  -> heli.json rf7
+#   controls[8] = 101 Motor 1     main rotor / RSC    [0,1]  -> heli.json rf8  (moved from controls[7]/rf7)
 #
 # ARDUPILOT GROUND TRUTH for that order (all paths under libraries/):
 #   AP_Motors/AP_MotorsHeli_Swash.cpp:201-202  swash servos 1-3 default to
@@ -293,7 +293,15 @@ param set-default PWM_MAIN_FUNC4 201
 param set-default PWM_MAIN_FUNC5 0
 param set-default PWM_MAIN_FUNC6 0
 param set-default PWM_MAIN_FUNC7 0
-param set-default PWM_MAIN_FUNC8 101
+# Main rotor / RSC (Motor1 = 101) moved from ch8 to ch9 for a RealFlight model
+# that wires the rotor ESC on channel 9. This DEVIATES from ArduPilot's SERVO8
+# HeliRSC default documented above; the citations there still describe why ch8
+# is the default, not where the rotor is on this model. heli.json follows: rf8
+# is now unipolar disarm 0.0 (the motor), rf7 reverts to bipolar disarm 0.5
+# (unassigned). Keep the two in lock-step - the scale column MUST match whether a
+# Motor or a servo sits on the channel.
+param set-default PWM_MAIN_FUNC8 0
+param set-default PWM_MAIN_FUNC9 101
 
 # Swash plate geometry. CA_SP0_ANG<i> is measured clockwise seen from above,
 # 0 = forward (+X). ActuatorEffectivenessHelicopter.cpp:179-185 drives each
@@ -425,8 +433,8 @@ param set-default CA_HELI_YAW_CCW 0
 #   rf0 = swash servo 1 (at CA_SP0_ANG0 = 300 deg),
 #   rf1 = swash servo 2 (at CA_SP0_ANG1 =  60 deg),
 #   rf2 = swash servo 3 (at CA_SP0_ANG2 = 180 deg),
-#   rf3 = tail rotor pitch, rf7 = main rotor throttle / RSC.
-#   rf4, rf5, rf6 are unused and idle at 0.5.
+#   rf3 = tail rotor pitch, rf8 = main rotor throttle / RSC (moved from rf7).
+#   rf4, rf5, rf6, rf7 are unused and idle at 0.5.
 # (With HeliDemix enabled instead, rf0-2 revert to roll / pitch / collective.)
 # This is ArduPilot's own RealFlight heli channel order (see the ground-truth
 # citations above), so a model configured for ArduPilot needs no re-mapping.

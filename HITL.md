@@ -482,12 +482,14 @@ motors) and the other three do.
 mirroring `1202_flightaxis_quadplane`. `FUNC10..12` are unset, so RealFlight ch10–12 sit at a
 steady neutral 0.5 until you assign something to them.
 
-**Heli** (`CA_AIRFRAME 11`): `HIL_ACT_FUNC1..4` = 202, 203, 204, 201 and `HIL_ACT_FUNC8` = 101,
-with `FUNC5..7` explicitly 0 — swash servos 1–3 on `controls[0..2]`, yaw tail on `[3]`, main
-rotor on `[7]` — mirroring `1203_flightaxis_heli`. That is ArduPilot's own heli channel order
-(`AP_MotorsHeli_Swash.cpp:201-202` swash → `SERVO1/2/3`, `AP_MotorsHeli_Single.cpp:207` tail →
-`SERVO4`, `AP_MotorsHeli.h:34` RSC → `SERVO8`), so a RealFlight heli model already set up for
-ArduPilot needs no re-mapping; RealFlight channels 5–7 stay idle at 0.5 in both. As in SITL,
+**Heli** (`CA_AIRFRAME 11`): `HIL_ACT_FUNC1..4` = 202, 203, 204, 201 and `HIL_ACT_FUNC9` = 101,
+with `FUNC5..8` explicitly 0 — swash servos 1–3 on `controls[0..2]`, yaw tail on `[3]`, main
+rotor on `[8]` — mirroring `1203_flightaxis_heli`. The swash/tail order is ArduPilot's own heli
+channel order (`AP_MotorsHeli_Swash.cpp:201-202` swash → `SERVO1/2/3`,
+`AP_MotorsHeli_Single.cpp:207` tail → `SERVO4`, `AP_MotorsHeli.h:34` RSC → `SERVO8`), but the
+**RSC has been moved off ArduPilot's channel 8 to channel 9** to match a model whose ESC is
+wired there — so `heli.json` rf8 is the motor (`unipolar` disarm 0.0) and rf7 is unassigned.
+RealFlight channels 5–8 stay idle at 0.5 in both. As in SITL,
 PX4 does the CCPM mix and the bridge ships the three swash **servo positions** untouched —
 `HeliDemix` is **off** in `heli.json` — so the RealFlight model must be wired non-mixed /
 direct-servo. That choice is made bridge-side in the model JSON and needs no board parameter.
