@@ -153,6 +153,21 @@ PX4_DIR=/path/to/PX4-Autopilot ./install.sh
 ./install.sh --help
 ```
 
+**Running it from inside your PX4 tree.** If the repo lives elsewhere (say your home
+directory) and you would rather not spell out the target, `cd` into the PX4 checkout first
+and call the installer by its path — auto-detection's first tier picks up the enclosing
+tree, so no argument is needed:
+
+```bash
+cd ~/PX4-Autopilot                     # the tree you want to install into
+~/PX4-FlightAxis-Bridge/install.sh     # call the repo's installer by its path
+```
+
+This is the shortest form when you have a single checkout. With more than one, prefer the
+explicit `./install.sh /path/to/PX4-Autopilot` (or `$PX4_DIR`) above, so there is no chance
+of the wrong tree being chosen. Either way the resolved target is printed before anything
+is written, so you can Ctrl-C if it is not the one you meant.
+
 **Which PX4 tree does it pick?** The first hit wins, and the choice is always printed
 (path, version, and how it was found) before anything is written:
 
