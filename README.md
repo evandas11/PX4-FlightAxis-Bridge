@@ -1,5 +1,7 @@
 # PX4-FlightAxis-Bridge
 
+[![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](LICENSE)
+
 **RealFlight (FlightAxis Link) as a PX4 SITL simulator** — integrated the way PX4's in-tree
 simulator bridges are: files live in the PX4 tree, get compiled by the PX4 make system, and
 launch with one `make` command.
